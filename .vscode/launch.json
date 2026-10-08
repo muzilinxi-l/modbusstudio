@@ -1,0 +1,37 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: 启动 Modbus Studio (GUI 双模式客户端/从机)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/modbus_studio.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: 启动 Modbus Slave (命令行模拟器)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/modbus_slave.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: 运行 Modbus Master (命令行客户端)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/modbus_master.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Python: 运行当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
