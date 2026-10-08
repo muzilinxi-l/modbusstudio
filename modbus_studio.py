@@ -15,6 +15,7 @@
 """
 
 import csv
+import ctypes
 import json
 import logging
 import math
@@ -25,6 +26,8 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Dict, List, Optional, Tuple
+
+from PIL import Image, ImageTk
 
 from hems_db_loader import HemsAppModel, HemsDatabase
 from hems_pairing import HemsPairingEngine, PairingRule
@@ -71,18 +74,33 @@ class ModbusStudioApp:
         self.root.geometry("1180x800")
         self.root.minsize(980, 620)
 
-        # 窗口图标
+        # 窗口图标与任务栏图标双重绑定 (彻底规避 Windows 任务栏退化为默认羽毛图标)
         icon_path = get_resource_path("app.ico")
         if os.path.exists(icon_path):
             try:
                 self.root.iconbitmap(icon_path)
             except Exception as e:
-                logger.warning(f"设置窗口图标失败: {e}")
+                logger.debug(f"设置窗口 iconbitmap 失败: {e}")
+            try:
+                img = Image.open(icon_path)
+                self._app_icon_photo = ImageTk.PhotoImage(img)
+                self.root.iconphoto(True, self._app_icon_photo)
+            except Exception as e:
+                logger.debug(f"设置窗口 iconphoto 失败: {e}")
 
         # 多从机服务实例管理 (支持监听不同 IP 和端口号)
         self.slave_instances: Dict[str, SlaveServiceInstance] = {}
         # 通信与系统日志结构化存储列表 (用于 CSV 导出)
         self.log_records: List[Dict[str, str]] = []
+
+        # 实时自动日志落盘 (按日期滚动写入 logs 目录，带缓冲区 flush 保证断电/崩溃不丢数据)
+        self.log_dir = "logs"
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.runtime_csv_file = os.path.join(
+            self.log_dir, f"modbus_runtime_{time.strftime('%Y%m%d')}.csv"
+        )
+        self._csv_lock = threading.Lock()
+        self._init_runtime_csv()
 
         default_inst = SlaveServiceInstance("默认从机服务 (5020)", "0.0.0.0", 5020, 1)
         self._register_slave_instance(default_inst)
@@ -159,6 +177,7 @@ class ModbusStudioApp:
         ttk.Button(log_tools, text="🔲 全选", width=6, command=self._select_all_log).pack(side=tk.LEFT, padx=2)
         ttk.Button(log_tools, text="🧹 清空", width=6, command=self._clear_log).pack(side=tk.LEFT, padx=2)
         ttk.Button(log_tools, text="💾 导出CSV", width=9, command=self._export_log_to_csv).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="📂 打开日志目录", width=12, command=self._open_log_dir).pack(side=tk.LEFT, padx=2)
 
         self.log_autoscroll_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(log_tools, text="自动滚屏", variable=self.log_autoscroll_var).pack(side=tk.LEFT, padx=(10, 4))
@@ -213,6 +232,7 @@ class ModbusStudioApp:
         self.log_menu.add_command(label="🧹 清空日志", command=self._clear_log)
         self.log_menu.add_separator()
         self.log_menu.add_command(label="💾 导出为 CSV 文件...", command=self._export_log_to_csv)
+        self.log_menu.add_command(label="📂 打开本地实时日志目录...", command=self._open_log_dir)
 
         def _popup_menu(event):
             try:
@@ -247,11 +267,60 @@ class ModbusStudioApp:
         self.log_text.mark_set(tk.INSERT, tk.END)
         return "break"
 
+    def _init_runtime_csv(self):
+        """初始化后台实时追加落盘 CSV 文件 (按天滚动，UTF-8-BOM)."""
+        try:
+            with self._csv_lock:
+                if not os.path.exists(self.runtime_csv_file) or os.path.getsize(self.runtime_csv_file) == 0:
+                    with open(self.runtime_csv_file, "w", newline="", encoding="utf-8-sig") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["序号", "时间戳", "方向", "日志级别", "报文与详情内容"])
+        except Exception as e:
+            logger.debug(f"初始化实时 CSV 日志失败: {e}")
+
+    def _append_runtime_csv(self, rec: Dict[str, str]):
+        """线程安全地向本地 CSV 追加一条实时日志，带自动 flush 保证异常断电不丢日志."""
+        try:
+            with self._csv_lock:
+                # 检查跨天按日期切换文件
+                today_file = os.path.join(self.log_dir, f"modbus_runtime_{time.strftime('%Y%m%d')}.csv")
+                if today_file != self.runtime_csv_file:
+                    self.runtime_csv_file = today_file
+
+                file_exists = os.path.exists(self.runtime_csv_file) and os.path.getsize(self.runtime_csv_file) > 0
+                with open(self.runtime_csv_file, "a", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f)
+                    if not file_exists:
+                        writer.writerow(["序号", "时间戳", "方向", "日志级别", "报文与详情内容"])
+                    writer.writerow([
+                        len(self.log_records),
+                        rec.get("time", ""),
+                        rec.get("direction", ""),
+                        rec.get("type", ""),
+                        rec.get("message", ""),
+                    ])
+                    f.flush()
+        except Exception as e:
+            logger.debug(f"实时写入 CSV 日志失败: {e}")
+
+    def _open_log_dir(self):
+        """打开本地实时日志目录."""
+        os.makedirs(self.log_dir, exist_ok=True)
+        abs_path = os.path.abspath(self.log_dir)
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(abs_path)
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", abs_path])
+        except Exception as e:
+            messagebox.showinfo("日志目录", f"本地实时日志目录路径：\n{abs_path}")
+
     def _clear_log(self):
         self.log_text.delete("1.0", tk.END)
 
     def _export_log_to_csv(self):
-        """将通信报文与系统日志导出保存为标准 CSV 文件 (包含时间、方向 RX/TX、报文及详情)."""
+        """将通信报文与系统日志手动导出保存为指定的 CSV 文件 (包含时间、方向 RX/TX、报文及详情)."""
         if not self.log_records:
             messagebox.showinfo("提示", "当前没有可导出的日志记录！")
             return
@@ -281,12 +350,12 @@ class ModbusStudioApp:
                     ])
 
             messagebox.showinfo("导出成功", f"日志已成功导出至：\n{file_path}\n共导出 {len(self.log_records)} 条记录！")
-            self.log(f"已导出 {len(self.log_records)} 条日志到 CSV: {file_path}")
+            self.log(f"已手动导出 {len(self.log_records)} 条日志到 CSV: {file_path}")
         except Exception as e:
             messagebox.showerror("导出失败", f"写入 CSV 文件失败: {e}")
 
     def log(self, msg: str, level: str = "INFO"):
-        """向底部输出带颜色标签的时间戳日志并记录到 CSV 缓存中."""
+        """向底部输出带颜色标签的时间戳日志，记录内存缓存并自动实时追加落盘到本地 CSV."""
         now_dt = time.strftime("%Y-%m-%d %H:%M:%S")
         now_time = time.strftime("%H:%M:%S")
 
@@ -305,6 +374,9 @@ class ModbusStudioApp:
         self.log_records.append(rec)
         if len(self.log_records) > 20000:
             self.log_records.pop(0)
+
+        # 实时自动追加写入本地 CSV 文件 (保证异常断电/崩溃不丢数据)
+        self._append_runtime_csv(rec)
 
         if (level in ("TX", "RX")) and hasattr(self, "log_show_packets_var") and not self.log_show_packets_var.get():
             return
@@ -2007,6 +2079,14 @@ class ModbusStudioApp:
 
 
 def main():
+    # 注册 Windows 专属 AppUserModelID (彻底解决任务栏退化显示默认蓝色羽毛图标的系统机制)
+    if sys.platform.startswith("win"):
+        try:
+            myappid = "muzilinxi.modbusstudio.workstation.v1"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
     root = tk.Tk()
     app = ModbusStudioApp(root)
 
