@@ -57,8 +57,27 @@ def map_db_format_to_byte_order(fmt_str: Optional[Any], default_mode: ByteOrderM
     return default_mode
 
 
+SERIAL_PORT_NAMES = {
+    0: "Invalid (无效)",
+    1: "RS-485(A1/B1)",
+    2: "RS-485(A2/B2)",
+    3: "RS-485(A3/B3)",
+    4: "RS-485(A4/B4)",
+    5: "RS-485(A5/B5)",
+    6: "RS-485(A6/B6)",
+    7: "RS-485(A7/B7)",
+}
+
+SERIAL_PARITY_NAMES = {
+    0: "N",
+    1: "N",  # None
+    2: "O",  # Odd
+    3: "E",  # Even
+}
+
+
 class HemsAppModel:
-    """代表 app 表中的一个 Modbus 设备模型."""
+    """代表 app 表中的一个 Modbus 设备模型 (支持以太网 TCP 与 串行端口 RTU 485/232)."""
 
     def __init__(
         self,
@@ -90,8 +109,51 @@ class HemsAppModel:
         )
         self.orders: List[Dict[str, Any]] = raw_more.get("Local Orders", [])
 
-        # 解析与提取 IP、端口
+        # 解析通信方式与网络/串口参数
+        self.comm_type, self.serial_info = self._parse_comm_mode()
         self.ip, self.port = self._parse_network_address()
+
+    def _parse_comm_mode(self) -> Tuple[str, Dict[str, Any]]:
+        """从 Local Parameters 中解析通信类型与串口参数."""
+        port_type = str(self.local_params.get("Port Type", "1")).strip()
+        serial_port_idx = self.local_params.get("Serial Port")
+
+        is_serial = (port_type == "2") or (serial_port_idx is not None and str(serial_port_idx) not in ("0", ""))
+
+        if is_serial:
+            try:
+                idx = int(str(serial_port_idx))
+            except Exception:
+                idx = 1
+            port_name = SERIAL_PORT_NAMES.get(idx, f"RS-485_{idx}")
+            try:
+                baud = int(str(self.local_params.get("Serial Baudrate", 9600) or 9600))
+            except Exception:
+                baud = 9600
+            try:
+                databit = int(str(self.local_params.get("Serial Databit", 8) or 8))
+            except Exception:
+                databit = 8
+            parity_val = self.local_params.get("Serial Parity", 1)
+            try:
+                parity_code = SERIAL_PARITY_NAMES.get(int(str(parity_val)), "N")
+            except Exception:
+                parity_code = "N"
+            try:
+                stopbit = int(float(str(self.local_params.get("Serial Stopbit", 1) or 1)))
+            except Exception:
+                stopbit = 1
+
+            return "RTU", {
+                "port_name": port_name,
+                "port_idx": idx,
+                "baudrate": baud,
+                "databit": databit,
+                "parity": parity_code,
+                "stopbit": stopbit,
+            }
+
+        return "TCP", {}
 
     def _parse_network_address(self) -> Tuple[str, int]:
         """解析当前应用配置的 IP 与端口号，保证不同设备可分配独立端口."""
@@ -153,7 +215,11 @@ class HemsAppModel:
     @property
     def display_name(self) -> str:
         tag = "南向采集" if self.is_south_master else "北向从机" if self.is_north_slave else "策略模块"
-        return f"[{tag}] ID {self.app_id:3d} : {self.english_name} ({self.chinese_name}) [{self.ip}:{self.port}]"
+        if self.comm_type == "RTU":
+            comm_desc = f"🔌串口 [{self.serial_info['port_name']}] {self.serial_info['baudrate']},{self.serial_info['databit']}-{self.serial_info['parity']}-{self.serial_info['stopbit']}"
+        else:
+            comm_desc = f"🌐网口 [{self.ip}:{self.port}]"
+        return f"[{tag}] ID {self.app_id:3d} : {self.english_name} ({self.chinese_name}) [{comm_desc}]"
 
     def extract_studio_points(self) -> List[Dict[str, Any]]:
         """将当前设备的业务点位转换为 Modbus Studio 点位列表."""

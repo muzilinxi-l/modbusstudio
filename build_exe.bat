@@ -15,12 +15,7 @@ if exist ".venv\Scripts\pyinstaller.exe" (
 )
 
 echo [1/3] 开始编译打包 (单文件模式，隐藏黑色控制台窗口)...
-%PYINSTALLER% --noconfirm --clean --onefile --windowed ^
-    --name "ModbusStudio" ^
-    --icon "app.ico" ^
-    --add-data "app.ico;." ^
-    --collect-all "pymodbus" ^
-    modbus_studio.py
+%PYINSTALLER% --noconfirm --clean --onefile --windowed --name "ModbusStudio" --icon "app.ico" --add-data "app.ico;." --collect-all "pymodbus" modbus_studio.py
 
 if %ERRORLEVEL% NEQ 0 (
     echo.

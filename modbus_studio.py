@@ -55,16 +55,72 @@ def get_resource_path(relative_path: str) -> str:
     return os.path.join(base_dir, relative_path)
 
 
-class SlaveServiceInstance:
-    """代表一个独立的 Modbus Slave 从机服务实例 (拥有独立的监听 IP, 端口, 站号与点表)."""
+def get_available_com_ports() -> List[str]:
+    """获取当前系统所有物理和虚拟 COM 端口列表 (包含 USB 转串口与 com0com/MOXA 虚拟串口)."""
+    try:
+        import serial.tools.list_ports
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        if not ports:
+            return [f"COM{i}" for i in range(1, 9)]
+        return ports
+    except Exception:
+        return [f"COM{i}" for i in range(1, 9)]
 
-    def __init__(self, name: str, host: str = "0.0.0.0", port: int = 5020, slave_id: int = 1):
+
+AVAILABLE_BAUDRATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200]
+AVAILABLE_PARITIES = ["N (无校验)", "O (奇校验)", "E (偶校验)"]
+SERIAL_BUS_NAMES = [
+    "RS-485(A1/B1)",
+    "RS-485(A2/B2)",
+    "RS-485(A3/B3)",
+    "RS-485(A4/B4)",
+    "RS-485(A5/B5)",
+    "RS-485(A6/B6)",
+    "RS-485(A7/B7)",
+    "RS-232",
+]
+
+
+class SlaveServiceInstance:
+    """代表一个独立的 Modbus Slave 从机服务实例 (支持以太网 TCP 与 串行端口 RTU 485/232 独立监听)."""
+
+    def __init__(
+        self,
+        name: str,
+        host: str = "0.0.0.0",
+        port: int = 5020,
+        slave_id: int = 1,
+        comm_type: str = "TCP",
+        serial_port: str = "COM1",
+        baudrate: int = 9600,
+        bytesize: int = 8,
+        parity: str = "N",
+        stopbits: int = 1,
+        serial_bus_label: str = "RS-485(A1/B1)",
+    ):
         self.name = name
+        self.comm_type = comm_type.upper()  # "TCP" 或 "RTU"
         self.host = host
         self.port = port
         self.slave_id = slave_id
-        self.engine = ModbusSlaveEngine(host=host, port=port)
-        self.engine.slave_id = slave_id
+        self.serial_port = serial_port
+        self.baudrate = baudrate
+        self.bytesize = bytesize
+        self.parity = parity
+        self.stopbits = stopbits
+        self.serial_bus_label = serial_bus_label
+
+        self.engine = ModbusSlaveEngine(
+            comm_type=self.comm_type,
+            host=host,
+            port=port,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            bytesize=bytesize,
+            parity=parity,
+            stopbits=stopbits,
+            slave_id=slave_id,
+        )
 
 
 class ModbusStudioApp:
@@ -390,7 +446,7 @@ class ModbusStudioApp:
     # =================================================================
     def _build_slave_tab(self, parent: ttk.Frame):
         # 1. 顶部控制栏
-        top_bar = ttk.LabelFrame(parent, text=" 从机服务实例与连接配置 (支持多实例独立监听不同 IP:Port) ")
+        top_bar = ttk.LabelFrame(parent, text=" 从机服务实例与连接配置 (支持多实例独立监听不同 IP:Port 或 COM 串口) ")
         top_bar.pack(fill=tk.X, padx=6, pady=3)
 
         # 第 0 行：服务实例选择与业务数据库操作
@@ -426,27 +482,118 @@ class ModbusStudioApp:
         )
         btn_pairing.grid(row=0, column=8, padx=3, pady=3)
 
-        # 第 1 行：网络配置、当前服务启动/停止、全部启动/停止
-        ttk.Label(top_bar, text="监听 IP:").grid(row=1, column=0, padx=4, pady=3, sticky=tk.W)
+        # 第 1 行：通讯方式单选 + 动态参数容器 + 启停操作
+        cfg_row = ttk.Frame(top_bar)
+        cfg_row.grid(row=1, column=0, columnspan=10, sticky="ew", padx=2, pady=3)
+
+        ttk.Label(cfg_row, text="通讯方式:").pack(side=tk.LEFT, padx=(4, 2))
+        self.slave_comm_type_var = tk.StringVar(value="TCP")
+        ttk.Radiobutton(
+            cfg_row,
+            text="以太网 (TCP)",
+            value="TCP",
+            variable=self.slave_comm_type_var,
+            command=self._on_slave_comm_type_change,
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            cfg_row,
+            text="串行端口 (RTU / 485 / 232)",
+            value="RTU",
+            variable=self.slave_comm_type_var,
+            command=self._on_slave_comm_type_change,
+        ).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(cfg_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+
+        # TCP 参数子容器
+        self.slave_tcp_frame = ttk.Frame(cfg_row)
+        ttk.Label(self.slave_tcp_frame, text="监听 IP:").pack(side=tk.LEFT, padx=(2, 2))
         self.slave_ip_var = tk.StringVar(value="0.0.0.0")
-        ttk.Entry(top_bar, textvariable=self.slave_ip_var, width=12).grid(row=1, column=1, padx=4, pady=3, sticky=tk.W)
+        ttk.Entry(self.slave_tcp_frame, textvariable=self.slave_ip_var, width=11).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(top_bar, text="端口:").grid(row=1, column=2, padx=4, pady=3, sticky=tk.W)
+        ttk.Label(self.slave_tcp_frame, text="端口:").pack(side=tk.LEFT, padx=(6, 2))
         self.slave_port_var = tk.IntVar(value=5020)
-        ttk.Entry(top_bar, textvariable=self.slave_port_var, width=7).grid(row=1, column=3, padx=4, pady=3, sticky=tk.W)
+        ttk.Entry(self.slave_tcp_frame, textvariable=self.slave_port_var, width=6).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(top_bar, text="从机 ID:").grid(row=1, column=4, padx=4, pady=3, sticky=tk.W)
+        # RTU 参数子容器
+        self.slave_rtu_frame = ttk.Frame(cfg_row)
+        ttk.Label(self.slave_rtu_frame, text="串口 (COM):").pack(side=tk.LEFT, padx=(2, 2))
+        self.slave_serial_port_var = tk.StringVar(value="COM1")
+        self.slave_com_combo = ttk.Combobox(
+            self.slave_rtu_frame,
+            textvariable=self.slave_serial_port_var,
+            width=8,
+            values=get_available_com_ports(),
+        )
+        self.slave_com_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Button(
+            self.slave_rtu_frame,
+            text="🔄",
+            width=3,
+            command=self._refresh_slave_com_ports,
+        ).pack(side=tk.LEFT, padx=1)
+
+        ttk.Label(self.slave_rtu_frame, text="总线:").pack(side=tk.LEFT, padx=(6, 2))
+        self.slave_bus_label_var = tk.StringVar(value="RS-485(A1/B1)")
+        self.slave_bus_combo = ttk.Combobox(
+            self.slave_rtu_frame,
+            textvariable=self.slave_bus_label_var,
+            width=14,
+            values=SERIAL_BUS_NAMES,
+        )
+        self.slave_bus_combo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(self.slave_rtu_frame, text="波特率:").pack(side=tk.LEFT, padx=(6, 2))
+        self.slave_baud_var = tk.IntVar(value=9600)
+        self.slave_baud_combo = ttk.Combobox(
+            self.slave_rtu_frame,
+            textvariable=self.slave_baud_var,
+            width=7,
+            state="readonly",
+            values=AVAILABLE_BAUDRATES,
+        )
+        self.slave_baud_combo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(self.slave_rtu_frame, text="校验:").pack(side=tk.LEFT, padx=(6, 2))
+        self.slave_parity_var = tk.StringVar(value="N (无校验)")
+        self.slave_parity_combo = ttk.Combobox(
+            self.slave_rtu_frame,
+            textvariable=self.slave_parity_var,
+            width=10,
+            state="readonly",
+            values=AVAILABLE_PARITIES,
+        )
+        self.slave_parity_combo.pack(side=tk.LEFT, padx=2)
+
+        # 默认先打包 TCP 容器
+        self.slave_tcp_frame.pack(side=tk.LEFT)
+
+        # 公共参数：从机 ID
+        self.slave_common_frame = ttk.Frame(cfg_row)
+        self.slave_common_frame.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(self.slave_common_frame, text="从机 ID:").pack(side=tk.LEFT, padx=(2, 2))
         self.slave_id_var = tk.IntVar(value=1)
-        ttk.Entry(top_bar, textvariable=self.slave_id_var, width=5).grid(row=1, column=4, padx=55, pady=3, sticky=tk.W)
+        ttk.Entry(self.slave_common_frame, textvariable=self.slave_id_var, width=4).pack(side=tk.LEFT, padx=2)
 
-        self.btn_slave_start = ttk.Button(top_bar, text="▶ 启动当前服务", command=self._toggle_slave_server)
-        self.btn_slave_start.grid(row=1, column=6, padx=4, pady=3)
+        # 右侧操作按钮
+        action_box = ttk.Frame(cfg_row)
+        action_box.pack(side=tk.RIGHT, padx=4)
 
-        self.slave_status_lbl = ttk.Label(top_bar, text="状态: 已停止 🔴", font=("Microsoft YaHei", 9, "bold"), foreground="red")
-        self.slave_status_lbl.grid(row=1, column=7, padx=4, pady=3)
-
-        ttk.Button(top_bar, text="⚡ 全部启动", command=self._start_all_slaves).grid(row=1, column=8, padx=2, pady=3)
-        ttk.Button(top_bar, text="⏹ 全部停止", command=self._stop_all_slaves).grid(row=1, column=9, padx=2, pady=3)
+        ttk.Button(action_box, text="⏹ 全部停止", command=self._stop_all_slaves).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(action_box, text="⚡ 全部启动", command=self._start_all_slaves).pack(side=tk.RIGHT, padx=2)
+        self.slave_status_lbl = ttk.Label(
+            action_box,
+            text="状态: 已停止 🔴",
+            font=("Microsoft YaHei", 9, "bold"),
+            foreground="red",
+        )
+        self.slave_status_lbl.pack(side=tk.RIGHT, padx=6)
+        self.btn_slave_start = ttk.Button(
+            action_box,
+            text="▶ 启动当前服务",
+            command=self._toggle_slave_server,
+        )
+        self.btn_slave_start.pack(side=tk.RIGHT, padx=2)
 
         # 2. 批量生成与单个添加控制栏
         point_ctrl_bar = ttk.LabelFrame(parent, text=" 点位规则生成 & 快捷操作 ")
@@ -602,64 +749,144 @@ class ModbusStudioApp:
             self.slave_inst_combo.set(self.current_slave_name)
         self._on_switch_slave_instance()
 
+    def _on_slave_comm_type_change(self):
+        """用户切换当前从机通讯方式单选框."""
+        c_type = self.slave_comm_type_var.get()
+        if self.current_slave_name in self.slave_instances:
+            self.current_slave_inst.comm_type = c_type
+        self._update_slave_conn_mode_ui()
+        self._update_slave_status_ui()
+
+    def _update_slave_conn_mode_ui(self):
+        """根据当前从机通讯方式切换输入框容器."""
+        c_type = self.slave_comm_type_var.get()
+        if c_type == "RTU":
+            self.slave_tcp_frame.pack_forget()
+            self.slave_rtu_frame.pack(side=tk.LEFT, before=self.slave_common_frame)
+        else:
+            self.slave_rtu_frame.pack_forget()
+            self.slave_tcp_frame.pack(side=tk.LEFT, before=self.slave_common_frame)
+
+    def _refresh_slave_com_ports(self):
+        """刷新从机串口端口列表."""
+        ports = get_available_com_ports()
+        self.slave_com_combo["values"] = ports
+        if ports and self.slave_serial_port_var.get() not in ports:
+            self.slave_serial_port_var.set(ports[0])
+
     def _on_switch_slave_instance(self, event=None):
         """切换当前激活的从机服务实例."""
         target_name = self.slave_inst_combo.get()
         if target_name in self.slave_instances:
             self.current_slave_name = target_name
             inst = self.current_slave_inst
+            self.slave_comm_type_var.set(inst.comm_type)
             self.slave_ip_var.set(inst.host)
             self.slave_port_var.set(inst.port)
+            self.slave_serial_port_var.set(inst.serial_port)
+            self.slave_bus_label_var.set(inst.serial_bus_label)
+            self.slave_baud_var.set(inst.baudrate)
+            p_display = "无校验 (None, N)" if inst.parity == "N" else ("奇校验 (Odd, O)" if inst.parity == "O" else "偶校验 (Even, E)")
+            self.slave_parity_var.set(p_display)
             self.slave_id_var.set(inst.slave_id)
+            self._update_slave_conn_mode_ui()
             self._update_slave_status_ui()
             self._refresh_slave_tree()
 
     def _update_slave_status_ui(self):
         """更新当前从机服务的 UI 状态显示."""
         inst = self.current_slave_inst
+        if inst.comm_type == "RTU":
+            loc_str = f"RTU {inst.serial_port} [{inst.serial_bus_label}]"
+        else:
+            loc_str = f"TCP {inst.host}:{inst.port}"
+
         if inst.engine.is_running:
             self.slave_status_lbl.config(
-                text=f"运行中 🟢 ({inst.host}:{inst.port})",
+                text=f"运行中 🟢 ({loc_str})",
                 foreground="green",
             )
             self.btn_slave_start.config(text="⏹ 停止服务")
         else:
             self.slave_status_lbl.config(
-                text=f"已停止 🔴 ({inst.host}:{inst.port})",
+                text=f"已停止 🔴 ({loc_str})",
                 foreground="red",
             )
             self.btn_slave_start.config(text="▶ 启动当前服务")
 
     def _add_new_slave_instance(self):
-        """弹出窗口手动新建一个独立监听的从机服务实例."""
+        """弹出窗口手动新建一个独立监听的从机服务实例 (支持 TCP / RTU 串口)."""
         dlg = tk.Toplevel(self.root)
         dlg.title("新建独立 Modbus Slave 服务实例")
-        dlg.geometry("380x260")
+        dlg.geometry("420x330")
         dlg.transient(self.root)
         dlg.grab_set()
 
         form = ttk.Frame(dlg, padding=15)
         form.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(form, text="服务实例名称:").grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text="服务实例名称:").grid(row=0, column=0, sticky=tk.W, pady=4)
         name_var = tk.StringVar(value=f"从机服务_{len(self.slave_instances)+1}")
-        ttk.Entry(form, textvariable=name_var, width=22).grid(row=0, column=1, pady=6)
+        ttk.Entry(form, textvariable=name_var, width=24).grid(row=0, column=1, pady=4)
 
-        ttk.Label(form, text="监听 IP 地址:").grid(row=1, column=0, sticky=tk.W, pady=6)
-        ip_var = tk.StringVar(value="127.0.0.1")
-        ttk.Entry(form, textvariable=ip_var, width=22).grid(row=1, column=1, pady=6)
+        ttk.Label(form, text="通讯协议方式:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        ctype_var = tk.StringVar(value="TCP")
+        ct_row = ttk.Frame(form)
+        ct_row.grid(row=1, column=1, sticky=tk.W, pady=4)
+        ttk.Radiobutton(ct_row, text="以太网 TCP", value="TCP", variable=ctype_var).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Radiobutton(ct_row, text="串行端口 RTU", value="RTU", variable=ctype_var).pack(side=tk.LEFT)
 
-        ttk.Label(form, text="监听端口号:").grid(row=2, column=0, sticky=tk.W, pady=6)
-        used_ports = [inst.port for inst in self.slave_instances.values()]
+        # 动态容器
+        dyn_frame = ttk.Frame(form)
+        dyn_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=4)
+
+        tcp_box = ttk.Frame(dyn_frame)
+        ttk.Label(tcp_box, text="监听 IP 地址:").grid(row=0, column=0, sticky=tk.W, pady=4)
+        ip_var = tk.StringVar(value="0.0.0.0")
+        ttk.Entry(tcp_box, textvariable=ip_var, width=24).grid(row=0, column=1, pady=4)
+
+        ttk.Label(tcp_box, text="监听端口号:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        used_ports = [inst.port for inst in self.slave_instances.values() if inst.comm_type == "TCP"]
         suggested_port = 5020 + len(self.slave_instances)
         while suggested_port in used_ports:
             suggested_port += 1
         port_var = tk.IntVar(value=suggested_port)
-        ttk.Entry(form, textvariable=port_var, width=22).grid(row=2, column=1, pady=6)
+        ttk.Entry(tcp_box, textvariable=port_var, width=24).grid(row=1, column=1, pady=4)
 
-        ttk.Label(form, text="从机站号 (Unit ID):").grid(row=3, column=0, sticky=tk.W, pady=6)
-        sid_var = tk.IntVar(value=len(self.slave_instances)+1)
-        ttk.Entry(form, textvariable=sid_var, width=22).grid(row=3, column=1, pady=6)
+        rtu_box = ttk.Frame(dyn_frame)
+        ttk.Label(rtu_box, text="串口端口 (COM):").grid(row=0, column=0, sticky=tk.W, pady=4)
+        c_ports = get_available_com_ports()
+        default_com = f"COM{len(self.slave_instances)+1}" if f"COM{len(self.slave_instances)+1}" in c_ports else (c_ports[0] if c_ports else "COM1")
+        com_var = tk.StringVar(value=default_com)
+        ttk.Combobox(rtu_box, textvariable=com_var, values=c_ports, width=22).grid(row=0, column=1, pady=4)
+
+        ttk.Label(rtu_box, text="总线硬件标识:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        bus_var = tk.StringVar(value="RS-485(A1/B1)")
+        ttk.Combobox(rtu_box, textvariable=bus_var, values=SERIAL_BUS_NAMES, width=22).grid(row=1, column=1, pady=4)
+
+        ttk.Label(rtu_box, text="波特率与校验:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        baud_p_row = ttk.Frame(rtu_box)
+        baud_p_row.grid(row=2, column=1, sticky=tk.W, pady=4)
+        dlg_baud_var = tk.IntVar(value=9600)
+        ttk.Combobox(baud_p_row, textvariable=dlg_baud_var, values=AVAILABLE_BAUDRATES, width=7, state="readonly").pack(side=tk.LEFT)
+        dlg_p_var = tk.StringVar(value="N (无校验)")
+        ttk.Combobox(baud_p_row, textvariable=dlg_p_var, values=AVAILABLE_PARITIES, width=10, state="readonly").pack(side=tk.LEFT, padx=3)
+
+        tcp_box.pack(fill=tk.X)
+
+        def _on_dlg_ct_change(*args):
+            if ctype_var.get() == "RTU":
+                tcp_box.pack_forget()
+                rtu_box.pack(fill=tk.X)
+            else:
+                rtu_box.pack_forget()
+                tcp_box.pack(fill=tk.X)
+
+        ctype_var.trace_add("write", _on_dlg_ct_change)
+
+        ttk.Label(form, text="从机站号 (Unit ID):").grid(row=3, column=0, sticky=tk.W, pady=4)
+        sid_var = tk.IntVar(value=len(self.slave_instances) + 1)
+        ttk.Entry(form, textvariable=sid_var, width=24).grid(row=3, column=1, pady=4)
 
         def _confirm_add():
             name = name_var.get().strip()
@@ -669,14 +896,33 @@ class ModbusStudioApp:
             if name in self.slave_instances:
                 messagebox.showerror("错误", f"已存在同名服务实例: {name}")
                 return
-            host = ip_var.get().strip() or "0.0.0.0"
-            port = port_var.get()
             sid = sid_var.get()
-            new_inst = SlaveServiceInstance(name, host=host, port=port, slave_id=sid)
+            selected_ct = ctype_var.get()
+            if selected_ct == "RTU":
+                sport = com_var.get().strip() or "COM1"
+                sbus = bus_var.get().strip() or "RS-485(A1/B1)"
+                sbaud = dlg_baud_var.get()
+                sp_raw = dlg_p_var.get().strip().upper()
+                sparity = sp_raw[0] if sp_raw else "N"
+                new_inst = SlaveServiceInstance(
+                    name,
+                    slave_id=sid,
+                    comm_type="RTU",
+                    serial_port=sport,
+                    baudrate=sbaud,
+                    parity=sparity,
+                    serial_bus_label=sbus,
+                )
+                self.log(f"新建串口从机服务 [{name}]，配置: {sport} [{sbus}] (波特率: {sbaud}, 8-{sparity}-1, 从机ID: {sid})")
+            else:
+                host = ip_var.get().strip() or "0.0.0.0"
+                port = port_var.get()
+                new_inst = SlaveServiceInstance(name, host=host, port=port, slave_id=sid, comm_type="TCP")
+                self.log(f"新建以太网从机服务 [{name}]，监听配置: {host}:{port} (从机ID: {sid})")
+
             self._register_slave_instance(new_inst)
             self.current_slave_name = name
             self._update_slave_instance_combo()
-            self.log(f"新建从机服务 [{name}]，监听配置: {host}:{port} (从机ID: {sid})")
             dlg.destroy()
 
         btn_row = ttk.Frame(form)
@@ -700,17 +946,27 @@ class ModbusStudioApp:
         self.log(f"已删除从机服务实例 [{inst.name}]")
 
     def _start_all_slaves(self):
-        """一键启动所有配置的不同 IP:Port 从机服务."""
+        """一键启动所有配置的不同 IP:Port 或不同串口从机服务."""
         started_cnt = 0
         for name, inst in self.slave_instances.items():
             if not inst.engine.is_running:
                 try:
-                    inst.engine.host = inst.host
-                    inst.engine.port = inst.port
+                    inst.engine.comm_type = inst.comm_type
                     inst.engine.slave_id = inst.slave_id
-                    inst.engine.start()
+                    if inst.comm_type == "RTU":
+                        inst.engine.serial_port = inst.serial_port
+                        inst.engine.baudrate = inst.baudrate
+                        inst.engine.bytesize = inst.bytesize
+                        inst.engine.parity = inst.parity
+                        inst.engine.stopbits = inst.stopbits
+                        inst.engine.start()
+                        self.log(f"串口从机 [{name}] 已启动监听: {inst.serial_port} [{inst.serial_bus_label}] (波特率: {inst.baudrate}, 8-{inst.parity}-1)")
+                    else:
+                        inst.engine.host = inst.host
+                        inst.engine.port = inst.port
+                        inst.engine.start()
+                        self.log(f"以太网从机 [{name}] 已启动监听: {inst.host}:{inst.port}")
                     started_cnt += 1
-                    self.log(f"从机 [{name}] 已启动监听: {inst.host}:{inst.port}")
                 except Exception as e:
                     self.log(f"从机 [{name}] 启动失败: {e}", "ERROR")
         self._update_slave_status_ui()
@@ -862,7 +1118,7 @@ class ModbusStudioApp:
         tree.heading("perm", text="导入权限限制")
         tree.heading("eng", text="英文标识")
         tree.heading("chn", text="业务名称")
-        tree.heading("net", text="网络配置(IP:Port)")
+        tree.heading("net", text="通讯配置 (以太网 / 串口)")
         tree.heading("polls", text="轮询数")
         tree.heading("vars", text="测点数")
         tree.heading("enable", text="状态")
@@ -872,13 +1128,18 @@ class ModbusStudioApp:
         tree.column("perm", width=140, anchor=tk.CENTER)
         tree.column("eng", width=130, anchor=tk.W)
         tree.column("chn", width=120, anchor=tk.W)
-        tree.column("net", width=140, anchor=tk.CENTER)
+        tree.column("net", width=190, anchor=tk.W)
         tree.column("polls", width=55, anchor=tk.CENTER)
         tree.column("vars", width=55, anchor=tk.CENTER)
         tree.column("enable", width=55, anchor=tk.CENTER)
 
         for a in apps:
             status_text = "已启用" if a.enable else "停用"
+            if a.comm_type == "RTU":
+                net_str = f"🔌串口 [{a.serial_info.get('port_name', 'RS-485')}] {a.serial_info.get('baudrate', 9600)}"
+            else:
+                net_str = f"🌐以太网 {a.ip}:{a.port}"
+
             tree.insert(
                 "",
                 tk.END,
@@ -888,7 +1149,7 @@ class ModbusStudioApp:
                     a.permission_tag,
                     a.english_name,
                     a.chinese_name,
-                    f"{a.ip}:{a.port}",
+                    net_str,
                     len(a.pollings),
                     len(a.points),
                     status_text,
@@ -931,6 +1192,8 @@ class ModbusStudioApp:
                 )
                 return
 
+            avail_com_ports = get_available_com_ports()
+
             if len(sel_apps) == 1:
                 # 单设备导入
                 app_obj = sel_apps[0]
@@ -947,17 +1210,31 @@ class ModbusStudioApp:
                     if sid_str and str(sid_str).isdigit():
                         sid = int(sid_str)
 
-                inst_default_name = f"从机[{app_obj.chinese_name}] ({target_port})"
+                is_rtu = (app_obj.comm_type == "RTU")
+                s_info = app_obj.serial_info
+                s_bus = s_info.get("port_name", "RS-485(A1/B1)")
+                s_baud = s_info.get("baudrate", 9600)
+                s_parity = s_info.get("parity", "N")
+                s_databit = s_info.get("databit", 8)
+                s_stopbit = s_info.get("stopbit", 1)
+                s_port = avail_com_ports[0] if avail_com_ports else "COM1"
+
+                if is_rtu:
+                    cfg_desc = f"• 通信方式: 串行端口 (Modbus RTU)\n• 硬件总线: {s_bus}\n• 波特率与校验: {s_baud}, 8-{s_parity}-{s_stopbit}\n• 推荐串口: {s_port}"
+                    inst_default_name = f"从机[{app_obj.chinese_name}] ({s_bus})"
+                else:
+                    cfg_desc = f"• 通信方式: 以太网 (Modbus TCP)\n• 监听地址: {target_ip}:{target_port}"
+                    inst_default_name = f"从机[{app_obj.chinese_name}] ({target_port})"
+
                 resp = messagebox.askyesnocancel(
                     "导入从机模式选择",
-                    f"检测到设备 [{app_obj.chinese_name}] (Type=1) 的网络配置：\n"
-                    f"• 监听 IP 地址: {target_ip}\n"
-                    f"• 监听端口号: {target_port}\n"
+                    f"检测到设备 [{app_obj.chinese_name}] (Type=1) 的配置：\n"
+                    f"{cfg_desc}\n"
                     f"• 从机站号: {sid}\n"
                     f"• 点位数量: {len(points)} 个\n\n"
                     f"是否为其创建【独立的从机服务实例】？\n\n"
-                    f"【是 (Yes)】：新建独立服务实例 (可与其它从机并发在不同 IP:Port 监听)\n"
-                    f"【否 (No)】：覆盖当前从机服务的网络配置与点表\n"
+                    f"【是 (Yes)】：新建独立服务实例 (可与其它从机并发在不同 IP:Port 或不同串口监听)\n"
+                    f"【否 (No)】：覆盖当前激活的从机服务配置与点表\n"
                     f"【取消 (Cancel)】：取消本次导入",
                 )
                 if resp is None:
@@ -969,7 +1246,19 @@ class ModbusStudioApp:
                     while unique_name in self.slave_instances:
                         unique_name = f"{inst_default_name} (#{idx})"
                         idx += 1
-                    new_inst = SlaveServiceInstance(unique_name, host=target_ip, port=target_port, slave_id=sid)
+                    new_inst = SlaveServiceInstance(
+                        unique_name,
+                        host=target_ip,
+                        port=target_port,
+                        slave_id=sid,
+                        comm_type="RTU" if is_rtu else "TCP",
+                        serial_port=s_port,
+                        baudrate=s_baud,
+                        bytesize=s_databit,
+                        parity=s_parity,
+                        stopbits=s_stopbit,
+                        serial_bus_label=s_bus,
+                    )
                     for p in points:
                         addr = p["address"]
                         new_inst.engine.points[addr] = p
@@ -977,29 +1266,48 @@ class ModbusStudioApp:
                     self._register_slave_instance(new_inst)
                     self.current_slave_name = unique_name
                     self._update_slave_instance_combo()
-                    self.log(f"已新建从机服务实例 [{unique_name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
+                    self.log(f"已新建从机服务实例 [{unique_name}]，加载了 {len(points)} 个业务点位！")
                 else:
                     inst = self.current_slave_inst
-                    inst.host = target_ip
-                    inst.port = target_port
+                    inst.comm_type = "RTU" if is_rtu else "TCP"
                     inst.slave_id = sid
-                    inst.engine.host = target_ip
-                    inst.engine.port = target_port
+                    inst.engine.comm_type = inst.comm_type
                     inst.engine.slave_id = sid
+                    if is_rtu:
+                        inst.serial_port = self.slave_serial_port_var.get().strip() or s_port
+                        inst.baudrate = s_baud
+                        inst.parity = s_parity
+                        inst.bytesize = s_databit
+                        inst.stopbits = s_stopbit
+                        inst.serial_bus_label = s_bus
+                        inst.engine.serial_port = inst.serial_port
+                        inst.engine.baudrate = s_baud
+                        inst.engine.parity = s_parity
+                        self.slave_serial_port_var.set(inst.serial_port)
+                        self.slave_baud_var.set(s_baud)
+                        self.slave_parity_var.set("无校验 (None, N)" if s_parity == "N" else ("奇校验 (Odd, O)" if s_parity == "O" else "偶校验 (Even, E)"))
+                        self.slave_bus_label_var.set(s_bus)
+                    else:
+                        inst.host = target_ip
+                        inst.port = target_port
+                        inst.engine.host = target_ip
+                        inst.engine.port = target_port
+                        self.slave_ip_var.set(target_ip)
+                        self.slave_port_var.set(target_port)
+                    self.slave_comm_type_var.set(inst.comm_type)
+                    self.slave_id_var.set(sid)
                     inst.engine.points.clear()
                     for p in points:
                         addr = p["address"]
                         inst.engine.points[addr] = p
                         inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
-                    self.slave_ip_var.set(target_ip)
-                    self.slave_port_var.set(target_port)
-                    self.slave_id_var.set(sid)
+                    self._update_slave_conn_mode_ui()
                     self._update_slave_status_ui()
-                    self.log(f"已更新从机服务 [{inst.name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
+                    self.log(f"已更新从机服务 [{inst.name}]，加载了 {len(points)} 个业务点位！")
             else:
                 # 多设备批量导入
                 total_pts = sum(len(a.extract_studio_points()) for a in sel_apps)
-                dev_summary = "\n".join([f"• [{a.chinese_name}] -> 监听 {a.ip}:{a.port} ({len(a.extract_studio_points())}点)" for a in sel_apps[:6]])
+                dev_summary = "\n".join([f"• [{a.chinese_name}] -> {a.comm_type} ({len(a.extract_studio_points())}点)" for a in sel_apps[:6]])
                 if len(sel_apps) > 6:
                     dev_summary += f"\n... 等共计 {len(sel_apps)} 个设备"
 
@@ -1007,7 +1315,7 @@ class ModbusStudioApp:
                     "批量导入从机服务",
                     f"检测到您多选了 {len(sel_apps)} 个从机设备 (Type=1)，共 {total_pts} 个测点：\n\n"
                     f"{dev_summary}\n\n"
-                    f"【是 (Yes)】：为每一个设备分别创建独立的从机服务实例 (推荐，各自监听独立 IP:Port)\n"
+                    f"【是 (Yes)】：为每一个设备分别创建独立的从机服务实例 (推荐，支持独立监听不同网口或分配独立串口)\n"
                     f"【否 (No)】：将所有设备点位合并追加导入至当前激活的从机服务\n"
                     f"【取消 (Cancel)】：取消本次操作",
                 )
@@ -1025,20 +1333,43 @@ class ModbusStudioApp:
                             sid_str = a.pollings[0].get("Slave Id")
                             if sid_str and str(sid_str).isdigit():
                                 sid = int(sid_str)
-                        inst_name = f"从机[{a.chinese_name}] ({target_port})"
+
+                        is_rtu = (a.comm_type == "RTU")
+                        s_info = a.serial_info
+                        s_bus = s_info.get("port_name", "RS-485(A1/B1)")
+                        s_baud = s_info.get("baudrate", 9600)
+                        s_parity = s_info.get("parity", "N")
+                        s_databit = s_info.get("databit", 8)
+                        s_stopbit = s_info.get("stopbit", 1)
+                        s_port = avail_com_ports[created_count % len(avail_com_ports)] if avail_com_ports else f"COM{created_count + 1}"
+
+                        inst_name = f"从机[{a.chinese_name}] ({s_bus if is_rtu else target_port})"
                         unique_name = inst_name
                         idx = 1
                         while unique_name in self.slave_instances:
                             unique_name = f"{inst_name} (#{idx})"
                             idx += 1
-                        new_inst = SlaveServiceInstance(unique_name, host=target_ip, port=target_port, slave_id=sid)
+
+                        new_inst = SlaveServiceInstance(
+                            unique_name,
+                            host=target_ip,
+                            port=target_port,
+                            slave_id=sid,
+                            comm_type="RTU" if is_rtu else "TCP",
+                            serial_port=s_port,
+                            baudrate=s_baud,
+                            bytesize=s_databit,
+                            parity=s_parity,
+                            stopbits=s_stopbit,
+                            serial_bus_label=s_bus,
+                        )
                         for p in pts:
                             addr = p["address"]
                             new_inst.engine.points[addr] = p
                             new_inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
                         self._register_slave_instance(new_inst)
                         created_count += 1
-                        self.log(f"批量创建从机实例: [{unique_name}] -> 监听于 {target_ip}:{target_port} (点位数: {len(pts)})")
+                        self.log(f"批量创建从机实例: [{unique_name}] -> 方式={new_inst.comm_type} (点位数: {len(pts)})")
 
                     self.current_slave_name = unique_name
                     self._update_slave_instance_combo()
@@ -1086,15 +1417,29 @@ class ModbusStudioApp:
             num = rule.get("Register Number", "10")
 
             try:
-                self.poll_host_var.set(app_obj.ip)
-                self.poll_port_var.set(app_obj.port)
+                if app_obj.comm_type == "RTU":
+                    self.poll_comm_type_var.set("RTU")
+                    s_info = app_obj.serial_info
+                    avail_ports = get_available_com_ports()
+                    self.poll_serial_port_var.set(avail_ports[0] if avail_ports else "COM1")
+                    self.poll_baud_var.set(s_info.get("baudrate", 9600))
+                    p_code = s_info.get("parity", "N")
+                    self.poll_parity_var.set("无校验 (None, N)" if p_code == "N" else ("奇校验 (Odd, O)" if p_code == "O" else "偶校验 (Even, E)"))
+                    self._update_poll_conn_mode_ui()
+                    self.log(f"已将串口应用 [{app_obj.chinese_name}] 导入至 Poll 主机: 总线={s_info.get('port_name')}, 波特率={s_info.get('baudrate')}, 站号={sid}, 功能码={fc}")
+                else:
+                    self.poll_comm_type_var.set("TCP")
+                    self.poll_ip_var.set(app_obj.ip)
+                    self.poll_port_var.set(app_obj.port)
+                    self._update_poll_conn_mode_ui()
+                    self.log(f"已将以太网应用 [{app_obj.chinese_name}] 导入至 Poll 主机: 目标={app_obj.ip}:{app_obj.port}, 站号={sid}, 功能码={fc}")
+
                 self.poll_id_var.set(int(sid))
                 self.poll_start_var.set(int(start))
                 self.poll_count_var.set(int(num))
                 area_val = AreaType.HOLDING_REGISTER if str(fc) in ("3", "16") else AreaType.INPUT_REGISTER
                 self.poll_area_var.set(area_val)
                 self.notebook.select(self.poll_frame)
-                self.log(f"已将北向应用 [{app_obj.chinese_name}] 导入至 Poll 主机: 目标={app_obj.ip}:{app_obj.port}, 站号={sid}, 功能码={fc}, 起始={start}, 数量={num}")
                 if len(sel_apps) > 1:
                     messagebox.showinfo("提示", f"已成功将首个选中应用 [{app_obj.chinese_name}] 的轮询规则应用至 Poll 主机！")
                 dlg.destroy()
@@ -1806,20 +2151,44 @@ class ModbusStudioApp:
     def _toggle_slave_server(self):
         inst = self.current_slave_inst
         if not inst.engine.is_running:
-            inst.host = self.slave_ip_var.get().strip() or "0.0.0.0"
-            inst.port = self.slave_port_var.get()
+            inst.comm_type = self.slave_comm_type_var.get()
+            inst.engine.comm_type = inst.comm_type
             inst.slave_id = self.slave_id_var.get()
-            inst.engine.host = inst.host
-            inst.engine.port = inst.port
             inst.engine.slave_id = inst.slave_id
-            try:
-                inst.engine.start()
-                self._update_slave_status_ui()
-                self.log(
-                    f"从机服务 [{inst.name}] 已成功启动，监听于 {inst.host}:{inst.port} (Slave ID: {inst.slave_id})"
-                )
-            except Exception as e:
-                messagebox.showerror("启动失败", f"无法启动从机服务 [{inst.name}]: {e}")
+
+            if inst.comm_type == "RTU":
+                inst.serial_port = self.slave_serial_port_var.get().strip() or "COM1"
+                inst.baudrate = int(self.slave_baud_var.get())
+                p_raw = self.slave_parity_var.get().strip().upper()
+                inst.parity = p_raw[0] if p_raw else "N"
+                inst.serial_bus_label = self.slave_bus_label_var.get().strip()
+                inst.engine.serial_port = inst.serial_port
+                inst.engine.baudrate = inst.baudrate
+                inst.engine.bytesize = 8
+                inst.engine.parity = inst.parity
+                inst.engine.stopbits = 1
+                try:
+                    inst.engine.start()
+                    self._update_slave_status_ui()
+                    self.log(
+                        f"串口从机服务 [{inst.name}] 已成功启动，监听于 {inst.serial_port} "
+                        f"[{inst.serial_bus_label}] (波特率: {inst.baudrate}, 8-{inst.parity}-1, Slave ID: {inst.slave_id})"
+                    )
+                except Exception as e:
+                    messagebox.showerror("启动失败", f"无法启动串口从机服务 [{inst.name}] ({inst.serial_port}):\n{e}")
+            else:
+                inst.host = self.slave_ip_var.get().strip() or "0.0.0.0"
+                inst.port = self.slave_port_var.get()
+                inst.engine.host = inst.host
+                inst.engine.port = inst.port
+                try:
+                    inst.engine.start()
+                    self._update_slave_status_ui()
+                    self.log(
+                        f"以太网从机服务 [{inst.name}] 已成功启动，监听于 {inst.host}:{inst.port} (Slave ID: {inst.slave_id})"
+                    )
+                except Exception as e:
+                    messagebox.showerror("启动失败", f"无法启动从机服务 [{inst.name}]: {e}")
         else:
             inst.engine.stop()
             self._update_slave_status_ui()
@@ -1829,67 +2198,153 @@ class ModbusStudioApp:
     # Tab 2: Poll 主机调试器 UI
     # =================================================================
     def _build_poll_tab(self, parent: ttk.Frame):
-        top_bar = ttk.LabelFrame(parent, text=" 目标从机与轮询参数 (支持业务库规则导入) ")
+        top_bar = ttk.LabelFrame(parent, text=" 目标从机与轮询参数 (支持以太网 TCP 与 串行端口 RTU 485/232) ")
         top_bar.pack(fill=tk.X, padx=6, pady=3)
 
-        ttk.Label(top_bar, text="目标 IP:").grid(row=0, column=0, padx=3, pady=2)
+        # 第 0 行：通讯方式单选 + 动态参数容器 + 启停操作
+        cfg_row = ttk.Frame(top_bar)
+        cfg_row.pack(fill=tk.X, padx=2, pady=3)
+
+        ttk.Label(cfg_row, text="通讯方式:").pack(side=tk.LEFT, padx=(4, 2))
+        self.poll_comm_type_var = tk.StringVar(value="TCP")
+        ttk.Radiobutton(
+            cfg_row,
+            text="以太网 (TCP)",
+            value="TCP",
+            variable=self.poll_comm_type_var,
+            command=self._on_poll_comm_type_change,
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Radiobutton(
+            cfg_row,
+            text="串行端口 (RTU / 485 / 232)",
+            value="RTU",
+            variable=self.poll_comm_type_var,
+            command=self._on_poll_comm_type_change,
+        ).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(cfg_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+
+        # TCP 参数子容器
+        self.poll_tcp_frame = ttk.Frame(cfg_row)
+        ttk.Label(self.poll_tcp_frame, text="目标 IP:").pack(side=tk.LEFT, padx=(2, 2))
         self.poll_ip_var = tk.StringVar(value="127.0.0.1")
-        ttk.Entry(top_bar, textvariable=self.poll_ip_var, width=12).grid(row=0, column=1, padx=3, pady=2)
+        ttk.Entry(self.poll_tcp_frame, textvariable=self.poll_ip_var, width=12).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(top_bar, text="端口:").grid(row=0, column=2, padx=3, pady=2)
+        ttk.Label(self.poll_tcp_frame, text="端口:").pack(side=tk.LEFT, padx=(6, 2))
         self.poll_port_var = tk.IntVar(value=5020)
-        ttk.Entry(top_bar, textvariable=self.poll_port_var, width=8).grid(row=0, column=3, padx=3, pady=2)
+        ttk.Entry(self.poll_tcp_frame, textvariable=self.poll_port_var, width=7).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(top_bar, text="站号 ID:").grid(row=0, column=4, padx=3, pady=2)
-        self.poll_id_var = tk.IntVar(value=1)
-        ttk.Entry(top_bar, textvariable=self.poll_id_var, width=5).grid(row=0, column=5, padx=3, pady=2)
-
-        self.btn_poll_conn = ttk.Button(top_bar, text="🔗 连接从机", command=self._toggle_poll_connect)
-        self.btn_poll_conn.grid(row=0, column=6, padx=6, pady=2)
-
-        self.poll_conn_status = ttk.Label(top_bar, text="未连接 ⚪", foreground="gray", font=("Microsoft YaHei", 9, "bold"))
-        self.poll_conn_status.grid(row=0, column=7, padx=4, pady=2)
-
-        self.poll_stat_lbl = ttk.Label(top_bar, text="Tx: 0 | Rx: 0 | Err: 0 | RTT: 0.0ms")
-        self.poll_stat_lbl.grid(row=0, column=8, padx=10, pady=2)
-
-        # 快速导入业务库按钮
+        # RTU 参数子容器
+        self.poll_rtu_frame = ttk.Frame(cfg_row)
+        ttk.Label(self.poll_rtu_frame, text="串口 (COM):").pack(side=tk.LEFT, padx=(2, 2))
+        self.poll_serial_port_var = tk.StringVar(value="COM1")
+        self.poll_com_combo = ttk.Combobox(
+            self.poll_rtu_frame,
+            textvariable=self.poll_serial_port_var,
+            width=8,
+            values=get_available_com_ports(),
+        )
+        self.poll_com_combo.pack(side=tk.LEFT, padx=2)
         ttk.Button(
-            top_bar,
+            self.poll_rtu_frame,
+            text="🔄",
+            width=3,
+            command=self._refresh_poll_com_ports,
+        ).pack(side=tk.LEFT, padx=1)
+
+        ttk.Label(self.poll_rtu_frame, text="波特率:").pack(side=tk.LEFT, padx=(6, 2))
+        self.poll_baud_var = tk.IntVar(value=9600)
+        self.poll_baud_combo = ttk.Combobox(
+            self.poll_rtu_frame,
+            textvariable=self.poll_baud_var,
+            width=7,
+            state="readonly",
+            values=AVAILABLE_BAUDRATES,
+        )
+        self.poll_baud_combo.pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(self.poll_rtu_frame, text="校验:").pack(side=tk.LEFT, padx=(6, 2))
+        self.poll_parity_var = tk.StringVar(value="N (无校验)")
+        self.poll_parity_combo = ttk.Combobox(
+            self.poll_rtu_frame,
+            textvariable=self.poll_parity_var,
+            width=10,
+            state="readonly",
+            values=AVAILABLE_PARITIES,
+        )
+        self.poll_parity_combo.pack(side=tk.LEFT, padx=2)
+
+        # 默认先打包 TCP
+        self.poll_tcp_frame.pack(side=tk.LEFT)
+
+        # 公共参数：站号 ID
+        self.poll_common_frame = ttk.Frame(cfg_row)
+        self.poll_common_frame.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(self.poll_common_frame, text="站号 ID:").pack(side=tk.LEFT, padx=(2, 2))
+        self.poll_id_var = tk.IntVar(value=1)
+        ttk.Entry(self.poll_common_frame, textvariable=self.poll_id_var, width=4).pack(side=tk.LEFT, padx=2)
+
+        # 右侧操作区
+        poll_action_box = ttk.Frame(cfg_row)
+        poll_action_box.pack(side=tk.RIGHT, padx=4)
+
+        ttk.Button(
+            poll_action_box,
             text="📂 导入业务设备轮询规则...",
             command=self._open_import_db_dialog,
-        ).grid(row=0, column=9, padx=6, pady=2)
+        ).pack(side=tk.RIGHT, padx=4)
 
-        # 第二行
-        ttk.Label(top_bar, text="功能区域:").grid(row=1, column=0, padx=3, pady=3)
+        self.poll_stat_lbl = ttk.Label(poll_action_box, text="Tx: 0 | Rx: 0 | Err: 0 | RTT: 0.0ms")
+        self.poll_stat_lbl.pack(side=tk.RIGHT, padx=6)
+
+        self.poll_conn_status = ttk.Label(
+            poll_action_box,
+            text="未连接 ⚪",
+            foreground="gray",
+            font=("Microsoft YaHei", 9, "bold"),
+        )
+        self.poll_conn_status.pack(side=tk.RIGHT, padx=4)
+
+        self.btn_poll_conn = ttk.Button(
+            poll_action_box,
+            text="🔗 连接从机",
+            command=self._toggle_poll_connect,
+        )
+        self.btn_poll_conn.pack(side=tk.RIGHT, padx=4)
+
+        # 第 2 行：功能区域、起始地址、读取字数、变位模式、单次读取、启动轮询
+        line2 = ttk.Frame(top_bar)
+        line2.pack(fill=tk.X, padx=2, pady=3)
+
+        ttk.Label(line2, text="功能区域:").grid(row=0, column=0, padx=3, pady=2)
         self.poll_area_var = tk.StringVar(value=AreaType.HOLDING_REGISTER)
-        area_cb = ttk.Combobox(top_bar, textvariable=self.poll_area_var, width=18, state="readonly")
+        area_cb = ttk.Combobox(line2, textvariable=self.poll_area_var, width=18, state="readonly")
         area_cb["values"] = [
             AreaType.HOLDING_REGISTER,
             AreaType.INPUT_REGISTER,
             AreaType.COIL,
             AreaType.DISCRETE_INPUT,
         ]
-        area_cb.grid(row=1, column=1, padx=3, pady=3)
+        area_cb.grid(row=0, column=1, padx=3, pady=2)
 
-        ttk.Label(top_bar, text="起始地址:").grid(row=1, column=2, padx=3, pady=3)
+        ttk.Label(line2, text="起始地址:").grid(row=0, column=2, padx=3, pady=2)
         self.poll_start_var = tk.IntVar(value=0)
-        ttk.Entry(top_bar, textvariable=self.poll_start_var, width=8).grid(row=1, column=3, padx=3, pady=3)
+        ttk.Entry(line2, textvariable=self.poll_start_var, width=8).grid(row=0, column=3, padx=3, pady=2)
 
-        ttk.Label(top_bar, text="读取字数:").grid(row=1, column=4, padx=3, pady=3)
+        ttk.Label(line2, text="读取字数:").grid(row=0, column=4, padx=3, pady=2)
         self.poll_count_var = tk.IntVar(value=20)
-        ttk.Entry(top_bar, textvariable=self.poll_count_var, width=6).grid(row=1, column=5, padx=3, pady=3)
+        ttk.Entry(line2, textvariable=self.poll_count_var, width=6).grid(row=0, column=5, padx=3, pady=2)
 
-        ttk.Label(top_bar, text="全局变位模式:").grid(row=1, column=6, padx=3, pady=3)
+        ttk.Label(line2, text="全局变位模式:").grid(row=0, column=6, padx=3, pady=2)
         self.poll_order_var = tk.StringVar(value=ByteOrderMode.CDAB.value)
-        order_cb = ttk.Combobox(top_bar, textvariable=self.poll_order_var, width=7, state="readonly")
+        order_cb = ttk.Combobox(line2, textvariable=self.poll_order_var, width=7, state="readonly")
         order_cb["values"] = [m.value for m in ByteOrderMode]
-        order_cb.grid(row=1, column=7, padx=3, pady=3)
+        order_cb.grid(row=0, column=7, padx=3, pady=2)
         order_cb.bind("<<ComboboxSelected>>", lambda e: self._update_poll_table())
 
-        ttk.Button(top_bar, text="⚡ 单次读取", command=self._poll_once).grid(row=1, column=8, padx=4, pady=3)
-        self.btn_poll_loop = ttk.Button(top_bar, text="🔄 启动轮询 (1s)", command=self._toggle_poll_loop)
-        self.btn_poll_loop.grid(row=1, column=9, padx=4, pady=3)
+        ttk.Button(line2, text="⚡ 单次读取", command=self._poll_once).grid(row=0, column=8, padx=4, pady=2)
+        self.btn_poll_loop = ttk.Button(line2, text="🔄 启动轮询 (1s)", command=self._toggle_poll_loop)
+        self.btn_poll_loop.grid(row=0, column=9, padx=4, pady=2)
 
         # 快捷写入栏
         write_bar = ttk.LabelFrame(parent, text=" 快捷写入测试 (写寄存器 FC 06/16 或写线圈 FC 05) ")
@@ -1947,17 +2402,52 @@ class ModbusStudioApp:
         self.poll_tree.config(yscrollcommand=tree_scroll_y.set)
         self.poll_tree.pack(fill=tk.BOTH, expand=True)
 
+    def _on_poll_comm_type_change(self):
+        """用户切换当前 Poll 通讯方式单选框."""
+        self._update_poll_conn_mode_ui()
+
+    def _update_poll_conn_mode_ui(self):
+        """根据当前 Poll 通讯方式切换输入框容器."""
+        c_type = self.poll_comm_type_var.get()
+        if c_type == "RTU":
+            self.poll_tcp_frame.pack_forget()
+            self.poll_rtu_frame.pack(side=tk.LEFT, before=self.poll_common_frame)
+        else:
+            self.poll_rtu_frame.pack_forget()
+            self.poll_tcp_frame.pack(side=tk.LEFT, before=self.poll_common_frame)
+
+    def _refresh_poll_com_ports(self):
+        """刷新 Poll 串口端口列表."""
+        ports = get_available_com_ports()
+        self.poll_com_combo["values"] = ports
+        if ports and self.poll_serial_port_var.get() not in ports:
+            self.poll_serial_port_var.set(ports[0])
+
     def _toggle_poll_connect(self):
+        comm_type = self.poll_comm_type_var.get().upper()
         if not self.poll_engine.is_connected:
-            self.poll_engine.host = self.poll_ip_var.get().strip()
-            self.poll_engine.port = self.poll_port_var.get()
-            self.poll_engine.slave_id = self.poll_id_var.get()
-            if self.poll_engine.connect():
-                self.poll_conn_status.config(text="已连接 🟢", foreground="green")
-                self.btn_poll_conn.config(text="❌ 断开连接")
-                self.log(f"已连接到 Modbus 从机: {self.poll_engine.host}:{self.poll_engine.port}")
+            sid = self.poll_id_var.get()
+            self.poll_engine.slave_id = sid
+            if comm_type == "RTU":
+                port = self.poll_serial_port_var.get().strip() or "COM1"
+                baud = int(self.poll_baud_var.get())
+                p_raw = self.poll_parity_var.get().strip().upper()
+                parity = p_raw[0] if p_raw else "N"
+                if self.poll_engine.connect_rtu(serial_port=port, baudrate=baud, parity=parity):
+                    self.poll_conn_status.config(text=f"已连接 🟢 ({port})", foreground="green")
+                    self.btn_poll_conn.config(text="❌ 断开连接")
+                    self.log(f"已连接到 Modbus RTU 从机: 串口={port}, 波特率={baud}, 校验={parity}, 站号={sid}")
+                else:
+                    messagebox.showerror("连接失败", f"无法打开或连接串口: {port}\n请确认端口未被占用且虚拟/物理端口正常。")
             else:
-                messagebox.showerror("连接失败", f"无法连接到 {self.poll_engine.host}:{self.poll_engine.port}")
+                self.poll_engine.host = self.poll_ip_var.get().strip()
+                self.poll_engine.port = self.poll_port_var.get()
+                if self.poll_engine.connect_tcp():
+                    self.poll_conn_status.config(text=f"已连接 🟢 ({self.poll_engine.host}:{self.poll_engine.port})", foreground="green")
+                    self.btn_poll_conn.config(text="❌ 断开连接")
+                    self.log(f"已连接到 Modbus TCP 从机: {self.poll_engine.host}:{self.poll_engine.port} (站号={sid})")
+                else:
+                    messagebox.showerror("连接失败", f"无法连接到 {self.poll_engine.host}:{self.poll_engine.port}")
         else:
             self.poll_engine.disconnect()
             self.poll_conn_status.config(text="未连接 ⚪", foreground="gray")

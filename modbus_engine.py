@@ -12,13 +12,13 @@ import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from pymodbus.client import ModbusTcpClient
+from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 from pymodbus.datastore import (
     ModbusDeviceContext,
     ModbusSequentialDataBlock,
     ModbusServerContext,
 )
-from pymodbus.server import ModbusTcpServer
+from pymodbus.server import ModbusSerialServer, ModbusTcpServer
 
 from modbus_codec import (
     ByteOrderMode,
@@ -40,6 +40,31 @@ class AreaType:
     DISCRETE_INPUT = "1x_DiscreteInput (离散输入)"
     INPUT_REGISTER = "3x_InputRegister (输入寄存器)"
     HOLDING_REGISTER = "4x_HoldingRegister (保持寄存器)"
+
+
+def crc16_modbus(data: bytes) -> bytes:
+    """计算工业标准 Modbus RTU 的 CRC16 (低字节在前，高字节在后)."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+
+def build_modbus_rtu_req_hex(slave_id: int, fc: int, start_addr: int, count_or_val: int) -> str:
+    """构建 Modbus RTU 请求的标准十六进制报文字符串 (含 CRC16)."""
+    raw = bytes([
+        slave_id & 0xFF,
+        fc & 0xFF,
+        (start_addr >> 8) & 0xFF, start_addr & 0xFF,
+        (count_or_val >> 8) & 0xFF, count_or_val & 0xFF,
+    ])
+    crc = crc16_modbus(raw)
+    return " ".join(f"{b:02X}" for b in (raw + crc))
 
 
 def build_modbus_tcp_req_hex(slave_id: int, fc: int, start_addr: int, count_or_val: int, tx_id: int = 1) -> str:
@@ -73,16 +98,33 @@ def build_modbus_tcp_resp_hex(slave_id: int, fc: int, data_bytes: List[int], tx_
 # 1. Slave 从机服务引擎
 # =====================================================================
 class ModbusSlaveEngine:
-    """Modbus TCP Slave (从机模拟器) 引擎."""
+    """Modbus Slave (从机模拟器) 引擎 (同时支持以太网 TCP 与串行端口 RTU 232/485)."""
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 5020, slave_id: int = 1):
+    def __init__(
+        self,
+        comm_type: str = "TCP",
+        host: str = "0.0.0.0",
+        port: int = 5020,
+        serial_port: str = "COM1",
+        baudrate: int = 9600,
+        bytesize: int = 8,
+        parity: str = "N",
+        stopbits: int = 1,
+        slave_id: int = 1,
+    ):
+        self.comm_type = comm_type.upper()  # "TCP" 或 "RTU"
         self.host = host
         self.port = port
+        self.serial_port = serial_port
+        self.baudrate = baudrate
+        self.bytesize = bytesize
+        self.parity = parity
+        self.stopbits = stopbits
         self.slave_id = slave_id
 
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._server: Optional[ModbusTcpServer] = None
+        self._server = None
         self._server_task: Optional[asyncio.Task] = None
         self._is_running = False
 
@@ -112,7 +154,7 @@ class ModbusSlaveEngine:
         return self._is_running
 
     def start(self) -> None:
-        """在独立后台线程中启动 Slave 服务."""
+        """在独立后台线程中启动 Slave 服务 (支持 TCP 网口与 RTU 串口)."""
         if self._is_running:
             return
 
@@ -121,10 +163,10 @@ class ModbusSlaveEngine:
         self._thread.start()
 
         # 等待服务器初始化就绪
-        for _ in range(20):
-            if self._server and self._server.context:
+        for _ in range(25):
+            if self._server:
                 break
-            time.sleep(0.05)
+            time.sleep(0.04)
 
         # 启动模拟数据定时刷新线程
         self._sim_running = True
@@ -143,95 +185,165 @@ class ModbusSlaveEngine:
         self._server = None
 
     def _on_trace_packet(self, sending: bool, data: bytes) -> bytes:
-        """拦截并解析从机收发的 Modbus TCP 报文 (RX 外部问询 / TX 从机响应)."""
-        if not data or len(data) < 7:
+        """拦截并解析从机收发的 Modbus 报文 (自动适配 TCP 与 RTU 串口协议帧)."""
+        if not data:
             return data
         try:
             hex_frame = " ".join(f"{b:02X}" for b in data)
-            trans_id = int.from_bytes(data[0:2], "big")
-            length = int.from_bytes(data[4:6], "big")
-            unit_id = data[6]
+            fc_names = {
+                1: "读线圈", 2: "读离散输入", 3: "读保持寄存器", 4: "读输入寄存器",
+                5: "写单个线圈", 6: "写单个保持寄存器", 15: "写多个线圈", 16: "写多个保持寄存器"
+            }
 
-            if not sending:
-                # RX: 外部主站发来的问询报文
-                if len(data) >= 8:
-                    fc = data[7]
-                    fc_desc = {
-                        1: "读线圈", 2: "读离散输入", 3: "读保持寄存器", 4: "读输入寄存器",
-                        5: "写单个线圈", 6: "写单个保持寄存器", 15: "写多个线圈", 16: "写多个保持寄存器"
-                    }.get(fc, f"功能码0x{fc:02X}")
+            if self.comm_type == "RTU":
+                # --- RTU 串口规约帧解析 (无 MBAP 头，带尾部 2 字节 CRC16) ---
+                if len(data) < 4:
+                    return data
+                unit_id = data[0]
+                fc = data[1]
+                fc_desc = fc_names.get(fc, f"功能码0x{fc:02X}")
+                crc_hex = f"{data[-2]:02X} {data[-1]:02X}"
 
-                    if fc in (1, 2, 3, 4) and len(data) >= 12:
-                        start_addr = int.from_bytes(data[8:10], "big")
-                        count = int.from_bytes(data[10:12], "big")
-                        msg = f"[RX 问询报文] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{hex_frame}]"
-                    elif fc in (5, 6) and len(data) >= 12:
-                        addr = int.from_bytes(data[8:10], "big")
-                        val = int.from_bytes(data[10:12], "big")
+                if not sending:
+                    # RX: 外部主机发来的串口问询报文
+                    if fc in (1, 2, 3, 4) and len(data) >= 8:
+                        start_addr = int.from_bytes(data[2:4], "big")
+                        count = int.from_bytes(data[4:6], "big")
+                        msg = f"[RX 串口问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{hex_frame}] (CRC:{crc_hex})"
+                    elif fc in (5, 6) and len(data) >= 8:
+                        addr = int.from_bytes(data[2:4], "big")
+                        val = int.from_bytes(data[4:6], "big")
                         val_hex = f"0x{val:04X}"
-                        msg = f"[RX 写入问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 目标地址:{addr} | 设定值:{val} ({val_hex}) | 帧:[{hex_frame}]"
-                    elif fc in (15, 16) and len(data) >= 13:
-                        addr = int.from_bytes(data[8:10], "big")
-                        count = int.from_bytes(data[10:12], "big")
-                        msg = f"[RX 批量写问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
+                        msg = f"[RX 串口写问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 目标地址:{addr} | 设定值:{val} ({val_hex}) | 帧:[{hex_frame}]"
+                    elif fc in (15, 16) and len(data) >= 9:
+                        addr = int.from_bytes(data[2:4], "big")
+                        count = int.from_bytes(data[4:6], "big")
+                        msg = f"[RX 串口批量写] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
                     else:
-                        msg = f"[RX 问询报文] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
-
+                        msg = f"[RX 串口问询] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
                     if self.on_packet_log:
                         self.on_packet_log(msg, "RX")
-            else:
-                # TX: 从机回复给外部主站的响应报文
-                if len(data) >= 8:
-                    fc = data[7]
-                    if fc in (1, 2, 3, 4) and len(data) >= 9:
-                        byte_count = data[8]
-                        payload = data[9:]
+                else:
+                    # TX: 从机通过串口回复给外部主机的响应报文
+                    if fc in (1, 2, 3, 4) and len(data) >= 5:
+                        byte_count = data[2]
+                        payload = data[3:-2]
                         if fc in (3, 4) and len(payload) >= 2:
                             regs = [int.from_bytes(payload[i:i+2], "big") for i in range(0, len(payload), 2)]
                             preview = ", ".join(str(r) for r in regs[:8])
                             if len(regs) > 8:
                                 preview += f", ... (共{len(regs)}项)"
-                            msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 数据:[{preview}] | 帧:[{hex_frame}]"
+                            msg = f"[TX 串口响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 数据:[{preview}] | 帧:[{hex_frame}]"
                         else:
-                            msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 帧:[{hex_frame}]"
-                    elif fc in (5, 6) and len(data) >= 12:
-                        addr = int.from_bytes(data[8:10], "big")
-                        val = int.from_bytes(data[10:12], "big")
-                        msg = f"[TX 写入确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 确认成功 | 帧:[{hex_frame}]"
-                    elif fc in (15, 16) and len(data) >= 12:
-                        addr = int.from_bytes(data[8:10], "big")
-                        count = int.from_bytes(data[10:12], "big")
-                        msg = f"[TX 批量写确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
+                            msg = f"[TX 串口响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 帧:[{hex_frame}]"
+                    elif fc in (5, 6) and len(data) >= 8:
+                        addr = int.from_bytes(data[2:4], "big")
+                        val = int.from_bytes(data[4:6], "big")
+                        msg = f"[TX 串口写确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 确认成功 | 帧:[{hex_frame}]"
                     elif fc >= 0x80:
-                        err_code = data[8] if len(data) >= 9 else 0
-                        msg = f"[TX 异常响应] 从机:{unit_id} | FC:{fc:02X} | 异常码:{err_code} | 帧:[{hex_frame}]"
+                        err_code = data[2] if len(data) >= 3 else 0
+                        msg = f"[TX 串口异常响应] 从机:{unit_id} | FC:{fc:02X} | 异常码:{err_code} | 帧:[{hex_frame}]"
                     else:
-                        msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
-
+                        msg = f"[TX 串口响应] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
                     if self.on_packet_log:
                         self.on_packet_log(msg, "TX")
+
+            else:
+                # --- TCP 网络规约帧解析 (含 7 字节 MBAP 报文头) ---
+                if len(data) < 7:
+                    return data
+                trans_id = int.from_bytes(data[0:2], "big")
+                length = int.from_bytes(data[4:6], "big")
+                unit_id = data[6]
+
+                if not sending:
+                    # RX: 外部主站发来的问询报文
+                    if len(data) >= 8:
+                        fc = data[7]
+                        fc_desc = fc_names.get(fc, f"功能码0x{fc:02X}")
+
+                        if fc in (1, 2, 3, 4) and len(data) >= 12:
+                            start_addr = int.from_bytes(data[8:10], "big")
+                            count = int.from_bytes(data[10:12], "big")
+                            msg = f"[RX 问询报文] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{hex_frame}]"
+                        elif fc in (5, 6) and len(data) >= 12:
+                            addr = int.from_bytes(data[8:10], "big")
+                            val = int.from_bytes(data[10:12], "big")
+                            val_hex = f"0x{val:04X}"
+                            msg = f"[RX 写入问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 目标地址:{addr} | 设定值:{val} ({val_hex}) | 帧:[{hex_frame}]"
+                        elif fc in (15, 16) and len(data) >= 13:
+                            addr = int.from_bytes(data[8:10], "big")
+                            count = int.from_bytes(data[10:12], "big")
+                            msg = f"[RX 批量写问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
+                        else:
+                            msg = f"[RX 问询报文] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
+
+                        if self.on_packet_log:
+                            self.on_packet_log(msg, "RX")
+                else:
+                    # TX: 从机回复给外部主站的响应报文
+                    if len(data) >= 8:
+                        fc = data[7]
+                        if fc in (1, 2, 3, 4) and len(data) >= 9:
+                            byte_count = data[8]
+                            payload = data[9:]
+                            if fc in (3, 4) and len(payload) >= 2:
+                                regs = [int.from_bytes(payload[i:i+2], "big") for i in range(0, len(payload), 2)]
+                                preview = ", ".join(str(r) for r in regs[:8])
+                                if len(regs) > 8:
+                                    preview += f", ... (共{len(regs)}项)"
+                                msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 数据:[{preview}] | 帧:[{hex_frame}]"
+                            else:
+                                msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 帧:[{hex_frame}]"
+                        elif fc in (5, 6) and len(data) >= 12:
+                            addr = int.from_bytes(data[8:10], "big")
+                            val = int.from_bytes(data[10:12], "big")
+                            msg = f"[TX 写入确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 确认成功 | 帧:[{hex_frame}]"
+                        elif fc in (15, 16) and len(data) >= 12:
+                            addr = int.from_bytes(data[8:10], "big")
+                            count = int.from_bytes(data[10:12], "big")
+                            msg = f"[TX 批量写确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
+                        elif fc >= 0x80:
+                            err_code = data[8] if len(data) >= 9 else 0
+                            msg = f"[TX 异常响应] 从机:{unit_id} | FC:{fc:02X} | 异常码:{err_code} | 帧:[{hex_frame}]"
+                        else:
+                            msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
+
+                        if self.on_packet_log:
+                            self.on_packet_log(msg, "TX")
         except Exception as ex:
             logger.debug(f"解析从机报文异常: {ex}")
         return data
 
     def _run_server_loop(self) -> None:
-        """异步事件循环运行函数."""
+        """异步事件循环运行函数 (根据 comm_type 自动选择 ModbusSerialServer 或 ModbusTcpServer)."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
         async def _serve():
             try:
-                self._server = ModbusTcpServer(
-                    context=self._server_context,
-                    address=(self.host, self.port),
-                    trace_packet=self._on_trace_packet,
-                )
+                if self.comm_type == "RTU":
+                    self._server = ModbusSerialServer(
+                        context=self._server_context,
+                        port=self.serial_port,
+                        baudrate=self.baudrate,
+                        bytesize=self.bytesize,
+                        parity=self.parity,
+                        stopbits=self.stopbits,
+                        trace_packet=self._on_trace_packet,
+                    )
+                else:
+                    self._server = ModbusTcpServer(
+                        context=self._server_context,
+                        address=(self.host, self.port),
+                        trace_packet=self._on_trace_packet,
+                    )
                 self._server_task = asyncio.create_task(self._server.serve_forever())
                 await self._server_task
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                logger.error(f"Slave 运行异常: {e}")
+                logger.error(f"Slave 服务运行异常 ({self.comm_type}): {e}")
 
         try:
             self._loop.run_until_complete(_serve())
@@ -412,14 +524,20 @@ class ModbusSlaveEngine:
 # 2. Poll 主机轮询客户端引擎
 # =====================================================================
 class ModbusPollEngine:
-    """Modbus TCP Poll (主机轮询与测试客户端) 引擎."""
+    """Modbus Poll (主机轮询与测试客户端) 引擎 (同时支持 TCP 网口与 RTU 串口)."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 5020, slave_id: int = 1):
+        self.comm_type = "TCP"  # "TCP" 或 "RTU"
         self.host = host
         self.port = port
+        self.serial_port = "COM1"
+        self.baudrate = 9600
+        self.bytesize = 8
+        self.parity = "N"
+        self.stopbits = 1
         self.slave_id = slave_id
 
-        self.client: Optional[ModbusTcpClient] = None
+        self.client = None
         self._poll_thread: Optional[threading.Thread] = None
         self._is_polling = False
         self._poll_interval = 1.0  # 秒
@@ -446,12 +564,52 @@ class ModbusPollEngine:
     def is_polling(self) -> bool:
         return self._is_polling
 
-    def connect(self) -> bool:
-        """建立 TCP 连接."""
+    def connect_tcp(self, host: str = "", port: int = 0) -> bool:
+        """建立以太网 Modbus TCP 连接."""
+        if host:
+            self.host = host
+        if port:
+            self.port = port
+        self.comm_type = "TCP"
         if self.is_connected:
             return True
         self.client = ModbusTcpClient(self.host, port=self.port, timeout=2.0)
         return self.client.connect()
+
+    def connect_rtu(
+        self,
+        serial_port: str = "",
+        baudrate: int = 0,
+        bytesize: int = 8,
+        parity: str = "N",
+        stopbits: int = 1,
+    ) -> bool:
+        """建立串行端口 Modbus RTU 连接."""
+        if serial_port:
+            self.serial_port = serial_port
+        if baudrate:
+            self.baudrate = baudrate
+        self.bytesize = bytesize
+        self.parity = parity
+        self.stopbits = stopbits
+        self.comm_type = "RTU"
+        if self.is_connected:
+            return True
+        self.client = ModbusSerialClient(
+            port=self.serial_port,
+            baudrate=self.baudrate,
+            bytesize=self.bytesize,
+            parity=self.parity,
+            stopbits=self.stopbits,
+            timeout=2.0,
+        )
+        return self.client.connect()
+
+    def connect(self) -> bool:
+        """根据当前 comm_type 自动建立连接."""
+        if self.comm_type == "RTU":
+            return self.connect_rtu()
+        return self.connect_tcp()
 
     def disconnect(self) -> None:
         """断开连接并停止轮询."""
@@ -461,15 +619,15 @@ class ModbusPollEngine:
             self.client = None
 
     def read_block(self, area: str, start_addr: int, count: int) -> Tuple[bool, List[int], str]:
-        """单次读取指定区域数据块 (线程安全).
-
+        """单次读取指定区域数据块 (线程安全，支持 TCP 与 RTU).
         :return: (is_success, values, error_message)
         """
         if not self.is_connected:
             if not self.connect():
+                target_desc = f"串口 {self.serial_port}" if self.comm_type == "RTU" else f"{self.host}:{self.port}"
                 if self.on_packet_log:
-                    self.on_packet_log(f"[ERR 连接失败] 无法建立与从机 {self.host}:{self.port} 的 TCP 连接", "ERROR")
-                return False, [], "无法连接到从机"
+                    self.on_packet_log(f"[ERR 连接失败] 无法建立与从机 ({target_desc}) 的连接", "ERROR")
+                return False, [], f"无法连接到从机 ({target_desc})"
 
         t0 = time.perf_counter()
         self.tx_count += 1
@@ -487,7 +645,11 @@ class ModbusPollEngine:
             fc = 4
             fc_desc = "读输入寄存器"
 
-        req_hex = build_modbus_tcp_req_hex(self.slave_id, fc, start_addr, count, self.tx_count)
+        if self.comm_type == "RTU":
+            req_hex = build_modbus_rtu_req_hex(self.slave_id, fc, start_addr, count)
+        else:
+            req_hex = build_modbus_tcp_req_hex(self.slave_id, fc, start_addr, count, self.tx_count)
+
         if self.on_packet_log:
             self.on_packet_log(
                 f"[TX 问询报文] ID:{self.slave_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{req_hex}]",
@@ -545,7 +707,10 @@ class ModbusPollEngine:
         """功能码 06: 写单个保持寄存器."""
         if not self.is_connected and not self.connect():
             return False, "未连接"
-        req_hex = build_modbus_tcp_req_hex(self.slave_id, 0x06, address, value & 0xFFFF, self.tx_count + 1)
+        if self.comm_type == "RTU":
+            req_hex = build_modbus_rtu_req_hex(self.slave_id, 0x06, address, value & 0xFFFF)
+        else:
+            req_hex = build_modbus_tcp_req_hex(self.slave_id, 0x06, address, value & 0xFFFF, self.tx_count + 1)
         if self.on_packet_log:
             self.on_packet_log(f"[TX 写入报文] ID:{self.slave_id} | FC:06(写单个保持寄存器) | 地址:{address} | 数值:{value} | 帧:[{req_hex}]", "TX")
         res = self.client.write_register(address, value & 0xFFFF, device_id=self.slave_id)
@@ -563,7 +728,10 @@ class ModbusPollEngine:
         if not self.is_connected and not self.connect():
             return False, "未连接"
         coil_val = 0xFF00 if value else 0x0000
-        req_hex = build_modbus_tcp_req_hex(self.slave_id, 0x05, address, coil_val, self.tx_count + 1)
+        if self.comm_type == "RTU":
+            req_hex = build_modbus_rtu_req_hex(self.slave_id, 0x05, address, coil_val)
+        else:
+            req_hex = build_modbus_tcp_req_hex(self.slave_id, 0x05, address, coil_val, self.tx_count + 1)
         if self.on_packet_log:
             self.on_packet_log(f"[TX 写入报文] ID:{self.slave_id} | FC:05(写单个线圈) | 地址:{address} | 状态:{value} | 帧:[{req_hex}]", "TX")
         res = self.client.write_coil(address, value, device_id=self.slave_id)

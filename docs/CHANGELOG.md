@@ -15,6 +15,43 @@
 | **v1.4.0** | 业务库导入严格权限控制与多实例多端口监听 | `hems_db_loader.py`, `modbus_studio.py` (Type 1 仅限 Slave, Type 2 仅限 Poll, 独立 IP:Port 监听实例) |
 | **v1.6.0** | 动态模拟强类型安全、44类工业体系、从机报文监控与CSV导出 | `modbus_codec.py`, `modbus_engine.py`, `modbus_studio.py` |
 | **v1.7.0** | FC01/02 二值状态翻转模拟与跨从机批量范围广播控制 | `modbus_engine.py`, `modbus_studio.py` (FC01/02 0/1跳动, 支持当前从机/全部从机范围) |
+| **v1.8.0** | Windows 任务栏羽毛图标彻底消除与运行时实时毫秒级 CSV 自动落盘 | `modbus_studio.py`, `app.ico` (Win32 AppUserModelID 注册, logs 目录带 flush 日志落盘) |
+| **v2.0.0** | 全功能 RS485 / RS232 Modbus RTU 串行端口通信与虚拟串口支持 | `modbus_engine.py`, `hems_db_loader.py`, `modbus_studio.py` (Slave/Poll 双模式 RTU, CRC16 帧跟踪, 虚拟串口兼容) |
+
+---
+
+### 11. 任务栏图标修正与实时日志持久化 (`v1.8.0`)
+- **[修复] Windows 任务栏退化为 Tkinter 默认蓝色羽毛图标缺陷**：
+  - 调用 `ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID` 为进程注册专属 `AppId`。
+  - 联合 `iconbitmap` 与 `iconphoto(True, photo)` 彻底消除任务栏羽毛图标。
+- **[新增] 运行时自动实时日志落盘机制**：
+  - 启动时自动建立 `logs` 目录，并按日期滚动生成 `modbus_runtime_YYYYMMDD.csv`。
+  - 每条通信报文或系统事件写入时立即执行 `file.flush()`，确保意外断电、软件崩溃时不丢失任何关键帧。
+  - 提供「📂 打开日志目录」快捷按钮，一键调出 Windows 资源管理器。
+
+---
+
+### 12. RS485 / RS232 串口 Modbus RTU 通信全面支持 (`v2.0.0`)
+> **核心诉求**：满足工控网关/储能 EMS 现场 6 路 RS485 与 2 路 RS232 串口的调试与仿真需求，单台电脑仅有单 USB 接口时可无缝配合虚拟串口 (如 `com0com`) 或 USB 转 8 串口硬件工作。
+
+- **[新增] 纯 Python 高性能 CRC16-Modbus 计算与 RTU 帧校验** (`modbus_engine.py`)：
+  - 严格按照 Modbus 规范多项式 `0xA001` 计算校验码。
+  - 格式化 RTU 请求帧与响应帧 `[从机ID + 功能码 + 数据区 + CRC16(低在前高在后)]`。
+- **[升级] `ModbusSlaveEngine` 支持双协议栈**：
+  - 支持 `comm_type="TCP" | "RTU"` 动态模式。
+  - 串口模式采用 `ModbusSerialServer` 异步并发监听，支持自由配置串口号 (`COM1~COM256`)、波特率 (`1200~115200`)、数据位 (`8`)、校验位 (`None / Odd / Even`) 与停止位 (`1 / 2`)。
+  - 自动记录 `[RX 串口问询]` 与 `[TX 串口响应]` 报文 Hex 帧及 CRC 校验。
+- **[升级] `ModbusPollEngine` 支持串口 RTU 主机连接与轮询**：
+  - 新增 `connect_rtu()`，底层集成 `ModbusSerialClient`。
+  - 支持对串口从机的单次读取、1秒周期性轮询与单点/多点快捷写寄存器。
+- **[升级] `hems_db_loader.py` 数据库层解析串口元数据**：
+  - 解析 `app` 表中 `Port Type=2` (串口应用)，自动提取总线硬件标识 (`RS-485(A1/B1)` ~ `RS-485(A7/B7)`, `RS-232`) 与波特率、校验位等参数。
+  - 在导入对话框与点表列表中直观区分网口与串口。
+- **[升级] `modbus_studio.py` 界面全面适配**：
+  - 从机 Tab 与主机 Tab 均增加 `以太网 (TCP)` 与 `串行端口 (Modbus RTU / 485 / 232)` 单选切换开关，自适应切换参数面板。
+  - 串口号下拉框具备自动检测与一键 `🔄 刷新` 功能。
+  - 支持多串口从机实例并发独立监听不同的 COM 口，支持 `⚡ 全部启动` 与 `⏹ 全部停止`。
+  - 从 HEMS 数据库导入时，自动将串口应用识别并配置为 RTU 从机或 Poll 目标，依次自动分配可用 COM 端口。
 
 ---
 
