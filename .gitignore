@@ -42,3 +42,10 @@ htmlcov/
 !.vscode/settings.json
 !.vscode/launch.json
 !.vscode/extensions.json
+
+# Business database files & extra folder (Never commit)
+extra/
+*.cdb
+*.sqlite
+*.sqlite3
+*.db
