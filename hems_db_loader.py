@@ -14,17 +14,20 @@ import sqlite3
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from modbus_codec import ByteOrderMode, ModbusDataType
+from modbus_codec import ByteOrderMode, ModbusDataType, parse_hems_type
 from modbus_engine import AreaType
 
 logger = logging.getLogger("HemsDbLoader")
 
 
-def map_db_format_to_data_type(fmt_str: Optional[str]) -> ModbusDataType:
-    """将 app 数据库里的 Variable Transfer Format 映射为 ModbusDataType."""
+def map_db_format_to_data_type(fmt_str: Optional[Any]) -> ModbusDataType:
+    """将 app 数据库里的 Variable Transfer Format 映射为 ModbusDataType (完美支持图二/图三 44 种类型)."""
     if not fmt_str:
         return ModbusDataType.INT16
-    s = fmt_str.lower().strip()
+    parsed = parse_hems_type(fmt_str)
+    if parsed:
+        return parsed[0]
+    s = str(fmt_str).lower().strip()
     if "unsigned short" in s or "uint16" in s:
         return ModbusDataType.UINT16
     elif "signed short" in s or "int16" in s:
@@ -42,6 +45,16 @@ def map_db_format_to_data_type(fmt_str: Optional[str]) -> ModbusDataType:
     elif "string" in s:
         return ModbusDataType.STRING
     return ModbusDataType.INT16
+
+
+def map_db_format_to_byte_order(fmt_str: Optional[Any], default_mode: ByteOrderMode = ByteOrderMode.CDAB) -> ByteOrderMode:
+    """从字段格式中提取变位模式 (如 Signed int 3 -> CDAB, Float 1 -> ABCD)."""
+    if not fmt_str:
+        return default_mode
+    parsed = parse_hems_type(fmt_str)
+    if parsed:
+        return parsed[1]
+    return default_mode
 
 
 class HemsAppModel:
@@ -172,9 +185,7 @@ class HemsAppModel:
 
             fmt_str = p.get("Variable Transfer Format")
             dtype = map_db_format_to_data_type(fmt_str)
-
-            # 变位模式默认 CDAB
-            order = ByteOrderMode.CDAB
+            order = map_db_format_to_byte_order(fmt_str, default_mode=ByteOrderMode.CDAB)
 
             scale = float(p.get("Scale Factor", 1.0) or 1.0)
 

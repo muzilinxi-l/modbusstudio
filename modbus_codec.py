@@ -21,7 +21,7 @@
 from enum import Enum
 import math
 import struct
-from typing import Any, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 class ByteOrderMode(str, Enum):
@@ -67,6 +67,114 @@ TYPE_REGISTER_COUNT = {
     ModbusDataType.DOUBLE64: 4,
     ModbusDataType.STRING: 2,  # 默认 2 寄存器 (4 字符)，可动态扩展
 }
+
+# 各数据类型的取值上下限及数值构造器 (用于防止无符号数下溢与类型越界)
+TYPE_RANGES: Dict[ModbusDataType, Tuple[Union[int, float], Union[int, float], type]] = {
+    ModbusDataType.BOOL: (0, 1, int),
+    ModbusDataType.INT16: (-32768, 32767, int),
+    ModbusDataType.UINT16: (0, 65535, int),
+    ModbusDataType.INT32: (-2147483648, 2147483647, int),
+    ModbusDataType.UINT32: (0, 4294967295, int),
+    ModbusDataType.INT64: (-9223372036854775808, 9223372036854775807, int),
+    ModbusDataType.UINT64: (0, 18446744073709551615, int),
+    ModbusDataType.FLOAT32: (-3.402823466e38, 3.402823466e38, float),
+    ModbusDataType.DOUBLE64: (-1.7976931348623157e308, 1.7976931348623157e308, float),
+}
+
+
+def clamp_value_to_type(val: Any, data_type: ModbusDataType) -> Any:
+    """根据数据类型严格钳位合法数值范围，防止无符号整型下溢变成 65535 或 4294967295 等异常巨值."""
+    if data_type == ModbusDataType.BOOL:
+        if isinstance(val, bool):
+            return 1 if val else 0
+        try:
+            return 1 if int(val) != 0 else 0
+        except Exception:
+            return 0
+
+    if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
+        return val
+
+    limits = TYPE_RANGES.get(data_type)
+    if not limits:
+        return val
+
+    min_v, max_v, v_type = limits
+    try:
+        numeric = v_type(val)
+        if v_type is int:
+            return max(min_v, min(max_v, numeric))
+        else:
+            return max(min_v, min(max_v, numeric))
+    except Exception:
+        return min_v if min_v > 0 else 0
+
+
+# =====================================================================
+# 工业标准 44 种数据类型字典 (对应图二与图三规范)
+# 格式: ID -> (英文名称, 中文名称, ModbusDataType, ByteOrderMode, 寄存器数)
+# =====================================================================
+HEMS_TYPE_DEFINITIONS: Dict[int, Tuple[str, str, ModbusDataType, ByteOrderMode, int]] = {
+    1: ("Invalid", "无效", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
+    2: ("Bit", "比特", ModbusDataType.BOOL, ByteOrderMode.ABCD, 1),
+    3: ("Signed char", "有符号字节", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
+    4: ("Unsigned char", "无符号字节", ModbusDataType.UINT16, ByteOrderMode.ABCD, 1),
+    5: ("Signed short 1", "有符号短整型1", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
+    6: ("Signed short 2", "有符号短整型2", ModbusDataType.INT16, ByteOrderMode.BADC, 1),
+    7: ("Unsigned short 1", "无符号短整型1", ModbusDataType.UINT16, ByteOrderMode.ABCD, 1),
+    8: ("Unsigned short 2", "无符号短整型2", ModbusDataType.UINT16, ByteOrderMode.BADC, 1),
+    9: ("Signed int 1", "有符号整形1", ModbusDataType.INT32, ByteOrderMode.ABCD, 2),
+    10: ("Signed int 2", "有符号整形2", ModbusDataType.INT32, ByteOrderMode.BADC, 2),
+    11: ("Signed int 3", "有符号整形3", ModbusDataType.INT32, ByteOrderMode.CDAB, 2),
+    12: ("Signed int 4", "有符号整形4", ModbusDataType.INT32, ByteOrderMode.DCBA, 2),
+    13: ("Unsigned int 1", "无符号整形1", ModbusDataType.UINT32, ByteOrderMode.ABCD, 2),
+    14: ("Unsigned int 2", "无符号整形2", ModbusDataType.UINT32, ByteOrderMode.BADC, 2),
+    15: ("Unsigned int 3", "无符号整形3", ModbusDataType.UINT32, ByteOrderMode.CDAB, 2),
+    16: ("Unsigned int 4", "无符号整形4", ModbusDataType.UINT32, ByteOrderMode.DCBA, 2),
+    17: ("Signed int64 1", "有符号长整形1", ModbusDataType.INT64, ByteOrderMode.ABCD, 4),
+    18: ("Signed int64 2", "有符号长整形2", ModbusDataType.INT64, ByteOrderMode.BADC, 4),
+    19: ("Signed int64 3", "有符号长整形3", ModbusDataType.INT64, ByteOrderMode.CDAB, 4),
+    20: ("Signed int64 4", "有符号长整形4", ModbusDataType.INT64, ByteOrderMode.DCBA, 4),
+    21: ("Signed int64 5", "有符号长整形5", ModbusDataType.INT64, ByteOrderMode.ABCD, 4),
+    22: ("Signed int64 6", "有符号长整形6", ModbusDataType.INT64, ByteOrderMode.BADC, 4),
+    23: ("Signed int64 7", "有符号长整形7", ModbusDataType.INT64, ByteOrderMode.CDAB, 4),
+    24: ("Signed int64 8", "有符号长整形8", ModbusDataType.INT64, ByteOrderMode.DCBA, 4),
+    25: ("Unsigned int64 1", "无符号长整形1", ModbusDataType.UINT64, ByteOrderMode.ABCD, 4),
+    26: ("Unsigned int64 2", "无符号长整形2", ModbusDataType.UINT64, ByteOrderMode.BADC, 4),
+    27: ("Unsigned int64 3", "无符号长整形3", ModbusDataType.UINT64, ByteOrderMode.CDAB, 4),
+    28: ("Unsigned int64 4", "无符号长整形4", ModbusDataType.UINT64, ByteOrderMode.DCBA, 4),
+    29: ("Unsigned int64 5", "无符号长整形5", ModbusDataType.UINT64, ByteOrderMode.ABCD, 4),
+    30: ("Unsigned int64 6", "无符号长整形6", ModbusDataType.UINT64, ByteOrderMode.BADC, 4),
+    31: ("Unsigned int64 7", "无符号长整形7", ModbusDataType.UINT64, ByteOrderMode.CDAB, 4),
+    32: ("Unsigned int64 8", "无符号长整形8", ModbusDataType.UINT64, ByteOrderMode.DCBA, 4),
+    33: ("Float 1", "浮点数1", ModbusDataType.FLOAT32, ByteOrderMode.ABCD, 2),
+    34: ("Float 2", "浮点数2", ModbusDataType.FLOAT32, ByteOrderMode.BADC, 2),
+    35: ("Float 3", "浮点数3", ModbusDataType.FLOAT32, ByteOrderMode.CDAB, 2),
+    36: ("Float 4", "浮点数4", ModbusDataType.FLOAT32, ByteOrderMode.DCBA, 2),
+    37: ("Double 1", "双精度浮点数1", ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 4),
+    38: ("Double 2", "双精度浮点型2", ModbusDataType.DOUBLE64, ByteOrderMode.BADC, 4),
+    39: ("Double 3", "双精度浮点型3", ModbusDataType.DOUBLE64, ByteOrderMode.CDAB, 4),
+    40: ("Double 4", "双精度浮点型4", ModbusDataType.DOUBLE64, ByteOrderMode.DCBA, 4),
+    41: ("Double 5", "双精度浮点型5", ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 4),
+    42: ("Double 6", "双精度浮点型6", ModbusDataType.DOUBLE64, ByteOrderMode.BADC, 4),
+    43: ("Double 7", "双精度浮点型7", ModbusDataType.DOUBLE64, ByteOrderMode.CDAB, 4),
+    44: ("Double 8", "双精度浮点型8", ModbusDataType.DOUBLE64, ByteOrderMode.DCBA, 4),
+}
+
+
+def parse_hems_type(indicator: Union[str, int]) -> Optional[Tuple[ModbusDataType, ByteOrderMode, int]]:
+    """根据图二/图三的类型英文名称、中文名称或序号 ID，解析出 (ModbusDataType, ByteOrderMode, 寄存器数)."""
+    if isinstance(indicator, int) or (isinstance(indicator, str) and str(indicator).strip().isdigit()):
+        type_id = int(indicator)
+        if type_id in HEMS_TYPE_DEFINITIONS:
+            _, _, dtype, mode, cnt = HEMS_TYPE_DEFINITIONS[type_id]
+            return dtype, mode, cnt
+
+    key = str(indicator).strip().lower()
+    for _, (eng, chn, dtype, mode, cnt) in HEMS_TYPE_DEFINITIONS.items():
+        if key == eng.lower() or key == chn.lower():
+            return dtype, mode, cnt
+    return None
 
 
 def transform_bytes(data: bytes, mode: Union[ByteOrderMode, str] = ByteOrderMode.ABCD) -> bytes:
@@ -259,6 +367,9 @@ def encode_value(
     :param string_length: STRING 类型的字节长度
     :return: 16 位无符号整数列表
     """
+    # 强关联数据类型安全钳位，杜绝无符号类型负数溢出或数值爆大
+    value = clamp_value_to_type(value, data_type)
+
     if data_type == ModbusDataType.BOOL:
         b_val = bool(int(value)) if str(value).isdigit() else bool(value)
         return [1 if b_val else 0]

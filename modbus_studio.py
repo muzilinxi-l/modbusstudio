@@ -14,6 +14,7 @@
    - 表格右键菜单快捷批量操作
 """
 
+import csv
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ from modbus_codec import (
     ByteOrderMode,
     ModbusDataType,
     TYPE_REGISTER_COUNT,
+    clamp_value_to_type,
     decode_value,
     encode_value,
     transform_bytes,
@@ -79,8 +81,11 @@ class ModbusStudioApp:
 
         # 多从机服务实例管理 (支持监听不同 IP 和端口号)
         self.slave_instances: Dict[str, SlaveServiceInstance] = {}
+        # 通信与系统日志结构化存储列表 (用于 CSV 导出)
+        self.log_records: List[Dict[str, str]] = []
+
         default_inst = SlaveServiceInstance("默认从机服务 (5020)", "0.0.0.0", 5020, 1)
-        self.slave_instances[default_inst.name] = default_inst
+        self._register_slave_instance(default_inst)
         self.current_slave_name: str = default_inst.name
 
         self.poll_engine: ModbusPollEngine = ModbusPollEngine()
@@ -96,6 +101,11 @@ class ModbusStudioApp:
 
         # 定时刷新 UI 定时器
         self.root.after(500, self._ui_heartbeat)
+
+    def _register_slave_instance(self, inst: SlaveServiceInstance):
+        """向实例管理器注册从机服务，并统一绑定报文实时日志回调."""
+        inst.engine.on_packet_log = lambda msg, level: self.root.after(0, lambda: self.log(msg, level))
+        self.slave_instances[inst.name] = inst
 
     @property
     def current_slave_inst(self) -> SlaveServiceInstance:
@@ -140,7 +150,7 @@ class ModbusStudioApp:
         log_frame = ttk.LabelFrame(self.main_paned, text=" 实时系统与通信报文日志 (可上下拖动分割栏调整高度) ")
         self.main_paned.add(log_frame, weight=1)
 
-        # 快捷工具栏 (复制、粘贴、全选、清空、自动滚屏)
+        # 快捷工具栏 (复制、粘贴、全选、清空、导出CSV、自动滚屏)
         log_tools = ttk.Frame(log_frame)
         log_tools.pack(fill=tk.X, padx=4, pady=2)
 
@@ -148,6 +158,7 @@ class ModbusStudioApp:
         ttk.Button(log_tools, text="📋 粘贴", width=6, command=self._paste_log).pack(side=tk.LEFT, padx=2)
         ttk.Button(log_tools, text="🔲 全选", width=6, command=self._select_all_log).pack(side=tk.LEFT, padx=2)
         ttk.Button(log_tools, text="🧹 清空", width=6, command=self._clear_log).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="💾 导出CSV", width=9, command=self._export_log_to_csv).pack(side=tk.LEFT, padx=2)
 
         self.log_autoscroll_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(log_tools, text="自动滚屏", variable=self.log_autoscroll_var).pack(side=tk.LEFT, padx=(10, 4))
@@ -200,6 +211,8 @@ class ModbusStudioApp:
         self.log_menu.add_separator()
         self.log_menu.add_command(label="🔲 全选 (Ctrl+A)", command=self._select_all_log)
         self.log_menu.add_command(label="🧹 清空日志", command=self._clear_log)
+        self.log_menu.add_separator()
+        self.log_menu.add_command(label="💾 导出为 CSV 文件...", command=self._export_log_to_csv)
 
         def _popup_menu(event):
             try:
@@ -237,12 +250,65 @@ class ModbusStudioApp:
     def _clear_log(self):
         self.log_text.delete("1.0", tk.END)
 
+    def _export_log_to_csv(self):
+        """将通信报文与系统日志导出保存为标准 CSV 文件 (包含时间、方向 RX/TX、报文及详情)."""
+        if not self.log_records:
+            messagebox.showinfo("提示", "当前没有可导出的日志记录！")
+            return
+
+        default_filename = f"modbus_log_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        file_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="导出通信报文与日志为 CSV",
+            initialfile=default_filename,
+            defaultextension=".csv",
+            filetypes=[("CSV 表格文件", "*.csv"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(["序号", "时间戳", "方向", "日志级别", "报文与详情内容"])
+                for idx, r in enumerate(self.log_records, 1):
+                    writer.writerow([
+                        idx,
+                        r.get("time", ""),
+                        r.get("direction", ""),
+                        r.get("type", ""),
+                        r.get("message", ""),
+                    ])
+
+            messagebox.showinfo("导出成功", f"日志已成功导出至：\n{file_path}\n共导出 {len(self.log_records)} 条记录！")
+            self.log(f"已导出 {len(self.log_records)} 条日志到 CSV: {file_path}")
+        except Exception as e:
+            messagebox.showerror("导出失败", f"写入 CSV 文件失败: {e}")
+
     def log(self, msg: str, level: str = "INFO"):
-        """向底部输出带颜色标签的时间戳日志."""
+        """向底部输出带颜色标签的时间戳日志并记录到 CSV 缓存中."""
+        now_dt = time.strftime("%Y-%m-%d %H:%M:%S")
+        now_time = time.strftime("%H:%M:%S")
+
+        direction = "-"
+        if level == "RX" or "[RX" in msg:
+            direction = "RX"
+        elif level == "TX" or "[TX" in msg:
+            direction = "TX"
+
+        rec = {
+            "time": now_dt,
+            "direction": direction,
+            "type": level,
+            "message": msg,
+        }
+        self.log_records.append(rec)
+        if len(self.log_records) > 20000:
+            self.log_records.pop(0)
+
         if (level in ("TX", "RX")) and hasattr(self, "log_show_packets_var") and not self.log_show_packets_var.get():
             return
-        now = time.strftime("%H:%M:%S")
-        line = f"[{now}] [{level}] {msg}\n"
+        line = f"[{now_time}] [{level}] {msg}\n"
         self.log_text.insert(tk.END, line, level)
         if not hasattr(self, "log_autoscroll_var") or self.log_autoscroll_var.get():
             self.log_text.see(tk.END)
@@ -529,7 +595,7 @@ class ModbusStudioApp:
             port = port_var.get()
             sid = sid_var.get()
             new_inst = SlaveServiceInstance(name, host=host, port=port, slave_id=sid)
-            self.slave_instances[name] = new_inst
+            self._register_slave_instance(new_inst)
             self.current_slave_name = name
             self._update_slave_instance_combo()
             self.log(f"新建从机服务 [{name}]，监听配置: {host}:{port} (从机ID: {sid})")
@@ -830,7 +896,7 @@ class ModbusStudioApp:
                         addr = p["address"]
                         new_inst.engine.points[addr] = p
                         new_inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
-                    self.slave_instances[unique_name] = new_inst
+                    self._register_slave_instance(new_inst)
                     self.current_slave_name = unique_name
                     self._update_slave_instance_combo()
                     self.log(f"已新建从机服务实例 [{unique_name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
@@ -892,7 +958,7 @@ class ModbusStudioApp:
                             addr = p["address"]
                             new_inst.engine.points[addr] = p
                             new_inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
-                        self.slave_instances[unique_name] = new_inst
+                        self._register_slave_instance(new_inst)
                         created_count += 1
                         self.log(f"批量创建从机实例: [{unique_name}] -> 监听于 {target_ip}:{target_port} (点位数: {len(pts)})")
 
@@ -1522,9 +1588,12 @@ class ModbusStudioApp:
 
                 p["current_val"] = new_val
                 p["sim_mode"] = "固定"
-                self.slave_engine.write_typed_value(p["area"], addr, new_val, dtype, p["byte_order"])
+                # 强类型安全钳位
+                safe_val = clamp_value_to_type(new_val, dtype)
+                p["current_val"] = safe_val
+                self.slave_engine.write_typed_value(p["area"], addr, safe_val, dtype, p["byte_order"])
                 self._refresh_slave_tree()
-                self.log(f"手动修改点位 {addr} 成功: {new_val}")
+                self.log(f"手动修改点位 {addr} 成功: {safe_val}")
                 dialog.destroy()
             except Exception as ex:
                 messagebox.showerror("格式错误", f"无效数值: {ex}")

@@ -23,7 +23,9 @@ from pymodbus.server import ModbusTcpServer
 from modbus_codec import (
     ByteOrderMode,
     ModbusDataType,
+    TYPE_RANGES,
     TYPE_REGISTER_COUNT,
+    clamp_value_to_type,
     decode_value,
     encode_value,
 )
@@ -102,6 +104,8 @@ class ModbusSlaveEngine:
         self.points: Dict[int, Dict[str, Any]] = {}
         self._sim_thread: Optional[threading.Thread] = None
         self._sim_running = False
+        # 外部通信问询与响应报文回调: (message, level) -> None
+        self.on_packet_log: Optional[Callable[[str, str], None]] = None
 
     @property
     def is_running(self) -> bool:
@@ -138,6 +142,78 @@ class ModbusSlaveEngine:
             self._thread = None
         self._server = None
 
+    def _on_trace_packet(self, sending: bool, data: bytes) -> bytes:
+        """拦截并解析从机收发的 Modbus TCP 报文 (RX 外部问询 / TX 从机响应)."""
+        if not data or len(data) < 7:
+            return data
+        try:
+            hex_frame = " ".join(f"{b:02X}" for b in data)
+            trans_id = int.from_bytes(data[0:2], "big")
+            length = int.from_bytes(data[4:6], "big")
+            unit_id = data[6]
+
+            if not sending:
+                # RX: 外部主站发来的问询报文
+                if len(data) >= 8:
+                    fc = data[7]
+                    fc_desc = {
+                        1: "读线圈", 2: "读离散输入", 3: "读保持寄存器", 4: "读输入寄存器",
+                        5: "写单个线圈", 6: "写单个保持寄存器", 15: "写多个线圈", 16: "写多个保持寄存器"
+                    }.get(fc, f"功能码0x{fc:02X}")
+
+                    if fc in (1, 2, 3, 4) and len(data) >= 12:
+                        start_addr = int.from_bytes(data[8:10], "big")
+                        count = int.from_bytes(data[10:12], "big")
+                        msg = f"[RX 问询报文] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{hex_frame}]"
+                    elif fc in (5, 6) and len(data) >= 12:
+                        addr = int.from_bytes(data[8:10], "big")
+                        val = int.from_bytes(data[10:12], "big")
+                        val_hex = f"0x{val:04X}"
+                        msg = f"[RX 写入问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 目标地址:{addr} | 设定值:{val} ({val_hex}) | 帧:[{hex_frame}]"
+                    elif fc in (15, 16) and len(data) >= 13:
+                        addr = int.from_bytes(data[8:10], "big")
+                        count = int.from_bytes(data[10:12], "big")
+                        msg = f"[RX 批量写问询] 从机:{unit_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
+                    else:
+                        msg = f"[RX 问询报文] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
+
+                    if self.on_packet_log:
+                        self.on_packet_log(msg, "RX")
+            else:
+                # TX: 从机回复给外部主站的响应报文
+                if len(data) >= 8:
+                    fc = data[7]
+                    if fc in (1, 2, 3, 4) and len(data) >= 9:
+                        byte_count = data[8]
+                        payload = data[9:]
+                        if fc in (3, 4) and len(payload) >= 2:
+                            regs = [int.from_bytes(payload[i:i+2], "big") for i in range(0, len(payload), 2)]
+                            preview = ", ".join(str(r) for r in regs[:8])
+                            if len(regs) > 8:
+                                preview += f", ... (共{len(regs)}项)"
+                            msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 数据:[{preview}] | 帧:[{hex_frame}]"
+                        else:
+                            msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 字节数:{byte_count} | 帧:[{hex_frame}]"
+                    elif fc in (5, 6) and len(data) >= 12:
+                        addr = int.from_bytes(data[8:10], "big")
+                        val = int.from_bytes(data[10:12], "big")
+                        msg = f"[TX 写入确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 确认成功 | 帧:[{hex_frame}]"
+                    elif fc in (15, 16) and len(data) >= 12:
+                        addr = int.from_bytes(data[8:10], "big")
+                        count = int.from_bytes(data[10:12], "big")
+                        msg = f"[TX 批量写确认] 从机:{unit_id} | FC:{fc:02X} | 地址:{addr} | 数量:{count} | 帧:[{hex_frame}]"
+                    elif fc >= 0x80:
+                        err_code = data[8] if len(data) >= 9 else 0
+                        msg = f"[TX 异常响应] 从机:{unit_id} | FC:{fc:02X} | 异常码:{err_code} | 帧:[{hex_frame}]"
+                    else:
+                        msg = f"[TX 从机响应] 从机:{unit_id} | FC:{fc:02X} | 帧:[{hex_frame}]"
+
+                    if self.on_packet_log:
+                        self.on_packet_log(msg, "TX")
+        except Exception as ex:
+            logger.debug(f"解析从机报文异常: {ex}")
+        return data
+
     def _run_server_loop(self) -> None:
         """异步事件循环运行函数."""
         self._loop = asyncio.new_event_loop()
@@ -148,6 +224,7 @@ class ModbusSlaveEngine:
                 self._server = ModbusTcpServer(
                     context=self._server_context,
                     address=(self.host, self.port),
+                    trace_packet=self._on_trace_packet,
                 )
                 self._server_task = asyncio.create_task(self._server.serve_forever())
                 await self._server_task
@@ -245,36 +322,86 @@ class ModbusSlaveEngine:
         return decode_value(raw, data_type, mode)
 
     def _run_simulation_loop(self) -> None:
-        """后台模拟更新循环."""
+        """后台模拟更新循环 (强关联数据类型安全更新，杜绝无符号溢出与异常巨值)."""
         step = 0
+        import math
+        import random
+
         while self._sim_running:
             time.sleep(1.0)
             step += 1
             for addr, point in list(self.points.items()):
                 sim_mode = point.get("sim_mode", "固定")
+                if sim_mode == "固定":
+                    continue
+
                 data_type = point.get("data_type", ModbusDataType.INT16)
                 mode = point.get("byte_order", ByteOrderMode.ABCD)
                 area = point.get("area", AreaType.HOLDING_REGISTER)
+                curr = point.get("current_val", 0)
 
-                if sim_mode == "累加递增":
-                    curr = point.get("current_val", 0)
-                    new_val = (curr + 1) % 10000
-                    point["current_val"] = new_val
-                    self.write_typed_value(area, addr, new_val, data_type, mode)
+                # 1. 确保当前值在数据类型的合法范围内
+                curr = clamp_value_to_type(curr, data_type)
 
-                elif sim_mode == "随机波动":
-                    curr = point.get("current_val", 50.0)
-                    import random
-                    delta = random.uniform(-1.0, 1.0)
-                    new_val = round(curr + delta, 2)
-                    point["current_val"] = new_val
-                    self.write_typed_value(area, addr, new_val, data_type, mode)
+                # 2. BOOL / Bit
+                if data_type == ModbusDataType.BOOL:
+                    if sim_mode == "累加递增":
+                        new_val = 1 if curr == 0 else 0
+                    elif sim_mode == "随机波动":
+                        new_val = random.choice([0, 1])
+                    elif sim_mode == "正弦波":
+                        new_val = 1 if math.sin(step * 0.2) > 0 else 0
+                    else:
+                        new_val = curr
 
-                elif sim_mode == "正弦波":
-                    import math
-                    val = round(50 + 20 * math.sin(step * 0.2), 2)
-                    point["current_val"] = val
-                    self.write_typed_value(area, addr, val, data_type, mode)
+                # 3. 字符/十六进制/二进制不自动波动
+                elif data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
+                    continue
+
+                # 4. 数值类型强类型模拟 (严格遵守上下限，无符号数绝不产生负数)
+                else:
+                    limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
+                    min_v, max_v, v_type = limits
+
+                    if sim_mode == "累加递增":
+                        if v_type is int:
+                            wrap_limit = min(max_v, 10000)
+                            if min_v == 0:  # 无符号数 (UINT16 / UINT32 / UINT64)
+                                new_val = (curr + 1) if curr < wrap_limit else 0
+                            else:
+                                new_val = (curr + 1) if curr < wrap_limit else 0
+                        else:
+                            new_val = round((curr + 0.5) % 1000.0, 2)
+
+                    elif sim_mode == "随机波动":
+                        if v_type is int:
+                            # 整数步长为整数，且无符号整型下限必须严格大于等于 0
+                            delta = random.choice([-2, -1, 0, 1, 2])
+                            if min_v == 0 and curr <= 1:
+                                delta = random.choice([0, 1, 2, 3])
+                            new_val = int(max(min_v, min(max_v, curr + delta)))
+                        else:
+                            delta = random.uniform(-0.5, 0.5)
+                            new_val = round(max(min_v, min(max_v, curr + delta)), 2)
+
+                    elif sim_mode == "正弦波":
+                        if min_v == 0:
+                            base = max(30.0, float(curr) if curr > 0 else 50.0)
+                            amp = min(20.0, base * 0.5)
+                            calc_val = base + amp * math.sin(step * 0.2)
+                        else:
+                            calc_val = 50.0 + 20.0 * math.sin(step * 0.2)
+
+                        if v_type is int:
+                            new_val = int(max(min_v, min(max_v, round(calc_val))))
+                        else:
+                            new_val = round(max(min_v, min(max_v, calc_val)), 2)
+                    else:
+                        new_val = curr
+
+                # 保存并写入底层 Context
+                point["current_val"] = new_val
+                self.write_typed_value(area, addr, new_val, data_type, mode)
 
 
 # =====================================================================
