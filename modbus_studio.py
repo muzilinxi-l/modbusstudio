@@ -432,46 +432,52 @@ class ModbusStudioApp:
 
         ttk.Button(point_ctrl_bar, text="➕ 单点添加", command=self._add_or_update_slave_point).grid(row=0, column=16, padx=4, pady=2)
 
-        # 3. 批量操作工具栏（对多选行批量生效）
-        batch_bar = ttk.LabelFrame(parent, text=" 🛠️ 批量操作选中的点位 (支持 Ctrl / Shift 任意多选) ")
+        # 3. 批量操作工具栏（支持选择当前从机或全部从机服务生效）
+        batch_bar = ttk.LabelFrame(parent, text=" 🛠️ 批量操作与规则配置 (支持选择当前从机或全部从机生效) ")
         batch_bar.pack(fill=tk.X, padx=6, pady=3)
 
-        ttk.Button(batch_bar, text="☑️ 全选", command=self._select_all_slave_points).grid(row=0, column=0, padx=3, pady=2)
-        ttk.Button(batch_bar, text="⬜ 取消选择", command=self._deselect_all_slave_points).grid(row=0, column=1, padx=3, pady=2)
+        # 适用范围: "current" = 仅当前从机, "all" = 全部从机服务
+        self.batch_scope_var = tk.StringVar(value="current")
 
-        ttk.Label(batch_bar, text="目标变位:").grid(row=0, column=2, padx=4, pady=2)
-        self.batch_order_var = tk.StringVar(value=ByteOrderMode.ABCD.value)
-        batch_order_cb = ttk.Combobox(batch_bar, textvariable=self.batch_order_var, width=7, state="readonly")
-        batch_order_cb["values"] = [m.value for m in ByteOrderMode]
-        batch_order_cb.grid(row=0, column=3, padx=2, pady=2)
+        # --- 第 0 行：适用范围与模拟规则配置 (高频使用) ---
+        ttk.Label(batch_bar, text="适用范围:").grid(row=0, column=0, padx=4, pady=2, sticky=tk.W)
+        ttk.Radiobutton(batch_bar, text="仅当前从机", value="current", variable=self.batch_scope_var).grid(row=0, column=1, padx=2, pady=2)
+        ttk.Radiobutton(batch_bar, text="全部从机服务", value="all", variable=self.batch_scope_var).grid(row=0, column=2, padx=4, pady=2)
 
-        ttk.Button(
-            batch_bar,
-            text="⚡ 批量修改变位",
-            command=self._apply_batch_order,
-        ).grid(row=0, column=4, padx=3, pady=2)
+        ttk.Separator(batch_bar, orient=tk.VERTICAL).grid(row=0, column=3, rowspan=2, sticky="ns", padx=8, pady=2)
 
-        ttk.Label(batch_bar, text="目标类型:").grid(row=0, column=5, padx=4, pady=2)
-        self.batch_type_var = tk.StringVar(value=ModbusDataType.FLOAT32.value)
-        batch_type_cb = ttk.Combobox(batch_bar, textvariable=self.batch_type_var, width=9, state="readonly")
-        batch_type_cb["values"] = [t.value for t in ModbusDataType]
-        batch_type_cb.grid(row=0, column=6, padx=2, pady=2)
-
-        ttk.Button(batch_bar, text="批量修改类型", command=self._apply_batch_type).grid(row=0, column=7, padx=3, pady=2)
-
-        ttk.Label(batch_bar, text="统一设值:").grid(row=0, column=8, padx=4, pady=2)
-        self.batch_val_var = tk.StringVar(value="0")
-        ttk.Entry(batch_bar, textvariable=self.batch_val_var, width=7).grid(row=0, column=9, padx=2, pady=2)
-        ttk.Button(batch_bar, text="批量修改数值", command=self._apply_batch_value).grid(row=0, column=10, padx=3, pady=2)
-
-        ttk.Label(batch_bar, text="模拟规则:").grid(row=0, column=11, padx=4, pady=2)
+        ttk.Label(batch_bar, text="模拟规则:").grid(row=0, column=4, padx=4, pady=2)
         self.batch_sim_var = tk.StringVar(value="固定")
         batch_sim_cb = ttk.Combobox(batch_bar, textvariable=self.batch_sim_var, width=8, state="readonly")
         batch_sim_cb["values"] = ["固定", "随机波动", "累加递增", "正弦波"]
-        batch_sim_cb.grid(row=0, column=12, padx=2, pady=2)
-        ttk.Button(batch_bar, text="批量修改规则", command=self._apply_batch_sim).grid(row=0, column=13, padx=3, pady=2)
+        batch_sim_cb.grid(row=0, column=5, padx=2, pady=2)
+        ttk.Button(batch_bar, text="⚡ 批量修改规则", command=self._apply_batch_sim).grid(row=0, column=6, padx=4, pady=2)
 
-        ttk.Button(batch_bar, text="🗑️ 批量删除选中", command=self._delete_slave_point).grid(row=0, column=14, padx=8, pady=2)
+        ttk.Separator(batch_bar, orient=tk.VERTICAL).grid(row=0, column=7, rowspan=2, sticky="ns", padx=8, pady=2)
+
+        ttk.Button(batch_bar, text="☑️ 全选点位", command=self._select_all_slave_points).grid(row=0, column=8, padx=3, pady=2)
+        ttk.Button(batch_bar, text="⬜ 取消选择", command=self._deselect_all_slave_points).grid(row=0, column=9, padx=3, pady=2)
+        ttk.Button(batch_bar, text="🗑️ 批量删除选中", command=self._delete_slave_point).grid(row=0, column=10, padx=6, pady=2)
+
+        # --- 第 1 行：变位模式、数据类型、统一赋值 ---
+        ttk.Label(batch_bar, text="目标变位:").grid(row=1, column=0, padx=4, pady=2, sticky=tk.W)
+        self.batch_order_var = tk.StringVar(value=ByteOrderMode.ABCD.value)
+        batch_order_cb = ttk.Combobox(batch_bar, textvariable=self.batch_order_var, width=8, state="readonly")
+        batch_order_cb["values"] = [m.value for m in ByteOrderMode]
+        batch_order_cb.grid(row=1, column=1, columnspan=2, padx=2, pady=2, sticky=tk.W)
+        ttk.Button(batch_bar, text="批量修改变位", command=self._apply_batch_order).grid(row=1, column=4, padx=4, pady=2)
+
+        ttk.Label(batch_bar, text="目标类型:").grid(row=1, column=5, padx=4, pady=2)
+        self.batch_type_var = tk.StringVar(value=ModbusDataType.FLOAT32.value)
+        batch_type_cb = ttk.Combobox(batch_bar, textvariable=self.batch_type_var, width=9, state="readonly")
+        batch_type_cb["values"] = [t.value for t in ModbusDataType]
+        batch_type_cb.grid(row=1, column=6, padx=2, pady=2)
+        ttk.Button(batch_bar, text="批量修改类型", command=self._apply_batch_type).grid(row=1, column=8, padx=3, pady=2)
+
+        ttk.Label(batch_bar, text="统一设值:").grid(row=1, column=9, padx=4, pady=2)
+        self.batch_val_var = tk.StringVar(value="0")
+        ttk.Entry(batch_bar, textvariable=self.batch_val_var, width=7).grid(row=1, column=10, padx=2, pady=2)
+        ttk.Button(batch_bar, text="批量修改数值", command=self._apply_batch_value).grid(row=1, column=11, padx=3, pady=2)
 
         # 4. 点位表格视图
         table_frame = ttk.Frame(parent)
@@ -1420,12 +1426,30 @@ class ModbusStudioApp:
         self._apply_batch_type()
 
     def _apply_batch_order(self):
-        addrs = self._get_selected_addresses()
-        if not addrs:
-            messagebox.showinfo("提示", "请先在表格中选中至少一个点位（支持按住 Ctrl / Shift 多选）")
+        new_order = ByteOrderMode(self.batch_order_var.get())
+        scope = self.batch_scope_var.get() if hasattr(self, "batch_scope_var") else "current"
+
+        if scope == "all":
+            total_pts = 0
+            for inst in self.slave_instances.values():
+                for addr, p in inst.engine.points.items():
+                    p["byte_order"] = new_order
+                    inst.engine.write_typed_value(
+                        p["area"], addr, p["current_val"], p["data_type"], new_order
+                    )
+                    total_pts += 1
+            self._refresh_slave_tree()
+            self.log(f"已批量将全部 {len(self.slave_instances)} 个从机服务的共 {total_pts} 个点位变位模式修改为: {new_order.value}")
+            messagebox.showinfo("批量设置成功", f"已成功将全部 {len(self.slave_instances)} 个从机服务的共 {total_pts} 个点位变位模式修改为：【{new_order.value}】！")
             return
 
-        new_order = ByteOrderMode(self.batch_order_var.get())
+        addrs = self._get_selected_addresses()
+        if not addrs:
+            if messagebox.askyesno("批量修改提示", f"当前未选中具体点位行。\n是否将变位模式【{new_order.value}】应用到【当前从机】的全部点位？"):
+                addrs = list(self.slave_engine.points.keys())
+            else:
+                return
+
         modified_count = 0
         for addr in addrs:
             p = self.slave_engine.points.get(addr)
@@ -1437,15 +1461,33 @@ class ModbusStudioApp:
                 modified_count += 1
 
         self._refresh_slave_tree()
-        self.log(f"已批量将 {modified_count} 个点位的变位模式修改为: {new_order.value}")
+        self.log(f"已批量将当前从机 {modified_count} 个点位的变位模式修改为: {new_order.value}")
 
     def _apply_batch_type(self):
-        addrs = self._get_selected_addresses()
-        if not addrs:
-            messagebox.showinfo("提示", "请先选中要批量修改的点位")
+        new_type = ModbusDataType(self.batch_type_var.get())
+        scope = self.batch_scope_var.get() if hasattr(self, "batch_scope_var") else "current"
+
+        if scope == "all":
+            total_pts = 0
+            for inst in self.slave_instances.values():
+                for addr, p in inst.engine.points.items():
+                    p["data_type"] = new_type
+                    inst.engine.write_typed_value(
+                        p["area"], addr, p["current_val"], new_type, p["byte_order"]
+                    )
+                    total_pts += 1
+            self._refresh_slave_tree()
+            self.log(f"已批量将全部 {len(self.slave_instances)} 个从机服务的共 {total_pts} 个点位数据类型修改为: {new_type.value}")
+            messagebox.showinfo("批量设置成功", f"已成功将全部 {len(self.slave_instances)} 个从机服务的共 {total_pts} 个点位数据类型修改为：【{new_type.value}】！")
             return
 
-        new_type = ModbusDataType(self.batch_type_var.get())
+        addrs = self._get_selected_addresses()
+        if not addrs:
+            if messagebox.askyesno("批量修改提示", f"当前未选中具体点位行。\n是否将数据类型【{new_type.value}】应用到【当前从机】的全部点位？"):
+                addrs = list(self.slave_engine.points.keys())
+            else:
+                return
+
         for addr in addrs:
             p = self.slave_engine.points.get(addr)
             if p:
@@ -1455,16 +1497,44 @@ class ModbusStudioApp:
                 )
 
         self._refresh_slave_tree()
-        self.log(f"已批量将 {len(addrs)} 个点位的数据类型修改为: {new_type.value}")
+        self.log(f"已批量将当前从机 {len(addrs)} 个点位的数据类型修改为: {new_type.value}")
 
     def _apply_batch_value(self):
-        addrs = self._get_selected_addresses()
-        if not addrs:
-            messagebox.showinfo("提示", "请先选中点位")
-            return
-
         raw_str = self.batch_val_var.get().strip()
+        scope = self.batch_scope_var.get() if hasattr(self, "batch_scope_var") else "current"
+
         try:
+            if scope == "all":
+                total_pts = 0
+                for inst in self.slave_instances.values():
+                    for addr, p in inst.engine.points.items():
+                        dtype = p["data_type"]
+                        if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64):
+                            val = float(raw_str)
+                        elif dtype == ModbusDataType.BOOL:
+                            val = raw_str.lower() in ("true", "1", "yes", "on")
+                        elif dtype in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
+                            val = raw_str
+                        else:
+                            val = int(raw_str)
+
+                        p["current_val"] = val
+                        inst.engine.write_typed_value(
+                            p["area"], addr, val, dtype, p["byte_order"]
+                        )
+                        total_pts += 1
+                self._refresh_slave_tree()
+                self.log(f"已批量将全部 {len(self.slave_instances)} 个从机服务的共 {total_pts} 个点位值统一修改为: {raw_str}")
+                messagebox.showinfo("批量设置成功", f"已成功将全部 {len(self.slave_instances)} 个从机服务的共 {total_pts} 个点位值修改为：【{raw_str}】！")
+                return
+
+            addrs = self._get_selected_addresses()
+            if not addrs:
+                if messagebox.askyesno("批量修改提示", f"当前未选中具体点位行。\n是否将统一值【{raw_str}】应用到【当前从机】的全部点位？"):
+                    addrs = list(self.slave_engine.points.keys())
+                else:
+                    return
+
             for addr in addrs:
                 p = self.slave_engine.points.get(addr)
                 if p:
@@ -1483,23 +1553,39 @@ class ModbusStudioApp:
                         p["area"], addr, val, dtype, p["byte_order"]
                     )
             self._refresh_slave_tree()
-            self.log(f"已批量修改 {len(addrs)} 个点位的值为: {raw_str}")
+            self.log(f"已批量修改当前从机 {len(addrs)} 个点位的值为: {raw_str}")
         except Exception as e:
             messagebox.showerror("格式错误", f"输入数值格式有误: {e}")
 
     def _apply_batch_sim(self):
-        addrs = self._get_selected_addresses()
-        if not addrs:
-            messagebox.showinfo("提示", "请先选中点位")
+        rule = self.batch_sim_var.get()
+        scope = self.batch_scope_var.get() if hasattr(self, "batch_scope_var") else "current"
+
+        if scope == "all":
+            total_pts = 0
+            inst_count = len(self.slave_instances)
+            for inst in self.slave_instances.values():
+                for p in inst.engine.points.values():
+                    p["sim_mode"] = rule
+                    total_pts += 1
+            self._refresh_slave_tree()
+            self.log(f"已将全部 {inst_count} 个从机服务的共 {total_pts} 个点位模拟规则批量修改为: {rule}")
+            messagebox.showinfo("批量设置成功", f"已成功将全部 {inst_count} 个从机服务的所有点位（共 {total_pts} 个）模拟规则修改为：【{rule}】！")
             return
 
-        rule = self.batch_sim_var.get()
+        addrs = self._get_selected_addresses()
+        if not addrs:
+            if messagebox.askyesno("批量修改提示", f"当前从机未选中具体点位行。\n是否将模拟规则【{rule}】应用到【当前从机】的全部点位？"):
+                addrs = list(self.slave_engine.points.keys())
+            else:
+                return
+
         for addr in addrs:
             p = self.slave_engine.points.get(addr)
             if p:
                 p["sim_mode"] = rule
         self._refresh_slave_tree()
-        self.log(f"已批量将 {len(addrs)} 个点位的模拟规则修改为: {rule}")
+        self.log(f"已批量将当前从机（{self.current_slave_name}）的 {len(addrs)} 个点位模拟规则修改为: {rule}")
 
     def _add_or_update_slave_point(self):
         try:
@@ -1609,9 +1695,9 @@ class ModbusStudioApp:
 
         for addr in sorted(self.slave_engine.points.keys()):
             p = self.slave_engine.points[addr]
-            area = p["area"]
-            dtype = p["data_type"]
-            order = p["byte_order"]
+            area = p.get("area", AreaType.HOLDING_REGISTER)
+            dtype = p.get("data_type", ModbusDataType.INT16)
+            order = p.get("byte_order", ByteOrderMode.ABCD)
             cnt = TYPE_REGISTER_COUNT.get(dtype, 1)
 
             raw = self.slave_engine.read_raw_values(area, addr, cnt)
@@ -1627,13 +1713,13 @@ class ModbusStudioApp:
                 tk.END,
                 values=(
                     addr,
-                    p["desc"],
+                    p.get("desc", f"点位_{addr}"),
                     area.split()[0],
                     dtype.value,
                     order.value,
                     val,
                     hex_str,
-                    p["sim_mode"],
+                    p.get("sim_mode", "固定"),
                     cnt,
                 ),
             )

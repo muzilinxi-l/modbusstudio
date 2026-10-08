@@ -340,22 +340,26 @@ class ModbusSlaveEngine:
                 area = point.get("area", AreaType.HOLDING_REGISTER)
                 curr = point.get("current_val", 0)
 
+                # 功能码 01(线圈) 与 02(离散输入)：只要有模拟规则，数据就在 0 和 1 之间变动，不受模拟规则数学公式限制
+                is_fc01_02 = (
+                    AreaType.COIL in area
+                    or AreaType.DISCRETE_INPUT in area
+                    or point.get("fc") in (1, 2)
+                    or data_type == ModbusDataType.BOOL
+                )
+                if is_fc01_02:
+                    curr_bool_int = 1 if (curr is True or str(curr) in ("1", "True", "true")) else 0
+                    new_val = 0 if curr_bool_int == 1 else 1
+                    point["current_val"] = new_val
+                    self.write_typed_value(area, addr, new_val, data_type, mode)
+                    continue
+
+                # 功能码 03(保持寄存器) 与 04(输入寄存器)：受具体模拟规则算法与数据类型限制
                 # 1. 确保当前值在数据类型的合法范围内
                 curr = clamp_value_to_type(curr, data_type)
 
-                # 2. BOOL / Bit
-                if data_type == ModbusDataType.BOOL:
-                    if sim_mode == "累加递增":
-                        new_val = 1 if curr == 0 else 0
-                    elif sim_mode == "随机波动":
-                        new_val = random.choice([0, 1])
-                    elif sim_mode == "正弦波":
-                        new_val = 1 if math.sin(step * 0.2) > 0 else 0
-                    else:
-                        new_val = curr
-
-                # 3. 字符/十六进制/二进制不自动波动
-                elif data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
+                # 2. 字符/十六进制/二进制不自动波动
+                if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
                     continue
 
                 # 4. 数值类型强类型模拟 (严格遵守上下限，无符号数绝不产生负数)
