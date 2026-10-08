@@ -12,6 +12,7 @@
 | **v1.1.0** | 桌面 GUI 工作站与批量变位控制 | `modbus_studio.py` (Slave + Poll 双模式, 批量规则生成) |
 | **v1.2.0** | HEMS 业务数据库深度融合与南/北向配对 | `hems_db_loader.py`, `hems_pairing.py`, 数据库导入面板 |
 | **v1.3.0** | 独立可执行程序打包与定制图标 | `app.ico`, `build_exe.bat`, `dist/ModbusStudio.exe` |
+| **v1.4.0** | 业务库导入严格权限控制与多实例多端口监听 | `hems_db_loader.py`, `modbus_studio.py` (Type 1 仅限 Slave, Type 2 仅限 Poll, 独立 IP:Port 监听实例) |
 
 ---
 
@@ -100,3 +101,24 @@
 - **[修改] 一键打包批处理脚本 (`build_exe.bat`)**：
   - 优化 PyInstaller 打包指令，添加 `--icon "app.ico"` 与 `--add-data "app.ico;."`。
   - 成功编译出单文件绿色版免安装可执行程序：[`dist/ModbusStudio.exe`](file:///f:/GitHub/python/dist/ModbusStudio.exe)。
+
+---
+
+### 6. 业务库导入权限控制与多从机实例独立 IP/端口监听 (`hems_db_loader.py` & `modbus_studio.py`)
+> **背景**：严格规范业务导入边界（`Type=1` 仅限从机仿真，`Type=2` 仅限主机轮询，其余类型禁止导入），并解决不同设备配置不同 IP 与端口号时无法并发模拟的问题。
+
+- **[新增] 导入权限严格规则引擎 (`HemsAppModel`)**：
+  - `can_import_to_slave`: 仅当 `Type == 1`（南向设备）时返回 True，否则禁止导入为 Slave。
+  - `can_import_to_poll`: 仅当 `Type == 2`（北向模块）时返回 True，否则禁止导入为 Poll。
+  - 其余类型（Type 0, 3）全部禁止导入。
+- **[新增] 设备网络配置自动解析与独立端口生成**：
+  - 从 `app` 表的 `[Local Parameters]` 中解析 `Ethernet Remote IPv4`、`Ethernet Remote Port`、`Ethernet Local Port`。
+  - 自动为不同设备提取/生成互不冲突的独立端口（如 BMS 10003、功率计 10001、PCS 10008、[北向]30 9000 等）。
+- **[新增] 多从机服务实例管理与并发监听 (`SlaveServiceInstance`)**：
+  - 支持创建多个独立的从机服务实例，每个实例拥有专属的监听 IP、端口、站号与点位表。
+  - 导入 `Type=1` 设备时支持一键创建为独立服务实例，自动切换并配置对应网络。
+  - 支持【⚡ 全部启动】和【⏹ 全部停止】，可同时在不同的 IP 和端口上并发监听运行。
+- **[优化] 导入对话框交互体验**：
+  - 表格新增【导入权限限制】与【网络配置(IP:Port)】列展示。
+  - 选中设备时，底部按钮动态联动（选中 Type=1 仅激活 Slave 按钮，选中 Type=2 仅激活 Poll 按钮，其他类型两按钮均置灰）。
+  - 执行导入时具备严格二次弹窗阻断机制。

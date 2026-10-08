@@ -50,6 +50,18 @@ def get_resource_path(relative_path: str) -> str:
     return os.path.join(base_dir, relative_path)
 
 
+class SlaveServiceInstance:
+    """代表一个独立的 Modbus Slave 从机服务实例 (拥有独立的监听 IP, 端口, 站号与点表)."""
+
+    def __init__(self, name: str, host: str = "0.0.0.0", port: int = 5020, slave_id: int = 1):
+        self.name = name
+        self.host = host
+        self.port = port
+        self.slave_id = slave_id
+        self.engine = ModbusSlaveEngine(host=host, port=port)
+        self.engine.slave_id = slave_id
+
+
 class ModbusStudioApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -65,8 +77,12 @@ class ModbusStudioApp:
             except Exception as e:
                 logger.warning(f"设置窗口图标失败: {e}")
 
-        # 引擎实例
-        self.slave_engine: ModbusSlaveEngine = ModbusSlaveEngine()
+        # 多从机服务实例管理 (支持监听不同 IP 和端口号)
+        self.slave_instances: Dict[str, SlaveServiceInstance] = {}
+        default_inst = SlaveServiceInstance("默认从机服务 (5020)", "0.0.0.0", 5020, 1)
+        self.slave_instances[default_inst.name] = default_inst
+        self.current_slave_name: str = default_inst.name
+
         self.poll_engine: ModbusPollEngine = ModbusPollEngine()
         self.hems_db = HemsDatabase(os.path.join("extra", "hems.cdb"))
         self.pairing_engine = HemsPairingEngine(self.hems_db.db_path)
@@ -77,6 +93,18 @@ class ModbusStudioApp:
 
         # 定时刷新 UI 定时器
         self.root.after(500, self._ui_heartbeat)
+
+    @property
+    def current_slave_inst(self) -> SlaveServiceInstance:
+        """获取当前选中的从机服务实例."""
+        if self.current_slave_name not in self.slave_instances:
+            self.current_slave_name = next(iter(self.slave_instances.keys()))
+        return self.slave_instances[self.current_slave_name]
+
+    @property
+    def slave_engine(self) -> ModbusSlaveEngine:
+        """保持向后兼容：返回当前从机服务实例的通信引擎."""
+        return self.current_slave_inst.engine
 
     def _init_style(self):
         style = ttk.Style()
@@ -124,28 +152,19 @@ class ModbusStudioApp:
     # =================================================================
     def _build_slave_tab(self, parent: ttk.Frame):
         # 1. 顶部控制栏
-        top_bar = ttk.LabelFrame(parent, text=" 从机服务连接配置与业务库导入 ")
+        top_bar = ttk.LabelFrame(parent, text=" 从机服务实例与连接配置 (支持多实例独立监听不同 IP:Port) ")
         top_bar.pack(fill=tk.X, padx=6, pady=3)
 
-        ttk.Label(top_bar, text="监听 IP:").grid(row=0, column=0, padx=4, pady=3, sticky=tk.W)
-        self.slave_ip_var = tk.StringVar(value="0.0.0.0")
-        ttk.Entry(top_bar, textvariable=self.slave_ip_var, width=11).grid(row=0, column=1, padx=4, pady=3)
+        # 第 0 行：服务实例选择与业务数据库操作
+        ttk.Label(top_bar, text="从机服务实例:").grid(row=0, column=0, padx=4, pady=3, sticky=tk.W)
+        self.slave_inst_combo = ttk.Combobox(top_bar, width=28, state="readonly")
+        self.slave_inst_combo.grid(row=0, column=1, columnspan=2, padx=4, pady=3, sticky=tk.W)
+        self.slave_inst_combo.bind("<<ComboboxSelected>>", self._on_switch_slave_instance)
 
-        ttk.Label(top_bar, text="端口:").grid(row=0, column=2, padx=4, pady=3, sticky=tk.W)
-        self.slave_port_var = tk.IntVar(value=5020)
-        ttk.Entry(top_bar, textvariable=self.slave_port_var, width=7).grid(row=0, column=3, padx=4, pady=3)
+        ttk.Button(top_bar, text="➕ 新建服务", command=self._add_new_slave_instance).grid(row=0, column=3, padx=2, pady=3)
+        ttk.Button(top_bar, text="🗑️ 删除服务", command=self._delete_current_slave_instance).grid(row=0, column=4, padx=2, pady=3)
 
-        ttk.Label(top_bar, text="从机 ID:").grid(row=0, column=4, padx=4, pady=3, sticky=tk.W)
-        self.slave_id_var = tk.IntVar(value=1)
-        ttk.Entry(top_bar, textvariable=self.slave_id_var, width=5).grid(row=0, column=5, padx=4, pady=3)
-
-        self.btn_slave_start = ttk.Button(top_bar, text="▶ 启动服务", command=self._toggle_slave_server)
-        self.btn_slave_start.grid(row=0, column=6, padx=8, pady=3)
-
-        self.slave_status_lbl = ttk.Label(top_bar, text="状态: 已停止 🔴", font=("Microsoft YaHei", 9, "bold"), foreground="red")
-        self.slave_status_lbl.grid(row=0, column=7, padx=6, pady=3)
-
-        ttk.Separator(top_bar, orient=tk.VERTICAL).grid(row=0, column=8, sticky="ns", padx=8, pady=2)
+        ttk.Separator(top_bar, orient=tk.VERTICAL).grid(row=0, column=5, rowspan=2, sticky="ns", padx=8, pady=2)
 
         # 核心业务数据库管理按钮组
         btn_switch_db = ttk.Button(
@@ -153,21 +172,43 @@ class ModbusStudioApp:
             text="🗃️ 关联/切换数据库...",
             command=self._select_database_file,
         )
-        btn_switch_db.grid(row=0, column=9, padx=3, pady=3)
+        btn_switch_db.grid(row=0, column=6, padx=3, pady=3)
 
         btn_import_db = ttk.Button(
             top_bar,
             text="📂 导入设备点表...",
             command=self._open_import_db_dialog,
         )
-        btn_import_db.grid(row=0, column=10, padx=3, pady=3)
+        btn_import_db.grid(row=0, column=7, padx=3, pady=3)
 
         btn_pairing = ttk.Button(
             top_bar,
             text="🔗 业务配对中心 (基于 More)...",
             command=self._open_pairing_dialog,
         )
-        btn_pairing.grid(row=0, column=11, padx=3, pady=3)
+        btn_pairing.grid(row=0, column=8, padx=3, pady=3)
+
+        # 第 1 行：网络配置、当前服务启动/停止、全部启动/停止
+        ttk.Label(top_bar, text="监听 IP:").grid(row=1, column=0, padx=4, pady=3, sticky=tk.W)
+        self.slave_ip_var = tk.StringVar(value="0.0.0.0")
+        ttk.Entry(top_bar, textvariable=self.slave_ip_var, width=12).grid(row=1, column=1, padx=4, pady=3, sticky=tk.W)
+
+        ttk.Label(top_bar, text="端口:").grid(row=1, column=2, padx=4, pady=3, sticky=tk.W)
+        self.slave_port_var = tk.IntVar(value=5020)
+        ttk.Entry(top_bar, textvariable=self.slave_port_var, width=7).grid(row=1, column=3, padx=4, pady=3, sticky=tk.W)
+
+        ttk.Label(top_bar, text="从机 ID:").grid(row=1, column=4, padx=4, pady=3, sticky=tk.W)
+        self.slave_id_var = tk.IntVar(value=1)
+        ttk.Entry(top_bar, textvariable=self.slave_id_var, width=5).grid(row=1, column=4, padx=55, pady=3, sticky=tk.W)
+
+        self.btn_slave_start = ttk.Button(top_bar, text="▶ 启动当前服务", command=self._toggle_slave_server)
+        self.btn_slave_start.grid(row=1, column=6, padx=4, pady=3)
+
+        self.slave_status_lbl = ttk.Label(top_bar, text="状态: 已停止 🔴", font=("Microsoft YaHei", 9, "bold"), foreground="red")
+        self.slave_status_lbl.grid(row=1, column=7, padx=4, pady=3)
+
+        ttk.Button(top_bar, text="⚡ 全部启动", command=self._start_all_slaves).grid(row=1, column=8, padx=2, pady=3)
+        ttk.Button(top_bar, text="⏹ 全部停止", command=self._stop_all_slaves).grid(row=1, column=9, padx=2, pady=3)
 
         # 2. 批量生成与单个添加控制栏
         point_ctrl_bar = ttk.LabelFrame(parent, text=" 点位规则生成 & 快捷操作 ")
@@ -301,6 +342,146 @@ class ModbusStudioApp:
         self.slave_tree.bind("<Double-1>", self._on_slave_double_click)
         self._build_slave_context_menu()
         self.slave_tree.bind("<Button-3>", self._show_slave_context_menu)
+        self._update_slave_instance_combo()
+
+    # -----------------------------------------------------------------
+    # 多从机实例管理方法 (支持独立 IP 和端口监听)
+    # -----------------------------------------------------------------
+    def _update_slave_instance_combo(self):
+        """刷新从机实例下拉列表."""
+        names = list(self.slave_instances.keys())
+        self.slave_inst_combo["values"] = names
+        if self.current_slave_name in names:
+            self.slave_inst_combo.set(self.current_slave_name)
+        elif names:
+            self.current_slave_name = names[0]
+            self.slave_inst_combo.set(self.current_slave_name)
+        self._on_switch_slave_instance()
+
+    def _on_switch_slave_instance(self, event=None):
+        """切换当前激活的从机服务实例."""
+        target_name = self.slave_inst_combo.get()
+        if target_name in self.slave_instances:
+            self.current_slave_name = target_name
+            inst = self.current_slave_inst
+            self.slave_ip_var.set(inst.host)
+            self.slave_port_var.set(inst.port)
+            self.slave_id_var.set(inst.slave_id)
+            self._update_slave_status_ui()
+            self._refresh_slave_tree()
+
+    def _update_slave_status_ui(self):
+        """更新当前从机服务的 UI 状态显示."""
+        inst = self.current_slave_inst
+        if inst.engine.is_running:
+            self.slave_status_lbl.config(
+                text=f"运行中 🟢 ({inst.host}:{inst.port})",
+                foreground="green",
+            )
+            self.btn_slave_start.config(text="⏹ 停止服务")
+        else:
+            self.slave_status_lbl.config(
+                text=f"已停止 🔴 ({inst.host}:{inst.port})",
+                foreground="red",
+            )
+            self.btn_slave_start.config(text="▶ 启动当前服务")
+
+    def _add_new_slave_instance(self):
+        """弹出窗口手动新建一个独立监听的从机服务实例."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("新建独立 Modbus Slave 服务实例")
+        dlg.geometry("380x260")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        form = ttk.Frame(dlg, padding=15)
+        form.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(form, text="服务实例名称:").grid(row=0, column=0, sticky=tk.W, pady=6)
+        name_var = tk.StringVar(value=f"从机服务_{len(self.slave_instances)+1}")
+        ttk.Entry(form, textvariable=name_var, width=22).grid(row=0, column=1, pady=6)
+
+        ttk.Label(form, text="监听 IP 地址:").grid(row=1, column=0, sticky=tk.W, pady=6)
+        ip_var = tk.StringVar(value="127.0.0.1")
+        ttk.Entry(form, textvariable=ip_var, width=22).grid(row=1, column=1, pady=6)
+
+        ttk.Label(form, text="监听端口号:").grid(row=2, column=0, sticky=tk.W, pady=6)
+        used_ports = [inst.port for inst in self.slave_instances.values()]
+        suggested_port = 5020 + len(self.slave_instances)
+        while suggested_port in used_ports:
+            suggested_port += 1
+        port_var = tk.IntVar(value=suggested_port)
+        ttk.Entry(form, textvariable=port_var, width=22).grid(row=2, column=1, pady=6)
+
+        ttk.Label(form, text="从机站号 (Unit ID):").grid(row=3, column=0, sticky=tk.W, pady=6)
+        sid_var = tk.IntVar(value=len(self.slave_instances)+1)
+        ttk.Entry(form, textvariable=sid_var, width=22).grid(row=3, column=1, pady=6)
+
+        def _confirm_add():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("错误", "服务名称不能为空")
+                return
+            if name in self.slave_instances:
+                messagebox.showerror("错误", f"已存在同名服务实例: {name}")
+                return
+            host = ip_var.get().strip() or "0.0.0.0"
+            port = port_var.get()
+            sid = sid_var.get()
+            new_inst = SlaveServiceInstance(name, host=host, port=port, slave_id=sid)
+            self.slave_instances[name] = new_inst
+            self.current_slave_name = name
+            self._update_slave_instance_combo()
+            self.log(f"新建从机服务 [{name}]，监听配置: {host}:{port} (从机ID: {sid})")
+            dlg.destroy()
+
+        btn_row = ttk.Frame(form)
+        btn_row.grid(row=4, column=0, columnspan=2, pady=12)
+        ttk.Button(btn_row, text="确定创建", command=_confirm_add).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_row, text="取消", command=dlg.destroy).pack(side=tk.RIGHT, padx=8)
+
+    def _delete_current_slave_instance(self):
+        """删除当前选中的从机服务实例."""
+        if len(self.slave_instances) <= 1:
+            messagebox.showwarning("无法删除", "系统至少需要保留一个从机服务实例！")
+            return
+        inst = self.current_slave_inst
+        if not messagebox.askyesno("删除确认", f"确定删除从机服务实例 [{inst.name}] 吗？\n如果该服务正在运行，将自动终止其监听。"):
+            return
+        if inst.engine.is_running:
+            inst.engine.stop()
+        del self.slave_instances[inst.name]
+        self.current_slave_name = next(iter(self.slave_instances.keys()))
+        self._update_slave_instance_combo()
+        self.log(f"已删除从机服务实例 [{inst.name}]")
+
+    def _start_all_slaves(self):
+        """一键启动所有配置的不同 IP:Port 从机服务."""
+        started_cnt = 0
+        for name, inst in self.slave_instances.items():
+            if not inst.engine.is_running:
+                try:
+                    inst.engine.host = inst.host
+                    inst.engine.port = inst.port
+                    inst.engine.slave_id = inst.slave_id
+                    inst.engine.start()
+                    started_cnt += 1
+                    self.log(f"从机 [{name}] 已启动监听: {inst.host}:{inst.port}")
+                except Exception as e:
+                    self.log(f"从机 [{name}] 启动失败: {e}", "ERROR")
+        self._update_slave_status_ui()
+        messagebox.showinfo("全部启动完成", f"已成功启动 {started_cnt} 个独立的从机监听服务！")
+
+    def _stop_all_slaves(self):
+        """一键停止所有从机服务."""
+        stopped_cnt = 0
+        for name, inst in self.slave_instances.items():
+            if inst.engine.is_running:
+                inst.engine.stop()
+                stopped_cnt += 1
+                self.log(f"从机 [{name}] 已停止监听")
+        self._update_slave_status_ui()
+        messagebox.showinfo("全部停止完成", f"已停止 {stopped_cnt} 个从机服务。")
 
     # -----------------------------------------------------------------
     # 业务数据库管理：选择/切换关联的 HEMS 数据库文件
@@ -385,38 +566,47 @@ class ModbusStudioApp:
         table_frame = ttk.Frame(dlg, padding=8)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("id", "type", "eng", "chn", "polls", "vars", "enable")
+        # 列表表格
+        table_frame = ttk.Frame(dlg, padding=8)
+        table_frame.pack(fill=tk.BOTH, expand=True)
+
+        cols = ("id", "type", "perm", "eng", "chn", "net", "polls", "vars", "enable")
         tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
 
         tree.heading("id", text="App ID")
-        tree.heading("type", text="设备方向")
+        tree.heading("type", text="业务类型")
+        tree.heading("perm", text="导入权限限制")
         tree.heading("eng", text="英文标识")
         tree.heading("chn", text="业务名称")
-        tree.heading("polls", text="轮询规则数")
-        tree.heading("vars", text="业务点位数")
-        tree.heading("enable", text="启用状态")
+        tree.heading("net", text="网络配置(IP:Port)")
+        tree.heading("polls", text="轮询数")
+        tree.heading("vars", text="测点数")
+        tree.heading("enable", text="状态")
 
-        tree.column("id", width=60, anchor=tk.CENTER)
-        tree.column("type", width=110, anchor=tk.CENTER)
-        tree.column("eng", width=140, anchor=tk.W)
-        tree.column("chn", width=130, anchor=tk.W)
-        tree.column("polls", width=90, anchor=tk.CENTER)
-        tree.column("vars", width=90, anchor=tk.CENTER)
-        tree.column("enable", width=70, anchor=tk.CENTER)
+        tree.column("id", width=55, anchor=tk.CENTER)
+        tree.column("type", width=70, anchor=tk.CENTER)
+        tree.column("perm", width=140, anchor=tk.CENTER)
+        tree.column("eng", width=130, anchor=tk.W)
+        tree.column("chn", width=120, anchor=tk.W)
+        tree.column("net", width=130, anchor=tk.CENTER)
+        tree.column("polls", width=55, anchor=tk.CENTER)
+        tree.column("vars", width=55, anchor=tk.CENTER)
+        tree.column("enable", width=55, anchor=tk.CENTER)
 
         for a in apps:
-            dir_str = "南向采集 (Master)" if a.is_south_master else "北向从机 (Slave)" if a.is_north_slave else "策略模块"
             tree.insert(
                 "",
                 tk.END,
                 values=(
                     a.app_id,
-                    dir_str,
+                    f"Type={a.app_type}",
+                    a.permission_tag,
                     a.english_name,
                     a.chinese_name,
+                    f"{a.ip}:{a.port}",
                     len(a.pollings),
                     len(a.points),
-                    "已启用" if a.enable else "停用",
+                    "启用" if a.enable else "停用",
                 ),
             )
 
@@ -428,6 +618,12 @@ class ModbusStudioApp:
         # 底部操作栏
         btn_bar = ttk.Frame(dlg, padding=10)
         btn_bar.pack(fill=tk.X)
+
+        lbl_perm_hint = ttk.Label(btn_bar, text="💡 业务规范提示：请在上方列表中选择设备以查看导入权限...", font=("Microsoft YaHei", 9), foreground="#555555")
+        lbl_perm_hint.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+
+        btn_row = ttk.Frame(btn_bar)
+        btn_row.pack(fill=tk.X)
 
         def _get_selected_app() -> Optional[HemsAppModel]:
             sel = tree.selection()
@@ -445,33 +641,86 @@ class ModbusStudioApp:
             if not app_obj:
                 return
 
-            points = app_obj.extract_studio_points()
-            if not points:
-                messagebox.showwarning("无点位", f"设备 {app_obj.english_name} 中未配置有效点位")
+            # 严格权限校验：只有 Type=1 才能导入 Slave 模块
+            if not app_obj.can_import_to_slave:
+                messagebox.showerror(
+                    "权限受限",
+                    f"业务规则拦截：\n只有数据库 app 表中 Type=1 (南向采集设备) 才能导入 Slave 模块！\n当前选中的 [{app_obj.chinese_name}] 属于 Type={app_obj.app_type}，操作已被拦截。",
+                )
                 return
 
-            # 如果设备包含从机站号信息，则自动设置从机 ID
+            points = app_obj.extract_studio_points()
+            if not points:
+                messagebox.showwarning("无点位", f"设备 [{app_obj.chinese_name}] 中未配置有效点位")
+                return
+
+            target_ip = app_obj.ip
+            target_port = app_obj.port
+            sid = 1
             if app_obj.pollings:
-                sid = app_obj.pollings[0].get("Slave Id")
-                if sid:
-                    try:
-                        self.slave_id_var.set(int(sid))
-                    except ValueError:
-                        pass
+                sid_str = app_obj.pollings[0].get("Slave Id")
+                if sid_str and str(sid_str).isdigit():
+                    sid = int(sid_str)
 
-            # 导入点位（默认清空或追加）
-            if messagebox.askyesno("导入确认", f"是否将 [{app_obj.chinese_name}] 的 {len(points)} 个业务点位导入到 Slave 模拟器中？\n(是：覆盖当前点表；否：追加到当前点表)"):
-                self.slave_engine.points.clear()
+            # 询问用户是新建独立从机服务还是覆盖当前服务
+            inst_default_name = f"从机[{app_obj.chinese_name}] ({target_port})"
+            resp = messagebox.askyesnocancel(
+                "导入从机模式选择",
+                f"检测到设备 [{app_obj.chinese_name}] (Type=1) 的网络配置：\n"
+                f"• 监听 IP 地址: {target_ip}\n"
+                f"• 监听端口号: {target_port}\n"
+                f"• 从机站号: {sid}\n"
+                f"• 点位数量: {len(points)} 个\n\n"
+                f"是否为其创建【独立的从机服务实例】？\n\n"
+                f"【是 (Yes)】：新建独立服务实例 (可与其它从机并发在不同 IP:Port 监听)\n"
+                f"【否 (No)】：覆盖当前从机服务的网络配置与点表\n"
+                f"【取消 (Cancel)】：取消本次导入",
+            )
+            if resp is None:
+                return
 
-            for p in points:
-                addr = p["address"]
-                self.slave_engine.points[addr] = p
-                self.slave_engine.write_typed_value(
-                    p["area"], addr, p["current_val"], p["data_type"], p["byte_order"]
-                )
+            if resp:
+                # 新建独立从机服务实例
+                unique_name = inst_default_name
+                idx = 1
+                while unique_name in self.slave_instances:
+                    unique_name = f"{inst_default_name} (#{idx})"
+                    idx += 1
+                new_inst = SlaveServiceInstance(unique_name, host=target_ip, port=target_port, slave_id=sid)
+                for p in points:
+                    addr = p["address"]
+                    new_inst.engine.points[addr] = p
+                    new_inst.engine.write_typed_value(
+                        p["area"], addr, p["current_val"], p["data_type"], p["byte_order"]
+                    )
+                self.slave_instances[unique_name] = new_inst
+                self.current_slave_name = unique_name
+                self._update_slave_instance_combo()
+                self.log(f"已新建从机服务实例 [{unique_name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
+            else:
+                # 覆盖当前选中的从机服务实例
+                inst = self.current_slave_inst
+                inst.host = target_ip
+                inst.port = target_port
+                inst.slave_id = sid
+                inst.engine.host = target_ip
+                inst.engine.port = target_port
+                inst.engine.slave_id = sid
+                inst.engine.points.clear()
+                for p in points:
+                    addr = p["address"]
+                    inst.engine.points[addr] = p
+                    inst.engine.write_typed_value(
+                        p["area"], addr, p["current_val"], p["data_type"], p["byte_order"]
+                    )
+                self.slave_ip_var.set(target_ip)
+                self.slave_port_var.set(target_port)
+                self.slave_id_var.set(sid)
+                self._update_slave_status_ui()
+                self.log(f"已更新从机服务 [{inst.name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
 
             self._refresh_slave_tree()
-            self.log(f"成功从业务数据库导入设备 [{app_obj.chinese_name}]，加载了 {len(points)} 个业务点位！")
+            self.notebook.select(self.slave_frame)
             dlg.destroy()
 
         def _do_import_to_poll():
@@ -479,8 +728,16 @@ class ModbusStudioApp:
             if not app_obj:
                 return
 
+            # 严格权限校验：只有 Type=2 才能导入 Poll 模块
+            if not app_obj.can_import_to_poll:
+                messagebox.showerror(
+                    "权限受限",
+                    f"业务规则拦截：\n只有数据库 app 表中 Type=2 (北向通信应用) 才能导入 Poll 模块！\n当前选中的 [{app_obj.chinese_name}] 属于 Type={app_obj.app_type}，操作已被拦截。",
+                )
+                return
+
             if not app_obj.pollings:
-                messagebox.showwarning("无轮询规则", f"设备 {app_obj.english_name} 中未配置 Pollings 规则")
+                messagebox.showwarning("无轮询规则", f"应用 [{app_obj.chinese_name}] 中未配置 Pollings 规则")
                 return
 
             rule = app_obj.pollings[0]
@@ -490,20 +747,59 @@ class ModbusStudioApp:
             num = rule.get("Register Number", "10")
 
             try:
+                # 自动配置目标 IP 与端口号
+                self.poll_host_var.set(app_obj.ip)
+                self.poll_port_var.set(app_obj.port)
                 self.poll_id_var.set(int(sid))
                 self.poll_start_var.set(int(start))
                 self.poll_count_var.set(int(num))
                 area_val = AreaType.HOLDING_REGISTER if str(fc) in ("3", "16") else AreaType.INPUT_REGISTER
                 self.poll_area_var.set(area_val)
                 self.notebook.select(self.poll_frame)
-                self.log(f"已将业务设备 [{app_obj.chinese_name}] 轮询规则导入至 Poll: 站号={sid}, 起始地址={start}, 数量={num}")
+                self.log(f"已将北向应用 [{app_obj.chinese_name}] 导入至 Poll 主机: 目标={app_obj.ip}:{app_obj.port}, 站号={sid}, 功能码={fc}, 起始={start}, 数量={num}")
                 dlg.destroy()
             except Exception as ex:
                 messagebox.showerror("错误", f"解析轮询规则失败: {ex}")
 
-        ttk.Button(btn_bar, text="📥 导入为 Slave 从机仿真点表", command=_do_import_to_slave).pack(side=tk.LEFT, padx=6)
-        ttk.Button(btn_bar, text="📡 导入为 Poll 主机轮询目标", command=_do_import_to_poll).pack(side=tk.LEFT, padx=6)
-        ttk.Button(btn_bar, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT, padx=6)
+        btn_slave = ttk.Button(btn_row, text="📥 导入为 Slave 从机仿真服务", command=_do_import_to_slave, state="disabled")
+        btn_slave.pack(side=tk.LEFT, padx=6)
+
+        btn_poll = ttk.Button(btn_row, text="📡 导入为 Poll 主机轮询目标", command=_do_import_to_poll, state="disabled")
+        btn_poll.pack(side=tk.LEFT, padx=6)
+
+        ttk.Button(btn_row, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT, padx=6)
+
+        def _on_tree_select(event):
+            app_obj = _get_selected_app()
+            if not app_obj:
+                btn_slave.config(state="disabled")
+                btn_poll.config(state="disabled")
+                lbl_perm_hint.config(text="💡 请在上方列表中选择一个业务设备", foreground="#555555")
+                return
+
+            if app_obj.app_type == 1:
+                btn_slave.config(state="normal")
+                btn_poll.config(state="disabled")
+                lbl_perm_hint.config(
+                    text=f"✅ 选中 [{app_obj.chinese_name}] 为 Type=1 (南向采集设备) -> 仅允许导入为 Slave 从机 (监听 {app_obj.ip}:{app_obj.port})",
+                    foreground="green",
+                )
+            elif app_obj.app_type == 2:
+                btn_slave.config(state="disabled")
+                btn_poll.config(state="normal")
+                lbl_perm_hint.config(
+                    text=f"✅ 选中 [{app_obj.chinese_name}] 为 Type=2 (北向通信应用) -> 仅允许导入为 Poll 主机 (目标 {app_obj.ip}:{app_obj.port})",
+                    foreground="#0066cc",
+                )
+            else:
+                btn_slave.config(state="disabled")
+                btn_poll.config(state="disabled")
+                lbl_perm_hint.config(
+                    text=f"❌ 选中 [{app_obj.chinese_name}] 为 Type={app_obj.app_type} (内部/策略应用) -> 系统规范禁止导入！",
+                    foreground="red",
+                )
+
+        tree.bind("<<TreeviewSelect>>", _on_tree_select)
 
     def _open_pairing_dialog(self):
         """打开基于 app.More 配置的业务配对中心."""
@@ -1095,27 +1391,26 @@ class ModbusStudioApp:
         self._refresh_slave_tree()
 
     def _toggle_slave_server(self):
-        if not self.slave_engine.is_running:
-            self.slave_engine.host = self.slave_ip_var.get().strip()
-            self.slave_engine.port = self.slave_port_var.get()
-            self.slave_engine.slave_id = self.slave_id_var.get()
+        inst = self.current_slave_inst
+        if not inst.engine.is_running:
+            inst.host = self.slave_ip_var.get().strip() or "0.0.0.0"
+            inst.port = self.slave_port_var.get()
+            inst.slave_id = self.slave_id_var.get()
+            inst.engine.host = inst.host
+            inst.engine.port = inst.port
+            inst.engine.slave_id = inst.slave_id
             try:
-                self.slave_engine.start()
-                self.slave_status_lbl.config(
-                    text=f"状态: 运行中 🟢 ({self.slave_engine.host}:{self.slave_engine.port})",
-                    foreground="green",
-                )
-                self.btn_slave_start.config(text="⏹ 停止服务")
+                inst.engine.start()
+                self._update_slave_status_ui()
                 self.log(
-                    f"Modbus Slave 服务已成功启动在 {self.slave_engine.host}:{self.slave_engine.port} (Slave ID: {self.slave_engine.slave_id})"
+                    f"从机服务 [{inst.name}] 已成功启动，监听于 {inst.host}:{inst.port} (Slave ID: {inst.slave_id})"
                 )
             except Exception as e:
-                messagebox.showerror("启动失败", f"无法启动 Slave: {e}")
+                messagebox.showerror("启动失败", f"无法启动从机服务 [{inst.name}]: {e}")
         else:
-            self.slave_engine.stop()
-            self.slave_status_lbl.config(text="状态: 已停止 🔴", foreground="red")
-            self.btn_slave_start.config(text="▶ 启动服务")
-            self.log("Modbus Slave 服务已停止。")
+            inst.engine.stop()
+            self._update_slave_status_ui()
+            self.log(f"从机服务 [{inst.name}] 已停止监听。")
 
     # =================================================================
     # Tab 2: Poll 主机调试器 UI
@@ -1375,7 +1670,9 @@ def main():
     app = ModbusStudioApp(root)
 
     def _on_close():
-        app.slave_engine.stop()
+        for inst in app.slave_instances.values():
+            if inst.engine.is_running:
+                inst.engine.stop()
         app.poll_engine.disconnect()
         root.destroy()
         sys.exit(0)

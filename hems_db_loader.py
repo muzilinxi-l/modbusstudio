@@ -56,6 +56,7 @@ class HemsAppModel:
         controller_lib: str,
         enable: int,
         raw_more: Dict[str, Any],
+        local_params: Optional[Dict[str, Any]] = None,
     ):
         self.app_id = app_id
         self.app_type = app_type
@@ -65,6 +66,7 @@ class HemsAppModel:
         self.controller_lib = controller_lib
         self.enable = enable
         self.raw_more = raw_more
+        self.local_params: Dict[str, Any] = local_params or {}
 
         # 解析轮询规则与点位
         self.pollings: List[Dict[str, Any]] = raw_more.get("Pollings", [])
@@ -73,6 +75,38 @@ class HemsAppModel:
             or raw_more.get("Referred Variables", [])
         )
         self.orders: List[Dict[str, Any]] = raw_more.get("Local Orders", [])
+
+        # 解析与提取 IP、端口
+        self.ip, self.port = self._parse_network_address()
+
+    def _parse_network_address(self) -> Tuple[str, int]:
+        """解析当前应用配置的 IP 与端口号，保证不同设备可分配独立端口."""
+        ip = "127.0.0.1"
+        port = 502
+
+        # 优先从 Local Parameters 中提取
+        remote_ip = str(self.local_params.get("Ethernet Remote IPv4", "")).strip()
+        server_ip = str(self.local_params.get("Server Address", "")).strip()
+        if remote_ip:
+            ip = remote_ip
+        elif server_ip:
+            ip = server_ip
+
+        remote_port = str(self.local_params.get("Ethernet Remote Port", "")).strip()
+        local_port = str(self.local_params.get("Ethernet Local Port", "")).strip()
+        server_port = str(self.local_params.get("Server Port", "")).strip()
+
+        target_port_str = remote_port or local_port or server_port
+        if target_port_str and target_port_str.isdigit():
+            port = int(target_port_str)
+        else:
+            # 如果端口未配置，为不同设备自动生成互不冲突的独立端口
+            if self.app_type == 1:
+                port = 10000 + (self.app_id % 1000)
+            elif self.app_type == 2:
+                port = 9000 + (self.app_id % 1000)
+
+        return ip, port
 
     @property
     def is_south_master(self) -> bool:
@@ -83,9 +117,29 @@ class HemsAppModel:
         return self.app_type == 2
 
     @property
+    def can_import_to_slave(self) -> bool:
+        """业务规则：只有数据库 app 表中的 type=1 才能导入 slave 模块."""
+        return self.app_type == 1
+
+    @property
+    def can_import_to_poll(self) -> bool:
+        """业务规则：只有数据库 app 表中的 type=2 才能导入 poll 模块."""
+        return self.app_type == 2
+
+    @property
+    def permission_tag(self) -> str:
+        """导入权限描述标签."""
+        if self.app_type == 1:
+            return "✅ 仅允许导入 Slave 从机"
+        elif self.app_type == 2:
+            return "✅ 仅允许导入 Poll 主机"
+        else:
+            return f"❌ 不可导入 (Type={self.app_type})"
+
+    @property
     def display_name(self) -> str:
         tag = "南向采集" if self.is_south_master else "北向从机" if self.is_north_slave else "策略模块"
-        return f"[{tag}] ID {self.app_id:3d} : {self.english_name} ({self.chinese_name})"
+        return f"[{tag}] ID {self.app_id:3d} : {self.english_name} ({self.chinese_name}) [{self.ip}:{self.port}]"
 
     def extract_studio_points(self) -> List[Dict[str, Any]]:
         """将当前设备的业务点位转换为 Modbus Studio 点位列表."""
@@ -162,7 +216,7 @@ class HemsDatabase:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("SELECT Id, Type, [English Name], [Chinese Name], [Controller Library], [Referred Model], More, enable FROM app;")
+        cursor.execute("SELECT Id, Type, [English Name], [Chinese Name], [Controller Library], [Referred Model], [Local Parameters], More, enable FROM app;")
         rows = cursor.fetchall()
         apps = []
 
@@ -180,10 +234,28 @@ class HemsDatabase:
                 except Exception:
                     pass
 
+            # 解析 Local Parameters (包含网络配置、IP、端口、串口参数等)
+            lp_raw = r["Local Parameters"]
+            local_params = {}
+            if isinstance(lp_raw, bytes):
+                try:
+                    lp_list = json.loads(lp_raw.decode("utf-8"))
+                    if isinstance(lp_list, list):
+                        local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
+                except Exception:
+                    pass
+            elif isinstance(lp_raw, str) and lp_raw.strip().startswith("["):
+                try:
+                    lp_list = json.loads(lp_raw)
+                    if isinstance(lp_list, list):
+                        local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
+                except Exception:
+                    pass
+
             ctrl = str(r["Controller Library"])
             has_polls = len(more.get("Pollings", [])) > 0
             has_vars = len(more.get("Realtime Variables", [])) > 0 or len(more.get("Referred Variables", [])) > 0
-            is_modbus = "Mb" in ctrl or has_polls or has_vars
+            is_modbus = "Mb" in ctrl or has_polls or has_vars or r["Type"] in (1, 2)
 
             if is_modbus:
                 app_obj = HemsAppModel(
@@ -195,6 +267,7 @@ class HemsDatabase:
                     controller_lib=ctrl,
                     enable=r["enable"],
                     raw_more=more,
+                    local_params=local_params,
                 )
                 apps.append(app_obj)
 
