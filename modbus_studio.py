@@ -147,20 +147,27 @@ class ModbusStudioApp:
 
         ttk.Separator(top_bar, orient=tk.VERTICAL).grid(row=0, column=8, sticky="ns", padx=8, pady=2)
 
-        # 核心业务数据库导入按钮
+        # 核心业务数据库管理按钮组
+        btn_switch_db = ttk.Button(
+            top_bar,
+            text="🗃️ 关联/切换数据库...",
+            command=self._select_database_file,
+        )
+        btn_switch_db.grid(row=0, column=9, padx=3, pady=3)
+
         btn_import_db = ttk.Button(
             top_bar,
             text="📂 导入设备点表...",
             command=self._open_import_db_dialog,
         )
-        btn_import_db.grid(row=0, column=9, padx=4, pady=3)
+        btn_import_db.grid(row=0, column=10, padx=3, pady=3)
 
         btn_pairing = ttk.Button(
             top_bar,
-            text="🔗 业务配对中心 (基于 More 自动配对)...",
+            text="🔗 业务配对中心 (基于 More)...",
             command=self._open_pairing_dialog,
         )
-        btn_pairing.grid(row=0, column=10, padx=4, pady=3)
+        btn_pairing.grid(row=0, column=11, padx=3, pady=3)
 
         # 2. 批量生成与单个添加控制栏
         point_ctrl_bar = ttk.LabelFrame(parent, text=" 点位规则生成 & 快捷操作 ")
@@ -296,31 +303,79 @@ class ModbusStudioApp:
         self.slave_tree.bind("<Button-3>", self._show_slave_context_menu)
 
     # -----------------------------------------------------------------
-    # 核心：从 extra/hems.cdb 业务数据库导入设备点表
+    # 业务数据库管理：选择/切换关联的 HEMS 数据库文件
+    # -----------------------------------------------------------------
+    def _select_database_file(self, on_success_callback=None):
+        """弹出文件选择对话框，动态修改/切换关联的 HEMS 业务数据库."""
+        initial_dir = os.path.dirname(os.path.abspath(self.hems_db.db_path)) if os.path.exists(self.hems_db.db_path) else os.getcwd()
+        file_path = filedialog.askopenfilename(
+            title="选择关联的业务数据库 (HEMS SQLite 格式)",
+            initialdir=initial_dir,
+            filetypes=[
+                ("SQLite 数据库文件 (*.cdb, *.sqlite, *.db)", "*.cdb;*.sqlite;*.db"),
+                ("所有文件 (*.*)", "*.*"),
+            ],
+        )
+        if not file_path:
+            return False
+
+        try:
+            new_db = HemsDatabase(file_path)
+            apps = new_db.load_modbus_apps()
+            self.hems_db = new_db
+            self.pairing_engine = HemsPairingEngine(file_path)
+            self.log(f"已成功关联新业务数据库: {file_path} (识别到 {len(apps)} 个 Modbus 业务模块)", "INFO")
+            messagebox.showinfo("关联成功", f"已成功切换关联数据库：\n{file_path}\n\n共识别到 {len(apps)} 个 Modbus 业务模块。")
+            if on_success_callback:
+                on_success_callback()
+            return True
+        except Exception as e:
+            logger.error(f"切换数据库失败: {e}")
+            messagebox.showerror("切换数据库失败", f"无法打开或解析选中的数据库文件：\n{e}")
+            return False
+
+    # -----------------------------------------------------------------
+    # 核心：从 HEMS 业务数据库导入设备点表
     # -----------------------------------------------------------------
     def _open_import_db_dialog(self):
         apps = self.hems_db.load_modbus_apps()
         if not apps:
-            messagebox.showwarning(
+            ret = messagebox.askyesno(
                 "未找到数据",
-                f"未能从 {self.hems_db.db_path} 中读取到 Modbus 应用，请确认文件路径是否正确。",
+                f"当前数据库路径：\n{self.hems_db.db_path}\n\n未读取到有效的 Modbus 应用配置。\n是否立即浏览选择其他业务数据库文件？",
             )
+            if ret:
+                self._select_database_file(on_success_callback=self._open_import_db_dialog)
             return
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("从业务数据库 (extra/hems.cdb) 导入 Modbus 设备业务配置")
-        dlg.geometry("780x520")
+        dlg.title(f"从业务数据库导入 Modbus 设备业务配置 - [{os.path.basename(self.hems_db.db_path)}]")
+        dlg.geometry("820x540")
         dlg.transient(self.root)
         dlg.grab_set()
 
         top_desc = ttk.Frame(dlg, padding=8)
         top_desc.pack(fill=tk.X)
+
+        title_line = ttk.Frame(top_desc)
+        title_line.pack(fill=tk.X)
+
         ttk.Label(
-            top_desc,
+            title_line,
             text=f"📂 当前数据库: {self.hems_db.db_path} | 共识别到 {len(apps)} 个 Modbus 业务模块 (app 表配置)",
             font=("Microsoft YaHei", 9, "bold"),
             foreground="#0066cc",
-        ).pack(anchor=tk.W)
+        ).pack(side=tk.LEFT)
+
+        def _change_db_in_dialog():
+            dlg.destroy()
+            self._select_database_file(on_success_callback=self._open_import_db_dialog)
+
+        ttk.Button(
+            title_line,
+            text="📂 浏览更换数据库...",
+            command=_change_db_in_dialog,
+        ).pack(side=tk.RIGHT, padx=4)
         ttk.Label(
             top_desc,
             text="请在下方选择目标设备，可一键将其业务点位/轮询规则导入至 Slave 模拟器或 Poll 调试器中：",
@@ -454,23 +509,43 @@ class ModbusStudioApp:
         """打开基于 app.More 配置的业务配对中心."""
         rules = self.pairing_engine.rules
         if not rules:
-            messagebox.showinfo("提示", "未在数据库中解析到配对规则")
+            ret = messagebox.askyesno(
+                "提示",
+                f"当前数据库 [{self.hems_db.db_path}] 中未解析到配对规则。\n是否立即浏览选择其他业务数据库文件？",
+            )
+            if ret:
+                self._select_database_file(on_success_callback=self._open_pairing_dialog)
             return
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("业务配对中心 (基于 app.More 自动配对 & 批量变位)")
+        dlg.title(f"业务配对中心 (基于 app.More 自动配对 & 批量变位) - [{os.path.basename(self.hems_db.db_path)}]")
         dlg.geometry("980x600")
         dlg.transient(self.root)
         dlg.grab_set()
 
         top_desc = ttk.Frame(dlg, padding=8)
         top_desc.pack(fill=tk.X)
+
+        title_line = ttk.Frame(top_desc)
+        title_line.pack(fill=tk.X)
+
         ttk.Label(
-            top_desc,
-            text=f"⚡ 智能业务配对引擎 | 共识别到 {len(rules)} 条从南向采集到北向转发的配对规则",
+            title_line,
+            text=f"⚡ 智能业务配对引擎 | 当前库: {os.path.basename(self.hems_db.db_path)} | 共识别到 {len(rules)} 条配对规则",
             font=("Microsoft YaHei", 9, "bold"),
             foreground="#0066cc",
-        ).pack(anchor=tk.W)
+        ).pack(side=tk.LEFT)
+
+        def _change_db_in_pairing():
+            dlg.destroy()
+            self._select_database_file(on_success_callback=self._open_pairing_dialog)
+
+        ttk.Button(
+            title_line,
+            text="📂 浏览更换数据库...",
+            command=_change_db_in_pairing,
+        ).pack(side=tk.RIGHT, padx=4)
+
         ttk.Label(
             top_desc,
             text="系统已自动根据 app.More 配置完成配对映射！支持多选配对点位，一键批量修改变位模式，或一键应用端到端仿真：",
