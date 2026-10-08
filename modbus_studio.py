@@ -80,6 +80,42 @@ SERIAL_BUS_NAMES = [
     "RS-232",
 ]
 
+AREA_FRIENDLY_NAMES = [
+    "保持寄存器 (4x)",
+    "输入寄存器 (3x)",
+    "线圈 (0x)",
+    "离散输入 (1x)",
+]
+
+
+def normalize_area_type(area_str: str) -> str:
+    """将界面选项或简写归一化为 AreaType 标准常量."""
+    if not area_str:
+        return AreaType.HOLDING_REGISTER
+    if "4x" in area_str or "保持" in area_str or "Holding" in area_str:
+        return AreaType.HOLDING_REGISTER
+    if "3x" in area_str or "输入寄存器" in area_str or "InputRegister" in area_str:
+        return AreaType.INPUT_REGISTER
+    if "0x" in area_str or "线圈" in area_str or "Coil" in area_str:
+        return AreaType.COIL
+    if "1x" in area_str or "离散" in area_str or "Discrete" in area_str:
+        return AreaType.DISCRETE_INPUT
+    return AreaType.HOLDING_REGISTER
+
+
+def get_area_friendly_name(area_str: str) -> str:
+    """获取区域类型的紧凑友好中文显示名称."""
+    std = normalize_area_type(area_str)
+    if std == AreaType.HOLDING_REGISTER:
+        return "保持寄存器 (4x)"
+    if std == AreaType.INPUT_REGISTER:
+        return "输入寄存器 (3x)"
+    if std == AreaType.COIL:
+        return "线圈 (0x)"
+    if std == AreaType.DISCRETE_INPUT:
+        return "离散输入 (1x)"
+    return "保持寄存器 (4x)"
+
 
 class SlaveServiceInstance:
     """代表一个独立的 Modbus Slave 从机服务实例 (支持以太网 TCP 与 串行端口 RTU 485/232 独立监听)."""
@@ -127,8 +163,8 @@ class ModbusStudioApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Modbus Studio - 业务配置与变位仿真调试工作站 (支持 extra/hems.cdb)")
-        self.root.geometry("1180x800")
-        self.root.minsize(980, 620)
+        self.root.geometry("1220x820")
+        self.root.minsize(1020, 640)
 
         # 窗口图标与任务栏图标双重绑定 (彻底规避 Windows 任务栏退化为默认羽毛图标)
         icon_path = get_resource_path("app.ico")
@@ -232,8 +268,8 @@ class ModbusStudioApp:
         ttk.Button(log_tools, text="📋 粘贴", width=6, command=self._paste_log).pack(side=tk.LEFT, padx=2)
         ttk.Button(log_tools, text="🔲 全选", width=6, command=self._select_all_log).pack(side=tk.LEFT, padx=2)
         ttk.Button(log_tools, text="🧹 清空", width=6, command=self._clear_log).pack(side=tk.LEFT, padx=2)
-        ttk.Button(log_tools, text="💾 导出CSV", width=9, command=self._export_log_to_csv).pack(side=tk.LEFT, padx=2)
-        ttk.Button(log_tools, text="📂 打开日志目录", width=12, command=self._open_log_dir).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="💾 导出CSV", width=8, command=self._export_log_to_csv).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="📂 日志目录", width=9, command=self._open_log_dir).pack(side=tk.LEFT, padx=2)
 
         self.log_autoscroll_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(log_tools, text="自动滚屏", variable=self.log_autoscroll_var).pack(side=tk.LEFT, padx=(10, 4))
@@ -449,80 +485,78 @@ class ModbusStudioApp:
         top_bar = ttk.LabelFrame(parent, text=" 从机服务实例与连接配置 (支持多实例独立监听不同 IP:Port 或 COM 串口) ")
         top_bar.pack(fill=tk.X, padx=6, pady=3)
 
-        # 第 0 行：服务实例选择与业务数据库操作
-        ttk.Label(top_bar, text="从机服务实例:").grid(row=0, column=0, padx=4, pady=3, sticky=tk.W)
-        self.slave_inst_combo = ttk.Combobox(top_bar, width=28, state="readonly")
-        self.slave_inst_combo.grid(row=0, column=1, columnspan=2, padx=4, pady=3, sticky=tk.W)
+        # 第 0 行：服务实例选择 (左侧) + 服务启停总控 (右侧)
+        row0 = ttk.Frame(top_bar)
+        row0.pack(fill=tk.X, padx=4, pady=2)
+
+        ttk.Label(row0, text="从机服务实例:").pack(side=tk.LEFT, padx=(2, 4))
+        self.slave_inst_combo = ttk.Combobox(row0, width=22, state="readonly")
+        self.slave_inst_combo.pack(side=tk.LEFT, padx=2)
         self.slave_inst_combo.bind("<<ComboboxSelected>>", self._on_switch_slave_instance)
 
-        ttk.Button(top_bar, text="➕ 新建服务", command=self._add_new_slave_instance).grid(row=0, column=3, padx=2, pady=3)
-        ttk.Button(top_bar, text="🗑️ 删除服务", command=self._delete_current_slave_instance).grid(row=0, column=4, padx=2, pady=3)
+        ttk.Button(row0, text="➕ 新建", width=6, command=self._add_new_slave_instance).pack(side=tk.LEFT, padx=2)
+        ttk.Button(row0, text="🗑️ 删除", width=6, command=self._delete_current_slave_instance).pack(side=tk.LEFT, padx=2)
 
-        ttk.Separator(top_bar, orient=tk.VERTICAL).grid(row=0, column=5, rowspan=2, sticky="ns", padx=8, pady=2)
+        ttk.Separator(row0, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
 
-        # 核心业务数据库管理按钮组
-        btn_switch_db = ttk.Button(
-            top_bar,
-            text="🗃️ 关联/切换数据库...",
-            command=self._select_database_file,
+        # 启停控制区放置在 row0 右侧 (完全保证空间，绝不被截断)
+        ttk.Button(row0, text="⏹ 全部停止", command=self._stop_all_slaves).pack(side=tk.RIGHT, padx=3)
+        ttk.Button(row0, text="⚡ 全部启动", command=self._start_all_slaves).pack(side=tk.RIGHT, padx=3)
+        self.slave_status_lbl = ttk.Label(
+            row0,
+            text="状态: 已停止 🔴",
+            font=("Microsoft YaHei", 9, "bold"),
+            foreground="red",
         )
-        btn_switch_db.grid(row=0, column=6, padx=3, pady=3)
-
-        btn_import_db = ttk.Button(
-            top_bar,
-            text="📂 导入设备点表...",
-            command=self._open_import_db_dialog,
+        self.slave_status_lbl.pack(side=tk.RIGHT, padx=6)
+        self.btn_slave_start = ttk.Button(
+            row0,
+            text="▶ 启动当前服务",
+            command=self._toggle_slave_server,
         )
-        btn_import_db.grid(row=0, column=7, padx=3, pady=3)
+        self.btn_slave_start.pack(side=tk.RIGHT, padx=3)
 
-        btn_pairing = ttk.Button(
-            top_bar,
-            text="🔗 业务配对中心 (基于 More)...",
-            command=self._open_pairing_dialog,
-        )
-        btn_pairing.grid(row=0, column=8, padx=3, pady=3)
+        # 第 1 行：通讯参数配置 (左侧) + 业务数据库管理按钮组 (右侧)
+        row1 = ttk.Frame(top_bar)
+        row1.pack(fill=tk.X, padx=4, pady=2)
 
-        # 第 1 行：通讯方式单选 + 动态参数容器 + 启停操作
-        cfg_row = ttk.Frame(top_bar)
-        cfg_row.grid(row=1, column=0, columnspan=10, sticky="ew", padx=2, pady=3)
-
-        ttk.Label(cfg_row, text="通讯方式:").pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(row1, text="通讯方式:").pack(side=tk.LEFT, padx=(2, 2))
         self.slave_comm_type_var = tk.StringVar(value="TCP")
         ttk.Radiobutton(
-            cfg_row,
+            row1,
             text="以太网 (TCP)",
             value="TCP",
             variable=self.slave_comm_type_var,
             command=self._on_slave_comm_type_change,
-        ).pack(side=tk.LEFT, padx=3)
+        ).pack(side=tk.LEFT, padx=2)
         ttk.Radiobutton(
-            cfg_row,
-            text="串行端口 (RTU / 485 / 232)",
+            row1,
+            text="串行端口 (RTU)",
             value="RTU",
             variable=self.slave_comm_type_var,
             command=self._on_slave_comm_type_change,
-        ).pack(side=tk.LEFT, padx=3)
+        ).pack(side=tk.LEFT, padx=2)
 
-        ttk.Separator(cfg_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        ttk.Separator(row1, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
 
         # TCP 参数子容器
-        self.slave_tcp_frame = ttk.Frame(cfg_row)
+        self.slave_tcp_frame = ttk.Frame(row1)
         ttk.Label(self.slave_tcp_frame, text="监听 IP:").pack(side=tk.LEFT, padx=(2, 2))
         self.slave_ip_var = tk.StringVar(value="0.0.0.0")
-        ttk.Entry(self.slave_tcp_frame, textvariable=self.slave_ip_var, width=11).pack(side=tk.LEFT, padx=2)
+        ttk.Entry(self.slave_tcp_frame, textvariable=self.slave_ip_var, width=12).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self.slave_tcp_frame, text="端口:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.slave_tcp_frame, text="端口:").pack(side=tk.LEFT, padx=(4, 2))
         self.slave_port_var = tk.IntVar(value=5020)
         ttk.Entry(self.slave_tcp_frame, textvariable=self.slave_port_var, width=6).pack(side=tk.LEFT, padx=2)
 
         # RTU 参数子容器
-        self.slave_rtu_frame = ttk.Frame(cfg_row)
-        ttk.Label(self.slave_rtu_frame, text="串口 (COM):").pack(side=tk.LEFT, padx=(2, 2))
+        self.slave_rtu_frame = ttk.Frame(row1)
+        ttk.Label(self.slave_rtu_frame, text="串口:").pack(side=tk.LEFT, padx=(2, 2))
         self.slave_serial_port_var = tk.StringVar(value="COM1")
         self.slave_com_combo = ttk.Combobox(
             self.slave_rtu_frame,
             textvariable=self.slave_serial_port_var,
-            width=8,
+            width=7,
             values=get_available_com_ports(),
         )
         self.slave_com_combo.pack(side=tk.LEFT, padx=2)
@@ -533,17 +567,17 @@ class ModbusStudioApp:
             command=self._refresh_slave_com_ports,
         ).pack(side=tk.LEFT, padx=1)
 
-        ttk.Label(self.slave_rtu_frame, text="总线:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.slave_rtu_frame, text="总线:").pack(side=tk.LEFT, padx=(4, 2))
         self.slave_bus_label_var = tk.StringVar(value="RS-485(A1/B1)")
         self.slave_bus_combo = ttk.Combobox(
             self.slave_rtu_frame,
             textvariable=self.slave_bus_label_var,
-            width=14,
+            width=13,
             values=SERIAL_BUS_NAMES,
         )
         self.slave_bus_combo.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self.slave_rtu_frame, text="波特率:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.slave_rtu_frame, text="波特率:").pack(side=tk.LEFT, padx=(4, 2))
         self.slave_baud_var = tk.IntVar(value=9600)
         self.slave_baud_combo = ttk.Combobox(
             self.slave_rtu_frame,
@@ -554,12 +588,12 @@ class ModbusStudioApp:
         )
         self.slave_baud_combo.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self.slave_rtu_frame, text="校验:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.slave_rtu_frame, text="校验:").pack(side=tk.LEFT, padx=(4, 2))
         self.slave_parity_var = tk.StringVar(value="N (无校验)")
         self.slave_parity_combo = ttk.Combobox(
             self.slave_rtu_frame,
             textvariable=self.slave_parity_var,
-            width=10,
+            width=9,
             state="readonly",
             values=AVAILABLE_PARITIES,
         )
@@ -569,31 +603,33 @@ class ModbusStudioApp:
         self.slave_tcp_frame.pack(side=tk.LEFT)
 
         # 公共参数：从机 ID
-        self.slave_common_frame = ttk.Frame(cfg_row)
-        self.slave_common_frame.pack(side=tk.LEFT, padx=(6, 0))
+        self.slave_common_frame = ttk.Frame(row1)
+        self.slave_common_frame.pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(self.slave_common_frame, text="从机 ID:").pack(side=tk.LEFT, padx=(2, 2))
         self.slave_id_var = tk.IntVar(value=1)
         ttk.Entry(self.slave_common_frame, textvariable=self.slave_id_var, width=4).pack(side=tk.LEFT, padx=2)
 
-        # 右侧操作按钮
-        action_box = ttk.Frame(cfg_row)
-        action_box.pack(side=tk.RIGHT, padx=4)
+        # 核心业务数据库管理按钮组 (放置在 row1 右侧)
+        btn_pairing = ttk.Button(
+            row1,
+            text="🔗 业务配对中心 (基于 More)...",
+            command=self._open_pairing_dialog,
+        )
+        btn_pairing.pack(side=tk.RIGHT, padx=2)
 
-        ttk.Button(action_box, text="⏹ 全部停止", command=self._stop_all_slaves).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(action_box, text="⚡ 全部启动", command=self._start_all_slaves).pack(side=tk.RIGHT, padx=2)
-        self.slave_status_lbl = ttk.Label(
-            action_box,
-            text="状态: 已停止 🔴",
-            font=("Microsoft YaHei", 9, "bold"),
-            foreground="red",
+        btn_import_db = ttk.Button(
+            row1,
+            text="📂 导入设备点表...",
+            command=self._open_import_db_dialog,
         )
-        self.slave_status_lbl.pack(side=tk.RIGHT, padx=6)
-        self.btn_slave_start = ttk.Button(
-            action_box,
-            text="▶ 启动当前服务",
-            command=self._toggle_slave_server,
+        btn_import_db.pack(side=tk.RIGHT, padx=2)
+
+        btn_switch_db = ttk.Button(
+            row1,
+            text="🗃️ 关联/切换数据库...",
+            command=self._select_database_file,
         )
-        self.btn_slave_start.pack(side=tk.RIGHT, padx=2)
+        btn_switch_db.pack(side=tk.RIGHT, padx=2)
 
         # 2. 批量生成与单个添加控制栏
         point_ctrl_bar = ttk.LabelFrame(parent, text=" 点位规则生成 & 快捷操作 ")
@@ -604,27 +640,22 @@ class ModbusStudioApp:
             text="⚡ 批量输入规则生成点表...",
             command=self._open_batch_generate_dialog,
         )
-        btn_batch_dlg.grid(row=0, column=0, padx=6, pady=3)
+        btn_batch_dlg.grid(row=0, column=0, padx=5, pady=3)
 
         ttk.Separator(point_ctrl_bar, orient=tk.VERTICAL).grid(row=0, column=1, sticky="ns", padx=4, pady=2)
 
         ttk.Label(point_ctrl_bar, text="地址:").grid(row=0, column=2, padx=2, pady=2)
         self.new_addr_var = tk.StringVar(value="")
-        ttk.Entry(point_ctrl_bar, textvariable=self.new_addr_var, width=6).grid(row=0, column=3, padx=2, pady=2)
+        ttk.Entry(point_ctrl_bar, textvariable=self.new_addr_var, width=5).grid(row=0, column=3, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="描述:").grid(row=0, column=4, padx=2, pady=2)
         self.new_desc_var = tk.StringVar(value="")
-        ttk.Entry(point_ctrl_bar, textvariable=self.new_desc_var, width=12).grid(row=0, column=5, padx=2, pady=2)
+        ttk.Entry(point_ctrl_bar, textvariable=self.new_desc_var, width=10).grid(row=0, column=5, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="区域:").grid(row=0, column=6, padx=2, pady=2)
-        self.new_area_var = tk.StringVar(value=AreaType.HOLDING_REGISTER)
-        area_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_area_var, width=17, state="readonly")
-        area_combo["values"] = [
-            AreaType.HOLDING_REGISTER,
-            AreaType.INPUT_REGISTER,
-            AreaType.COIL,
-            AreaType.DISCRETE_INPUT,
-        ]
+        self.new_area_var = tk.StringVar(value="保持寄存器 (4x)")
+        area_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_area_var, width=13, state="readonly")
+        area_combo["values"] = AREA_FRIENDLY_NAMES
         area_combo.grid(row=0, column=7, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="类型:").grid(row=0, column=8, padx=2, pady=2)
@@ -635,21 +666,21 @@ class ModbusStudioApp:
 
         ttk.Label(point_ctrl_bar, text="变位:").grid(row=0, column=10, padx=2, pady=2)
         self.new_order_var = tk.StringVar(value=ByteOrderMode.CDAB.value)
-        order_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_order_var, width=7, state="readonly")
+        order_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_order_var, width=6, state="readonly")
         order_combo["values"] = [m.value for m in ByteOrderMode]
         order_combo.grid(row=0, column=11, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="初始值:").grid(row=0, column=12, padx=2, pady=2)
         self.new_val_var = tk.StringVar(value="")
-        ttk.Entry(point_ctrl_bar, textvariable=self.new_val_var, width=7).grid(row=0, column=13, padx=2, pady=2)
+        ttk.Entry(point_ctrl_bar, textvariable=self.new_val_var, width=6).grid(row=0, column=13, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="模拟:").grid(row=0, column=14, padx=2, pady=2)
         self.new_sim_var = tk.StringVar(value="固定")
-        sim_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_sim_var, width=8, state="readonly")
+        sim_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_sim_var, width=7, state="readonly")
         sim_combo["values"] = ["固定", "随机波动", "累加递增", "正弦波"]
         sim_combo.grid(row=0, column=15, padx=2, pady=2)
 
-        ttk.Button(point_ctrl_bar, text="➕ 单点添加", command=self._add_or_update_slave_point).grid(row=0, column=16, padx=4, pady=2)
+        ttk.Button(point_ctrl_bar, text="➕ 单点添加", command=self._add_or_update_slave_point).grid(row=0, column=16, padx=5, pady=2)
 
         # 3. 批量操作工具栏（支持选择当前从机或全部从机服务生效）
         batch_bar = ttk.LabelFrame(parent, text=" 🛠️ 批量操作与规则配置 (支持选择当前从机或全部从机生效) ")
@@ -1717,14 +1748,9 @@ class ModbusStudioApp:
         )
 
         ttk.Label(form, text="存储区域:").grid(row=1, column=0, sticky=tk.W, pady=4)
-        area_var = tk.StringVar(value=AreaType.HOLDING_REGISTER)
-        area_cb = ttk.Combobox(form, textvariable=area_var, state="readonly", width=24)
-        area_cb["values"] = [
-            AreaType.HOLDING_REGISTER,
-            AreaType.INPUT_REGISTER,
-            AreaType.COIL,
-            AreaType.DISCRETE_INPUT,
-        ]
+        area_var = tk.StringVar(value="保持寄存器 (4x)")
+        area_cb = ttk.Combobox(form, textvariable=area_var, state="readonly", width=20)
+        area_cb["values"] = AREA_FRIENDLY_NAMES
         area_cb.grid(row=1, column=1, sticky=tk.W, pady=4)
 
         ttk.Label(form, text="起始地址:").grid(row=2, column=0, sticky=tk.W, pady=4)
@@ -1768,7 +1794,7 @@ class ModbusStudioApp:
 
         def _do_generate():
             try:
-                area = area_var.get()
+                area = normalize_area_type(area_var.get())
                 start_addr = start_addr_var.get()
                 total_count = count_var.get()
                 dtype = ModbusDataType(dtype_var.get())
@@ -2012,7 +2038,7 @@ class ModbusStudioApp:
                 return
             addr = int(addr_str)
             desc = self.new_desc_var.get().strip() or f"点位_{addr}"
-            area = self.new_area_var.get()
+            area = normalize_area_type(self.new_area_var.get())
             dtype = ModbusDataType(self.new_type_var.get())
             order = ByteOrderMode(self.new_order_var.get())
             val_str = self.new_val_var.get().strip()
@@ -2201,47 +2227,47 @@ class ModbusStudioApp:
         top_bar = ttk.LabelFrame(parent, text=" 目标从机与轮询参数 (支持以太网 TCP 与 串行端口 RTU 485/232) ")
         top_bar.pack(fill=tk.X, padx=6, pady=3)
 
-        # 第 0 行：通讯方式单选 + 动态参数容器 + 启停操作
-        cfg_row = ttk.Frame(top_bar)
-        cfg_row.pack(fill=tk.X, padx=2, pady=3)
+        # 第 0 行：通讯方式单选 + 动态参数容器 + 连接控制 (左侧配置，右侧连接与导入)
+        row0 = ttk.Frame(top_bar)
+        row0.pack(fill=tk.X, padx=4, pady=2)
 
-        ttk.Label(cfg_row, text="通讯方式:").pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(row0, text="通讯方式:").pack(side=tk.LEFT, padx=(2, 2))
         self.poll_comm_type_var = tk.StringVar(value="TCP")
         ttk.Radiobutton(
-            cfg_row,
+            row0,
             text="以太网 (TCP)",
             value="TCP",
             variable=self.poll_comm_type_var,
             command=self._on_poll_comm_type_change,
-        ).pack(side=tk.LEFT, padx=3)
+        ).pack(side=tk.LEFT, padx=2)
         ttk.Radiobutton(
-            cfg_row,
-            text="串行端口 (RTU / 485 / 232)",
+            row0,
+            text="串行端口 (RTU)",
             value="RTU",
             variable=self.poll_comm_type_var,
             command=self._on_poll_comm_type_change,
-        ).pack(side=tk.LEFT, padx=3)
+        ).pack(side=tk.LEFT, padx=2)
 
-        ttk.Separator(cfg_row, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        ttk.Separator(row0, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
 
         # TCP 参数子容器
-        self.poll_tcp_frame = ttk.Frame(cfg_row)
+        self.poll_tcp_frame = ttk.Frame(row0)
         ttk.Label(self.poll_tcp_frame, text="目标 IP:").pack(side=tk.LEFT, padx=(2, 2))
         self.poll_ip_var = tk.StringVar(value="127.0.0.1")
         ttk.Entry(self.poll_tcp_frame, textvariable=self.poll_ip_var, width=12).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self.poll_tcp_frame, text="端口:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.poll_tcp_frame, text="端口:").pack(side=tk.LEFT, padx=(4, 2))
         self.poll_port_var = tk.IntVar(value=5020)
-        ttk.Entry(self.poll_tcp_frame, textvariable=self.poll_port_var, width=7).pack(side=tk.LEFT, padx=2)
+        ttk.Entry(self.poll_tcp_frame, textvariable=self.poll_port_var, width=6).pack(side=tk.LEFT, padx=2)
 
         # RTU 参数子容器
-        self.poll_rtu_frame = ttk.Frame(cfg_row)
-        ttk.Label(self.poll_rtu_frame, text="串口 (COM):").pack(side=tk.LEFT, padx=(2, 2))
+        self.poll_rtu_frame = ttk.Frame(row0)
+        ttk.Label(self.poll_rtu_frame, text="串口:").pack(side=tk.LEFT, padx=(2, 2))
         self.poll_serial_port_var = tk.StringVar(value="COM1")
         self.poll_com_combo = ttk.Combobox(
             self.poll_rtu_frame,
             textvariable=self.poll_serial_port_var,
-            width=8,
+            width=7,
             values=get_available_com_ports(),
         )
         self.poll_com_combo.pack(side=tk.LEFT, padx=2)
@@ -2252,7 +2278,7 @@ class ModbusStudioApp:
             command=self._refresh_poll_com_ports,
         ).pack(side=tk.LEFT, padx=1)
 
-        ttk.Label(self.poll_rtu_frame, text="波特率:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.poll_rtu_frame, text="波特率:").pack(side=tk.LEFT, padx=(4, 2))
         self.poll_baud_var = tk.IntVar(value=9600)
         self.poll_baud_combo = ttk.Combobox(
             self.poll_rtu_frame,
@@ -2263,12 +2289,12 @@ class ModbusStudioApp:
         )
         self.poll_baud_combo.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(self.poll_rtu_frame, text="校验:").pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(self.poll_rtu_frame, text="校验:").pack(side=tk.LEFT, padx=(4, 2))
         self.poll_parity_var = tk.StringVar(value="N (无校验)")
         self.poll_parity_combo = ttk.Combobox(
             self.poll_rtu_frame,
             textvariable=self.poll_parity_var,
-            width=10,
+            width=9,
             state="readonly",
             values=AVAILABLE_PARITIES,
         )
@@ -2278,73 +2304,66 @@ class ModbusStudioApp:
         self.poll_tcp_frame.pack(side=tk.LEFT)
 
         # 公共参数：站号 ID
-        self.poll_common_frame = ttk.Frame(cfg_row)
-        self.poll_common_frame.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(self.poll_common_frame, text="站号 ID:").pack(side=tk.LEFT, padx=(2, 2))
+        self.poll_common_frame = ttk.Frame(row0)
+        self.poll_common_frame.pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(self.poll_common_frame, text="从机 ID:").pack(side=tk.LEFT, padx=(2, 2))
         self.poll_id_var = tk.IntVar(value=1)
         ttk.Entry(self.poll_common_frame, textvariable=self.poll_id_var, width=4).pack(side=tk.LEFT, padx=2)
 
-        # 右侧操作区
-        poll_action_box = ttk.Frame(cfg_row)
-        poll_action_box.pack(side=tk.RIGHT, padx=4)
-
-        ttk.Button(
-            poll_action_box,
+        # 右侧操作区 (连接按钮、状态、导入按钮)
+        btn_import_rule = ttk.Button(
+            row0,
             text="📂 导入业务设备轮询规则...",
             command=self._open_import_db_dialog,
-        ).pack(side=tk.RIGHT, padx=4)
-
-        self.poll_stat_lbl = ttk.Label(poll_action_box, text="Tx: 0 | Rx: 0 | Err: 0 | RTT: 0.0ms")
-        self.poll_stat_lbl.pack(side=tk.RIGHT, padx=6)
+        )
+        btn_import_rule.pack(side=tk.RIGHT, padx=3)
 
         self.poll_conn_status = ttk.Label(
-            poll_action_box,
+            row0,
             text="未连接 ⚪",
             foreground="gray",
             font=("Microsoft YaHei", 9, "bold"),
         )
-        self.poll_conn_status.pack(side=tk.RIGHT, padx=4)
+        self.poll_conn_status.pack(side=tk.RIGHT, padx=6)
 
         self.btn_poll_conn = ttk.Button(
-            poll_action_box,
+            row0,
             text="🔗 连接从机",
             command=self._toggle_poll_connect,
         )
-        self.btn_poll_conn.pack(side=tk.RIGHT, padx=4)
+        self.btn_poll_conn.pack(side=tk.RIGHT, padx=3)
 
-        # 第 2 行：功能区域、起始地址、读取字数、变位模式、单次读取、启动轮询
-        line2 = ttk.Frame(top_bar)
-        line2.pack(fill=tk.X, padx=2, pady=3)
+        # 第 1 行：功能区域、起始地址、读取字数、变位模式、单次读取、启动轮询 + Tx/Rx 统计 (右侧)
+        row1 = ttk.Frame(top_bar)
+        row1.pack(fill=tk.X, padx=4, pady=2)
 
-        ttk.Label(line2, text="功能区域:").grid(row=0, column=0, padx=3, pady=2)
-        self.poll_area_var = tk.StringVar(value=AreaType.HOLDING_REGISTER)
-        area_cb = ttk.Combobox(line2, textvariable=self.poll_area_var, width=18, state="readonly")
-        area_cb["values"] = [
-            AreaType.HOLDING_REGISTER,
-            AreaType.INPUT_REGISTER,
-            AreaType.COIL,
-            AreaType.DISCRETE_INPUT,
-        ]
-        area_cb.grid(row=0, column=1, padx=3, pady=2)
+        ttk.Label(row1, text="功能区域:").pack(side=tk.LEFT, padx=(2, 2))
+        self.poll_area_var = tk.StringVar(value="保持寄存器 (4x)")
+        area_cb = ttk.Combobox(row1, textvariable=self.poll_area_var, width=13, state="readonly")
+        area_cb["values"] = AREA_FRIENDLY_NAMES
+        area_cb.pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(line2, text="起始地址:").grid(row=0, column=2, padx=3, pady=2)
+        ttk.Label(row1, text="起始地址:").pack(side=tk.LEFT, padx=(4, 2))
         self.poll_start_var = tk.IntVar(value=0)
-        ttk.Entry(line2, textvariable=self.poll_start_var, width=8).grid(row=0, column=3, padx=3, pady=2)
+        ttk.Entry(row1, textvariable=self.poll_start_var, width=6).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(line2, text="读取字数:").grid(row=0, column=4, padx=3, pady=2)
+        ttk.Label(row1, text="读取字数:").pack(side=tk.LEFT, padx=(4, 2))
         self.poll_count_var = tk.IntVar(value=20)
-        ttk.Entry(line2, textvariable=self.poll_count_var, width=6).grid(row=0, column=5, padx=3, pady=2)
+        ttk.Entry(row1, textvariable=self.poll_count_var, width=5).pack(side=tk.LEFT, padx=2)
 
-        ttk.Label(line2, text="全局变位模式:").grid(row=0, column=6, padx=3, pady=2)
+        ttk.Label(row1, text="全局变位:").pack(side=tk.LEFT, padx=(4, 2))
         self.poll_order_var = tk.StringVar(value=ByteOrderMode.CDAB.value)
-        order_cb = ttk.Combobox(line2, textvariable=self.poll_order_var, width=7, state="readonly")
+        order_cb = ttk.Combobox(row1, textvariable=self.poll_order_var, width=6, state="readonly")
         order_cb["values"] = [m.value for m in ByteOrderMode]
-        order_cb.grid(row=0, column=7, padx=3, pady=2)
+        order_cb.pack(side=tk.LEFT, padx=2)
         order_cb.bind("<<ComboboxSelected>>", lambda e: self._update_poll_table())
 
-        ttk.Button(line2, text="⚡ 单次读取", command=self._poll_once).grid(row=0, column=8, padx=4, pady=2)
-        self.btn_poll_loop = ttk.Button(line2, text="🔄 启动轮询 (1s)", command=self._toggle_poll_loop)
-        self.btn_poll_loop.grid(row=0, column=9, padx=4, pady=2)
+        ttk.Button(row1, text="⚡ 单次读取", command=self._poll_once).pack(side=tk.LEFT, padx=4)
+        self.btn_poll_loop = ttk.Button(row1, text="🔄 启动轮询 (1s)", command=self._toggle_poll_loop)
+        self.btn_poll_loop.pack(side=tk.LEFT, padx=2)
+
+        self.poll_stat_lbl = ttk.Label(row1, text="Tx: 0 | Rx: 0 | Err: 0 | RTT: 0.0ms")
+        self.poll_stat_lbl.pack(side=tk.RIGHT, padx=4)
 
         # 快捷写入栏
         write_bar = ttk.LabelFrame(parent, text=" 快捷写入测试 (写寄存器 FC 06/16 或写线圈 FC 05) ")
@@ -2456,7 +2475,7 @@ class ModbusStudioApp:
             self.log("已断开与从机的连接。")
 
     def _poll_once(self):
-        area = self.poll_area_var.get()
+        area = normalize_area_type(self.poll_area_var.get())
         start = self.poll_start_var.get()
         count = self.poll_count_var.get()
         ok, vals, err = self.poll_engine.read_block(area, start, count)
@@ -2470,7 +2489,7 @@ class ModbusStudioApp:
 
     def _toggle_poll_loop(self):
         if not self.poll_engine.is_polling:
-            area = self.poll_area_var.get()
+            area = normalize_area_type(self.poll_area_var.get())
             start = self.poll_start_var.get()
             count = self.poll_count_var.get()
             self.poll_engine.on_poll_success = lambda cache: self.root.after(0, self._on_poll_update)
