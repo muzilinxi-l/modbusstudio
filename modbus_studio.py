@@ -84,6 +84,9 @@ class ModbusStudioApp:
         self.current_slave_name: str = default_inst.name
 
         self.poll_engine: ModbusPollEngine = ModbusPollEngine()
+        # 绑定 Poll 引擎的报文日志回调
+        self.poll_engine.on_packet_log = lambda msg, level: self.root.after(0, lambda: self.log(msg, level))
+
         self.hems_db = HemsDatabase(os.path.join("extra", "hems.cdb"))
         self.pairing_engine = HemsPairingEngine(self.hems_db.db_path)
 
@@ -115,9 +118,13 @@ class ModbusStudioApp:
         style.map("Treeview", background=[("selected", "#0078d7")])
 
     def _build_ui(self):
-        # 顶部选项卡
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        # 垂直窗格分割器 (支持上下自由拖拽拉伸调整日志区域大小)
+        self.main_paned = ttk.PanedWindow(self.root, orient=tk.VERTICAL)
+        self.main_paned.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+
+        # 顶部选项卡区域 (放入 PanedWindow 上半部分)
+        self.notebook = ttk.Notebook(self.main_paned)
+        self.main_paned.add(self.notebook, weight=4)
 
         # Tab 1: Slave 从机模拟器
         self.slave_frame = ttk.Frame(self.notebook)
@@ -129,23 +136,116 @@ class ModbusStudioApp:
         self.notebook.add(self.poll_frame, text="  📡 Modbus Poll 主机轮询调试器 (支持业务规则导入)  ")
         self._build_poll_tab(self.poll_frame)
 
-        # 底部日志面板
-        log_frame = ttk.LabelFrame(self.root, text=" 实时系统与通信日志 ")
-        log_frame.pack(fill=tk.X, padx=6, pady=4)
+        # 底部日志面板 (放入 PanedWindow 下半部分，可自由上下拉伸)
+        log_frame = ttk.LabelFrame(self.main_paned, text=" 实时系统与通信报文日志 (可上下拖动分割栏调整高度) ")
+        self.main_paned.add(log_frame, weight=1)
 
-        self.log_text = tk.Text(log_frame, height=5, font=("Consolas", 9), bg="#1e1e1e", fg="#d4d4d4")
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2, pady=2)
+        # 快捷工具栏 (复制、粘贴、全选、清空、自动滚屏)
+        log_tools = ttk.Frame(log_frame)
+        log_tools.pack(fill=tk.X, padx=4, pady=2)
 
-        log_scroll = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        ttk.Button(log_tools, text="📋 复制", width=6, command=self._copy_log).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="📋 粘贴", width=6, command=self._paste_log).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="🔲 全选", width=6, command=self._select_all_log).pack(side=tk.LEFT, padx=2)
+        ttk.Button(log_tools, text="🧹 清空", width=6, command=self._clear_log).pack(side=tk.LEFT, padx=2)
+
+        self.log_autoscroll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(log_tools, text="自动滚屏", variable=self.log_autoscroll_var).pack(side=tk.LEFT, padx=(10, 4))
+
+        self.log_show_packets_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(log_tools, text="显示问询与响应报文", variable=self.log_show_packets_var).pack(side=tk.LEFT, padx=4)
+
+        # 日志文本容器
+        log_container = ttk.Frame(log_frame)
+        log_container.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        self.log_text = tk.Text(
+            log_container,
+            height=6,
+            font=("Consolas", 9),
+            bg="#1e1e1e",
+            fg="#d4d4d4",
+            insertbackground="#ffffff",
+            wrap=tk.WORD,
+            undo=True,
+        )
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        log_scroll = ttk.Scrollbar(log_container, orient=tk.VERTICAL, command=self.log_text.yview)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=log_scroll.set)
 
+        # 配置日志颜色高亮标签
+        self.log_text.tag_config("INFO", foreground="#d4d4d4")
+        self.log_text.tag_config("TX", foreground="#4fc1ff")      # 问询/发送报文亮蓝
+        self.log_text.tag_config("RX", foreground="#b5cea8")      # 响应/接收报文亮绿
+        self.log_text.tag_config("WARN", foreground="#dcdcaa")    # 警告金黄
+        self.log_text.tag_config("ERROR", foreground="#f44747")   # 错误鲜红
+
+        self._setup_log_menu()
+
+    def _setup_log_menu(self):
+        """配置日志区域的右键菜单与快捷键."""
+        # 快捷键绑定
+        self.log_text.bind("<Control-c>", lambda e: self._copy_log())
+        self.log_text.bind("<Control-C>", lambda e: self._copy_log())
+        self.log_text.bind("<Control-v>", lambda e: self._paste_log())
+        self.log_text.bind("<Control-V>", lambda e: self._paste_log())
+        self.log_text.bind("<Control-a>", lambda e: self._select_all_log())
+        self.log_text.bind("<Control-A>", lambda e: self._select_all_log())
+
+        self.log_menu = tk.Menu(self.root, tearoff=0)
+        self.log_menu.add_command(label="📋 复制 (Ctrl+C)", command=self._copy_log)
+        self.log_menu.add_command(label="📋 粘贴 (Ctrl+V)", command=self._paste_log)
+        self.log_menu.add_separator()
+        self.log_menu.add_command(label="🔲 全选 (Ctrl+A)", command=self._select_all_log)
+        self.log_menu.add_command(label="🧹 清空日志", command=self._clear_log)
+
+        def _popup_menu(event):
+            try:
+                self.log_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.log_menu.grab_release()
+
+        self.log_text.bind("<Button-3>", _popup_menu)
+
+    def _copy_log(self, event=None):
+        try:
+            sel = self.log_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+        except tk.TclError:
+            sel = self.log_text.get("1.0", tk.END).strip()
+        if sel:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(sel)
+        return "break"
+
+    def _paste_log(self, event=None):
+        try:
+            text = self.root.clipboard_get()
+            if text:
+                self.log_text.insert(tk.INSERT, text)
+                self.log_text.see(tk.INSERT)
+        except Exception:
+            pass
+        return "break"
+
+    def _select_all_log(self, event=None):
+        self.log_text.tag_add(tk.SEL, "1.0", tk.END)
+        self.log_text.mark_set(tk.INSERT, tk.END)
+        return "break"
+
+    def _clear_log(self):
+        self.log_text.delete("1.0", tk.END)
+
     def log(self, msg: str, level: str = "INFO"):
-        """向底部输出时间戳日志."""
+        """向底部输出带颜色标签的时间戳日志."""
+        if (level in ("TX", "RX")) and hasattr(self, "log_show_packets_var") and not self.log_show_packets_var.get():
+            return
         now = time.strftime("%H:%M:%S")
         line = f"[{now}] [{level}] {msg}\n"
-        self.log_text.insert(tk.END, line)
-        self.log_text.see(tk.END)
+        self.log_text.insert(tk.END, line, level)
+        if not hasattr(self, "log_autoscroll_var") or self.log_autoscroll_var.get():
+            self.log_text.see(tk.END)
 
     # =================================================================
     # Tab 1: Slave 从机模拟器 UI
@@ -224,11 +324,11 @@ class ModbusStudioApp:
         ttk.Separator(point_ctrl_bar, orient=tk.VERTICAL).grid(row=0, column=1, sticky="ns", padx=4, pady=2)
 
         ttk.Label(point_ctrl_bar, text="地址:").grid(row=0, column=2, padx=2, pady=2)
-        self.new_addr_var = tk.IntVar(value=0)
+        self.new_addr_var = tk.StringVar(value="")
         ttk.Entry(point_ctrl_bar, textvariable=self.new_addr_var, width=6).grid(row=0, column=3, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="描述:").grid(row=0, column=4, padx=2, pady=2)
-        self.new_desc_var = tk.StringVar(value="温度变送器")
+        self.new_desc_var = tk.StringVar(value="")
         ttk.Entry(point_ctrl_bar, textvariable=self.new_desc_var, width=12).grid(row=0, column=5, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="区域:").grid(row=0, column=6, padx=2, pady=2)
@@ -255,11 +355,11 @@ class ModbusStudioApp:
         order_combo.grid(row=0, column=11, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="初始值:").grid(row=0, column=12, padx=2, pady=2)
-        self.new_val_var = tk.StringVar(value="25.5")
+        self.new_val_var = tk.StringVar(value="")
         ttk.Entry(point_ctrl_bar, textvariable=self.new_val_var, width=7).grid(row=0, column=13, padx=2, pady=2)
 
         ttk.Label(point_ctrl_bar, text="模拟:").grid(row=0, column=14, padx=2, pady=2)
-        self.new_sim_var = tk.StringVar(value="随机波动")
+        self.new_sim_var = tk.StringVar(value="固定")
         sim_combo = ttk.Combobox(point_ctrl_bar, textvariable=self.new_sim_var, width=8, state="readonly")
         sim_combo["values"] = ["固定", "随机波动", "累加递增", "正弦波"]
         sim_combo.grid(row=0, column=15, padx=2, pady=2)
@@ -535,8 +635,8 @@ class ModbusStudioApp:
         dlg.transient(self.root)
         dlg.grab_set()
 
-        top_desc = ttk.Frame(dlg, padding=8)
-        top_desc.pack(fill=tk.X)
+        top_desc = ttk.Frame(dlg, padding=(10, 6))
+        top_desc.pack(fill=tk.X, expand=False)
 
         title_line = ttk.Frame(top_desc)
         title_line.pack(fill=tk.X)
@@ -557,21 +657,61 @@ class ModbusStudioApp:
             text="📂 浏览更换数据库...",
             command=_change_db_in_dialog,
         ).pack(side=tk.RIGHT, padx=4)
+
         ttk.Label(
             top_desc,
             text="请在下方选择目标设备，可一键将其业务点位/轮询规则导入至 Slave 模拟器或 Poll 调试器中：",
-        ).pack(anchor=tk.W, pady=2)
+        ).pack(anchor=tk.W, pady=(4, 0))
 
-        # 列表表格
-        table_frame = ttk.Frame(dlg, padding=8)
+        # 快捷全选控制条 (固定在顶部，不随拉伸改变高度)
+        select_bar = ttk.Frame(dlg, padding=(10, 2))
+        select_bar.pack(fill=tk.X, expand=False)
+
+        ttk.Label(select_bar, text="快捷多选:", font=("Microsoft YaHei", 9, "bold")).pack(side=tk.LEFT, padx=(0, 6))
+
+        def _select_all_enabled_slaves():
+            tree.selection_remove(tree.selection())
+            to_sel = []
+            for item_id in tree.get_children():
+                aid = int(tree.item(item_id)["values"][0])
+                app_obj = app_map.get(aid)
+                if app_obj and app_obj.app_type == 1 and app_obj.enable:
+                    to_sel.append(item_id)
+            if to_sel:
+                tree.selection_set(to_sel)
+                tree.see(to_sel[0])
+            else:
+                messagebox.showinfo("提示", "未找到状态为【已启用】的 Type=1 (Slave 从机) 设备！")
+
+        def _select_all_enabled_polls():
+            tree.selection_remove(tree.selection())
+            to_sel = []
+            for item_id in tree.get_children():
+                aid = int(tree.item(item_id)["values"][0])
+                app_obj = app_map.get(aid)
+                if app_obj and app_obj.app_type == 2 and app_obj.enable:
+                    to_sel.append(item_id)
+            if to_sel:
+                tree.selection_set(to_sel)
+                tree.see(to_sel[0])
+            else:
+                messagebox.showinfo("提示", "未找到状态为【已启用】的 Type=2 (Poll 主机) 应用！")
+
+        def _clear_all_selection():
+            tree.selection_remove(tree.selection())
+
+        ttk.Button(select_bar, text="☑️ 全选已启用 Slave (Type=1)", command=_select_all_enabled_slaves).pack(side=tk.LEFT, padx=3)
+        ttk.Button(select_bar, text="☑️ 全选已启用 Poll (Type=2)", command=_select_all_enabled_polls).pack(side=tk.LEFT, padx=3)
+        ttk.Button(select_bar, text="⬜ 清空选择", command=_clear_all_selection).pack(side=tk.LEFT, padx=3)
+
+        # 单独的中间表格容器 (垂直水平自适应拉伸，向下拉伸只拉伸此表格)
+        table_frame = ttk.Frame(dlg, padding=(10, 4))
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 列表表格
-        table_frame = ttk.Frame(dlg, padding=8)
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        app_map = {a.app_id: a for a in apps}
 
         cols = ("id", "type", "perm", "eng", "chn", "net", "polls", "vars", "enable")
-        tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="extended")
 
         tree.heading("id", text="App ID")
         tree.heading("type", text="业务类型")
@@ -588,12 +728,13 @@ class ModbusStudioApp:
         tree.column("perm", width=140, anchor=tk.CENTER)
         tree.column("eng", width=130, anchor=tk.W)
         tree.column("chn", width=120, anchor=tk.W)
-        tree.column("net", width=130, anchor=tk.CENTER)
+        tree.column("net", width=140, anchor=tk.CENTER)
         tree.column("polls", width=55, anchor=tk.CENTER)
         tree.column("vars", width=55, anchor=tk.CENTER)
         tree.column("enable", width=55, anchor=tk.CENTER)
 
         for a in apps:
+            status_text = "已启用" if a.enable else "停用"
             tree.insert(
                 "",
                 tk.END,
@@ -606,7 +747,7 @@ class ModbusStudioApp:
                     f"{a.ip}:{a.port}",
                     len(a.pollings),
                     len(a.points),
-                    "启用" if a.enable else "停用",
+                    status_text,
                 ),
             )
 
@@ -615,9 +756,9 @@ class ModbusStudioApp:
         tree.config(yscrollcommand=scroll_y.set)
         tree.pack(fill=tk.BOTH, expand=True)
 
-        # 底部操作栏
-        btn_bar = ttk.Frame(dlg, padding=10)
-        btn_bar.pack(fill=tk.X)
+        # 底部操作栏 (固定高度，不垂直拉伸)
+        btn_bar = ttk.Frame(dlg, padding=(10, 8))
+        btn_bar.pack(fill=tk.X, expand=False)
 
         lbl_perm_hint = ttk.Label(btn_bar, text="💡 业务规范提示：请在上方列表中选择设备以查看导入权限...", font=("Microsoft YaHei", 9), foreground="#555555")
         lbl_perm_hint.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
@@ -625,117 +766,171 @@ class ModbusStudioApp:
         btn_row = ttk.Frame(btn_bar)
         btn_row.pack(fill=tk.X)
 
-        def _get_selected_app() -> Optional[HemsAppModel]:
+        def _get_selected_apps() -> List[HemsAppModel]:
             sel = tree.selection()
-            if not sel:
-                messagebox.showinfo("提示", "请先在上方列表中选中一个业务设备")
-                return None
-            app_id = int(tree.item(sel[0])["values"][0])
-            for a in apps:
-                if a.app_id == app_id:
-                    return a
-            return None
+            return [app_map[int(tree.item(s)["values"][0])] for s in sel if int(tree.item(s)["values"][0]) in app_map]
 
         def _do_import_to_slave():
-            app_obj = _get_selected_app()
-            if not app_obj:
+            sel_apps = _get_selected_apps()
+            if not sel_apps:
+                messagebox.showinfo("提示", "请先在上方列表中选中至少一个业务设备")
                 return
 
-            # 严格权限校验：只有 Type=1 才能导入 Slave 模块
-            if not app_obj.can_import_to_slave:
+            # 严格权限校验：选中的所有设备必须全部是 Type=1
+            invalid_apps = [a for a in sel_apps if not a.can_import_to_slave]
+            if invalid_apps:
+                invalid_names = "、".join([f"{a.chinese_name}(Type={a.app_type})" for a in invalid_apps])
                 messagebox.showerror(
                     "权限受限",
-                    f"业务规则拦截：\n只有数据库 app 表中 Type=1 (南向采集设备) 才能导入 Slave 模块！\n当前选中的 [{app_obj.chinese_name}] 属于 Type={app_obj.app_type}，操作已被拦截。",
+                    f"业务规则拦截：\n只有数据库 app 表中 Type=1 (南向采集设备) 才能导入 Slave 模块！\n"
+                    f"您选中的设备包含非 Type=1 的项目：\n{invalid_names}\n操作已被全部拦截。",
                 )
                 return
 
-            points = app_obj.extract_studio_points()
-            if not points:
-                messagebox.showwarning("无点位", f"设备 [{app_obj.chinese_name}] 中未配置有效点位")
-                return
+            if len(sel_apps) == 1:
+                # 单设备导入
+                app_obj = sel_apps[0]
+                points = app_obj.extract_studio_points()
+                if not points:
+                    messagebox.showwarning("无点位", f"设备 [{app_obj.chinese_name}] 中未配置有效点位")
+                    return
 
-            target_ip = app_obj.ip
-            target_port = app_obj.port
-            sid = 1
-            if app_obj.pollings:
-                sid_str = app_obj.pollings[0].get("Slave Id")
-                if sid_str and str(sid_str).isdigit():
-                    sid = int(sid_str)
+                target_ip = app_obj.ip
+                target_port = app_obj.port
+                sid = 1
+                if app_obj.pollings:
+                    sid_str = app_obj.pollings[0].get("Slave Id")
+                    if sid_str and str(sid_str).isdigit():
+                        sid = int(sid_str)
 
-            # 询问用户是新建独立从机服务还是覆盖当前服务
-            inst_default_name = f"从机[{app_obj.chinese_name}] ({target_port})"
-            resp = messagebox.askyesnocancel(
-                "导入从机模式选择",
-                f"检测到设备 [{app_obj.chinese_name}] (Type=1) 的网络配置：\n"
-                f"• 监听 IP 地址: {target_ip}\n"
-                f"• 监听端口号: {target_port}\n"
-                f"• 从机站号: {sid}\n"
-                f"• 点位数量: {len(points)} 个\n\n"
-                f"是否为其创建【独立的从机服务实例】？\n\n"
-                f"【是 (Yes)】：新建独立服务实例 (可与其它从机并发在不同 IP:Port 监听)\n"
-                f"【否 (No)】：覆盖当前从机服务的网络配置与点表\n"
-                f"【取消 (Cancel)】：取消本次导入",
-            )
-            if resp is None:
-                return
+                inst_default_name = f"从机[{app_obj.chinese_name}] ({target_port})"
+                resp = messagebox.askyesnocancel(
+                    "导入从机模式选择",
+                    f"检测到设备 [{app_obj.chinese_name}] (Type=1) 的网络配置：\n"
+                    f"• 监听 IP 地址: {target_ip}\n"
+                    f"• 监听端口号: {target_port}\n"
+                    f"• 从机站号: {sid}\n"
+                    f"• 点位数量: {len(points)} 个\n\n"
+                    f"是否为其创建【独立的从机服务实例】？\n\n"
+                    f"【是 (Yes)】：新建独立服务实例 (可与其它从机并发在不同 IP:Port 监听)\n"
+                    f"【否 (No)】：覆盖当前从机服务的网络配置与点表\n"
+                    f"【取消 (Cancel)】：取消本次导入",
+                )
+                if resp is None:
+                    return
 
-            if resp:
-                # 新建独立从机服务实例
-                unique_name = inst_default_name
-                idx = 1
-                while unique_name in self.slave_instances:
-                    unique_name = f"{inst_default_name} (#{idx})"
-                    idx += 1
-                new_inst = SlaveServiceInstance(unique_name, host=target_ip, port=target_port, slave_id=sid)
-                for p in points:
-                    addr = p["address"]
-                    new_inst.engine.points[addr] = p
-                    new_inst.engine.write_typed_value(
-                        p["area"], addr, p["current_val"], p["data_type"], p["byte_order"]
-                    )
-                self.slave_instances[unique_name] = new_inst
-                self.current_slave_name = unique_name
-                self._update_slave_instance_combo()
-                self.log(f"已新建从机服务实例 [{unique_name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
+                if resp:
+                    unique_name = inst_default_name
+                    idx = 1
+                    while unique_name in self.slave_instances:
+                        unique_name = f"{inst_default_name} (#{idx})"
+                        idx += 1
+                    new_inst = SlaveServiceInstance(unique_name, host=target_ip, port=target_port, slave_id=sid)
+                    for p in points:
+                        addr = p["address"]
+                        new_inst.engine.points[addr] = p
+                        new_inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
+                    self.slave_instances[unique_name] = new_inst
+                    self.current_slave_name = unique_name
+                    self._update_slave_instance_combo()
+                    self.log(f"已新建从机服务实例 [{unique_name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
+                else:
+                    inst = self.current_slave_inst
+                    inst.host = target_ip
+                    inst.port = target_port
+                    inst.slave_id = sid
+                    inst.engine.host = target_ip
+                    inst.engine.port = target_port
+                    inst.engine.slave_id = sid
+                    inst.engine.points.clear()
+                    for p in points:
+                        addr = p["address"]
+                        inst.engine.points[addr] = p
+                        inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
+                    self.slave_ip_var.set(target_ip)
+                    self.slave_port_var.set(target_port)
+                    self.slave_id_var.set(sid)
+                    self._update_slave_status_ui()
+                    self.log(f"已更新从机服务 [{inst.name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
             else:
-                # 覆盖当前选中的从机服务实例
-                inst = self.current_slave_inst
-                inst.host = target_ip
-                inst.port = target_port
-                inst.slave_id = sid
-                inst.engine.host = target_ip
-                inst.engine.port = target_port
-                inst.engine.slave_id = sid
-                inst.engine.points.clear()
-                for p in points:
-                    addr = p["address"]
-                    inst.engine.points[addr] = p
-                    inst.engine.write_typed_value(
-                        p["area"], addr, p["current_val"], p["data_type"], p["byte_order"]
-                    )
-                self.slave_ip_var.set(target_ip)
-                self.slave_port_var.set(target_port)
-                self.slave_id_var.set(sid)
-                self._update_slave_status_ui()
-                self.log(f"已更新从机服务 [{inst.name}]，监听配置: {target_ip}:{target_port}，加载了 {len(points)} 个业务点位！")
+                # 多设备批量导入
+                total_pts = sum(len(a.extract_studio_points()) for a in sel_apps)
+                dev_summary = "\n".join([f"• [{a.chinese_name}] -> 监听 {a.ip}:{a.port} ({len(a.extract_studio_points())}点)" for a in sel_apps[:6]])
+                if len(sel_apps) > 6:
+                    dev_summary += f"\n... 等共计 {len(sel_apps)} 个设备"
+
+                resp = messagebox.askyesnocancel(
+                    "批量导入从机服务",
+                    f"检测到您多选了 {len(sel_apps)} 个从机设备 (Type=1)，共 {total_pts} 个测点：\n\n"
+                    f"{dev_summary}\n\n"
+                    f"【是 (Yes)】：为每一个设备分别创建独立的从机服务实例 (推荐，各自监听独立 IP:Port)\n"
+                    f"【否 (No)】：将所有设备点位合并追加导入至当前激活的从机服务\n"
+                    f"【取消 (Cancel)】：取消本次操作",
+                )
+                if resp is None:
+                    return
+
+                if resp:
+                    created_count = 0
+                    for a in sel_apps:
+                        pts = a.extract_studio_points()
+                        target_ip = a.ip
+                        target_port = a.port
+                        sid = 1
+                        if a.pollings:
+                            sid_str = a.pollings[0].get("Slave Id")
+                            if sid_str and str(sid_str).isdigit():
+                                sid = int(sid_str)
+                        inst_name = f"从机[{a.chinese_name}] ({target_port})"
+                        unique_name = inst_name
+                        idx = 1
+                        while unique_name in self.slave_instances:
+                            unique_name = f"{inst_name} (#{idx})"
+                            idx += 1
+                        new_inst = SlaveServiceInstance(unique_name, host=target_ip, port=target_port, slave_id=sid)
+                        for p in pts:
+                            addr = p["address"]
+                            new_inst.engine.points[addr] = p
+                            new_inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
+                        self.slave_instances[unique_name] = new_inst
+                        created_count += 1
+                        self.log(f"批量创建从机实例: [{unique_name}] -> 监听于 {target_ip}:{target_port} (点位数: {len(pts)})")
+
+                    self.current_slave_name = unique_name
+                    self._update_slave_instance_combo()
+                    messagebox.showinfo("批量导入成功", f"已成功为 {created_count} 个设备生成了独立的从机服务实例！\n您可在主界面下拉框中切换，或点击【全部启动】并发监听所有端口。")
+                else:
+                    inst = self.current_slave_inst
+                    merged_pts = 0
+                    for a in sel_apps:
+                        for p in a.extract_studio_points():
+                            addr = p["address"]
+                            inst.engine.points[addr] = p
+                            inst.engine.write_typed_value(p["area"], addr, p["current_val"], p["data_type"], p["byte_order"])
+                            merged_pts += 1
+                    self.log(f"已将 {len(sel_apps)} 个设备共 {merged_pts} 个测点合并导入至从机 [{inst.name}]")
 
             self._refresh_slave_tree()
             self.notebook.select(self.slave_frame)
             dlg.destroy()
 
         def _do_import_to_poll():
-            app_obj = _get_selected_app()
-            if not app_obj:
+            sel_apps = _get_selected_apps()
+            if not sel_apps:
+                messagebox.showinfo("提示", "请先在上方列表中选中至少一个业务设备")
                 return
 
-            # 严格权限校验：只有 Type=2 才能导入 Poll 模块
-            if not app_obj.can_import_to_poll:
+            invalid_apps = [a for a in sel_apps if not a.can_import_to_poll]
+            if invalid_apps:
+                invalid_names = "、".join([f"{a.chinese_name}(Type={a.app_type})" for a in invalid_apps])
                 messagebox.showerror(
                     "权限受限",
-                    f"业务规则拦截：\n只有数据库 app 表中 Type=2 (北向通信应用) 才能导入 Poll 模块！\n当前选中的 [{app_obj.chinese_name}] 属于 Type={app_obj.app_type}，操作已被拦截。",
+                    f"业务规则拦截：\n只有数据库 app 表中 Type=2 (北向通信应用) 才能导入 Poll 模块！\n"
+                    f"您选中的设备包含非 Type=2 的项目：\n{invalid_names}\n操作已被拦截。",
                 )
                 return
 
+            app_obj = sel_apps[0]
             if not app_obj.pollings:
                 messagebox.showwarning("无轮询规则", f"应用 [{app_obj.chinese_name}] 中未配置 Pollings 规则")
                 return
@@ -747,7 +942,6 @@ class ModbusStudioApp:
             num = rule.get("Register Number", "10")
 
             try:
-                # 自动配置目标 IP 与端口号
                 self.poll_host_var.set(app_obj.ip)
                 self.poll_port_var.set(app_obj.port)
                 self.poll_id_var.set(int(sid))
@@ -757,6 +951,8 @@ class ModbusStudioApp:
                 self.poll_area_var.set(area_val)
                 self.notebook.select(self.poll_frame)
                 self.log(f"已将北向应用 [{app_obj.chinese_name}] 导入至 Poll 主机: 目标={app_obj.ip}:{app_obj.port}, 站号={sid}, 功能码={fc}, 起始={start}, 数量={num}")
+                if len(sel_apps) > 1:
+                    messagebox.showinfo("提示", f"已成功将首个选中应用 [{app_obj.chinese_name}] 的轮询规则应用至 Poll 主机！")
                 dlg.destroy()
             except Exception as ex:
                 messagebox.showerror("错误", f"解析轮询规则失败: {ex}")
@@ -769,33 +965,40 @@ class ModbusStudioApp:
 
         ttk.Button(btn_row, text="关闭", command=dlg.destroy).pack(side=tk.RIGHT, padx=6)
 
-        def _on_tree_select(event):
-            app_obj = _get_selected_app()
-            if not app_obj:
-                btn_slave.config(state="disabled")
-                btn_poll.config(state="disabled")
-                lbl_perm_hint.config(text="💡 请在上方列表中选择一个业务设备", foreground="#555555")
+        def _on_tree_select(event=None):
+            sel_apps = _get_selected_apps()
+            if not sel_apps:
+                btn_slave.config(state="disabled", text="📥 导入为 Slave 从机仿真服务")
+                btn_poll.config(state="disabled", text="📡 导入为 Poll 主机轮询目标")
+                lbl_perm_hint.config(text="💡 请在上方列表中勾选设备（支持 Ctrl/Shift 多选，或使用上方一键全选）...", foreground="#555555")
                 return
 
-            if app_obj.app_type == 1:
-                btn_slave.config(state="normal")
-                btn_poll.config(state="disabled")
+            types = set(a.app_type for a in sel_apps)
+            if types == {1}:
+                btn_slave.config(state="normal", text=f"📥 批量导入为 Slave 从机服务 ({len(sel_apps)} 个设备)")
+                btn_poll.config(state="disabled", text="📡 导入为 Poll 主机轮询目标")
+                names_str = "、".join([a.chinese_name for a in sel_apps[:3]])
+                if len(sel_apps) > 3:
+                    names_str += f" 等 {len(sel_apps)} 个设备"
                 lbl_perm_hint.config(
-                    text=f"✅ 选中 [{app_obj.chinese_name}] 为 Type=1 (南向采集设备) -> 仅允许导入为 Slave 从机 (监听 {app_obj.ip}:{app_obj.port})",
+                    text=f"✅ 已选中 {len(sel_apps)} 个 Slave 从机设备 [{names_str}] -> 支持一键生成各自专属 IP:Port 从机服务实例！",
                     foreground="green",
                 )
-            elif app_obj.app_type == 2:
-                btn_slave.config(state="disabled")
-                btn_poll.config(state="normal")
+            elif types == {2}:
+                btn_slave.config(state="disabled", text="📥 导入为 Slave 从机仿真服务")
+                btn_poll.config(state="normal", text=f"📡 批量导入为 Poll 主机目标 ({len(sel_apps)} 个应用)")
+                names_str = "、".join([a.chinese_name for a in sel_apps[:3]])
+                if len(sel_apps) > 3:
+                    names_str += f" 等 {len(sel_apps)} 个应用"
                 lbl_perm_hint.config(
-                    text=f"✅ 选中 [{app_obj.chinese_name}] 为 Type=2 (北向通信应用) -> 仅允许导入为 Poll 主机 (目标 {app_obj.ip}:{app_obj.port})",
+                    text=f"✅ 已选中 {len(sel_apps)} 个 Poll 主机应用 [{names_str}] -> 支持一键导入其轮询配置与点位！",
                     foreground="#0066cc",
                 )
             else:
-                btn_slave.config(state="disabled")
-                btn_poll.config(state="disabled")
+                btn_slave.config(state="disabled", text="📥 导入为 Slave 从机仿真服务")
+                btn_poll.config(state="disabled", text="📡 导入为 Poll 主机轮询目标")
                 lbl_perm_hint.config(
-                    text=f"❌ 选中 [{app_obj.chinese_name}] 为 Type={app_obj.app_type} (内部/策略应用) -> 系统规范禁止导入！",
+                    text=f"⚠️ 规则拦截：当前选中的设备中包含了不同类型 (类型集合: {types})，系统要求每次只能导入同一类型 (全部为 Slave 或全部为 Poll)！",
                     foreground="red",
                 )
 
@@ -1234,12 +1437,18 @@ class ModbusStudioApp:
 
     def _add_or_update_slave_point(self):
         try:
-            addr = self.new_addr_var.get()
-            desc = self.new_desc_var.get().strip()
+            addr_str = str(self.new_addr_var.get()).strip()
+            if not addr_str:
+                messagebox.showwarning("提示", "请输入点位起始地址！")
+                return
+            addr = int(addr_str)
+            desc = self.new_desc_var.get().strip() or f"点位_{addr}"
             area = self.new_area_var.get()
             dtype = ModbusDataType(self.new_type_var.get())
             order = ByteOrderMode(self.new_order_var.get())
             val_str = self.new_val_var.get().strip()
+            if not val_str:
+                val_str = "0"
             sim = self.new_sim_var.get()
 
             if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64):
@@ -1363,31 +1572,8 @@ class ModbusStudioApp:
                 self.slave_tree.selection_add(item_id)
 
     def _load_default_slave_points(self):
-        defaults = [
-            (0, "进气温度", AreaType.HOLDING_REGISTER, ModbusDataType.FLOAT32, ByteOrderMode.CDAB, 28.5, "随机波动"),
-            (2, "排气压力", AreaType.HOLDING_REGISTER, ModbusDataType.FLOAT32, ByteOrderMode.ABCD, 1.25, "正弦波"),
-            (4, "电表累计电量", AreaType.HOLDING_REGISTER, ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 102456.78, "累加递增"),
-            (8, "生产总件数", AreaType.HOLDING_REGISTER, ModbusDataType.INT32, ByteOrderMode.CDAB, 58200, "累加递增"),
-            (10, "设备运行频率", AreaType.HOLDING_REGISTER, ModbusDataType.INT16, ByteOrderMode.ABCD, 50, "固定"),
-            (11, "故障代码", AreaType.HOLDING_REGISTER, ModbusDataType.HEX16, ByteOrderMode.ABCD, "0x00A0", "固定"),
-            (12, "设备状态字", AreaType.HOLDING_REGISTER, ModbusDataType.BINARY16, ByteOrderMode.ABCD, "0000 0000 0000 0001", "固定"),
-            (13, "批次编号", AreaType.HOLDING_REGISTER, ModbusDataType.STRING, ByteOrderMode.ABCD, "PROD-A1", "固定"),
-            (0, "主循环泵启停", AreaType.COIL, ModbusDataType.BOOL, ByteOrderMode.ABCD, True, "固定"),
-            (1, "急停复位按钮", AreaType.COIL, ModbusDataType.BOOL, ByteOrderMode.ABCD, False, "固定"),
-            (0, "安全门限位", AreaType.DISCRETE_INPUT, ModbusDataType.BOOL, ByteOrderMode.ABCD, True, "固定"),
-            (0, "母线电压采样", AreaType.INPUT_REGISTER, ModbusDataType.UINT16, ByteOrderMode.ABCD, 385, "随机波动"),
-        ]
-        for addr, desc, area, dtype, order, val, sim in defaults:
-            self.slave_engine.points[addr] = {
-                "address": addr,
-                "desc": desc,
-                "area": area,
-                "data_type": dtype,
-                "byte_order": order,
-                "current_val": val,
-                "sim_mode": sim,
-            }
-            self.slave_engine.write_typed_value(area, addr, val, dtype, order)
+        """图四需求：启动时默认点表完全置空."""
+        self.slave_engine.points.clear()
         self._refresh_slave_tree()
 
     def _toggle_slave_server(self):

@@ -40,6 +40,33 @@ class AreaType:
     HOLDING_REGISTER = "4x_HoldingRegister (保持寄存器)"
 
 
+def build_modbus_tcp_req_hex(slave_id: int, fc: int, start_addr: int, count_or_val: int, tx_id: int = 1) -> str:
+    """构建 Modbus TCP 请求的标准十六进制报文字符串 (MBAP 报头 + PDU)."""
+    raw = [
+        (tx_id >> 8) & 0xFF, tx_id & 0xFF,  # 事务元标识符 (2 字节)
+        0x00, 0x00,                         # 协议标识符 (Modbus TCP = 0)
+        0x00, 0x06,                         # 后续长度 (UnitID + PDU 共 6 字节)
+        slave_id & 0xFF,                    # 单元标识符 (从机 ID)
+        fc & 0xFF,                          # 功能码
+        (start_addr >> 8) & 0xFF, start_addr & 0xFF,       # 寄存器起始地址
+        (count_or_val >> 8) & 0xFF, count_or_val & 0xFF     # 读取数量或写入数值
+    ]
+    return " ".join(f"{b:02X}" for b in raw)
+
+
+def build_modbus_tcp_resp_hex(slave_id: int, fc: int, data_bytes: List[int], tx_id: int = 1) -> str:
+    """构建 Modbus TCP 响应的标准十六进制报文字符串 (MBAP 报头 + PDU)."""
+    pdu = [fc & 0xFF, len(data_bytes) & 0xFF] + [b & 0xFF for b in data_bytes]
+    length = len(pdu) + 1  # 包含 unit_id
+    mbap = [
+        (tx_id >> 8) & 0xFF, tx_id & 0xFF,
+        0x00, 0x00,
+        (length >> 8) & 0xFF, length & 0xFF,
+        slave_id & 0xFF,
+    ]
+    return " ".join(f"{b:02X}" for b in (mbap + pdu))
+
+
 # =====================================================================
 # 1. Slave 从机服务引擎
 # =====================================================================
@@ -277,6 +304,8 @@ class ModbusPollEngine:
         # 轮询回调函数
         self.on_poll_success: Optional[Callable[[Dict[int, int]], None]] = None
         self.on_poll_error: Optional[Callable[[str], None]] = None
+        # 问询与响应报文日志回调: (message, level) -> None
+        self.on_packet_log: Optional[Callable[[str, str], None]] = None
 
     @property
     def is_connected(self) -> bool:
@@ -307,11 +336,33 @@ class ModbusPollEngine:
         """
         if not self.is_connected:
             if not self.connect():
+                if self.on_packet_log:
+                    self.on_packet_log(f"[ERR 连接失败] 无法建立与从机 {self.host}:{self.port} 的 TCP 连接", "ERROR")
                 return False, [], "无法连接到从机"
 
         t0 = time.perf_counter()
         self.tx_count += 1
         res = None
+
+        fc = 3
+        fc_desc = "读保持寄存器"
+        if AreaType.COIL in area:
+            fc = 1
+            fc_desc = "读线圈"
+        elif AreaType.DISCRETE_INPUT in area:
+            fc = 2
+            fc_desc = "读离散输入"
+        elif AreaType.INPUT_REGISTER in area:
+            fc = 4
+            fc_desc = "读输入寄存器"
+
+        req_hex = build_modbus_tcp_req_hex(self.slave_id, fc, start_addr, count, self.tx_count)
+        if self.on_packet_log:
+            self.on_packet_log(
+                f"[TX 问询报文] ID:{self.slave_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{req_hex}]",
+                "TX",
+            )
+
         try:
             if AreaType.COIL in area:
                 res = self.client.read_coils(start_addr, count=count, device_id=self.slave_id)
@@ -327,7 +378,10 @@ class ModbusPollEngine:
 
             if res.isError():
                 self.err_count += 1
-                return False, [], str(res)
+                err_msg = str(res)
+                if self.on_packet_log:
+                    self.on_packet_log(f"[ERR 问询异常] ID:{self.slave_id} | FC:{fc:02X} | 错误: {err_msg}", "ERROR")
+                return False, [], err_msg
 
             self.rx_count += 1
             if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area:
@@ -338,28 +392,57 @@ class ModbusPollEngine:
             for i, v in enumerate(vals):
                 self.cached_registers[start_addr + i] = v
 
+            if self.on_packet_log:
+                preview = ", ".join(str(x) for x in vals[:8])
+                if len(vals) > 8:
+                    preview += f", ... (共{len(vals)}项)"
+                self.on_packet_log(
+                    f"[RX 响应报文] ID:{self.slave_id} | FC:{fc:02X} | 耗时:{self.last_rtt_ms:.1f}ms | 项数:{len(vals)} | 数据:[{preview}]",
+                    "RX",
+                )
+
             return True, vals, ""
 
         except Exception as e:
             self.err_count += 1
-            return False, [], str(e)
+            err_msg = str(e)
+            if self.on_packet_log:
+                self.on_packet_log(f"[ERR 问询异常] ID:{self.slave_id} | FC:{fc:02X} | 异常: {err_msg}", "ERROR")
+            return False, [], err_msg
 
     def write_single_register(self, address: int, value: int) -> Tuple[bool, str]:
         """功能码 06: 写单个保持寄存器."""
         if not self.is_connected and not self.connect():
             return False, "未连接"
+        req_hex = build_modbus_tcp_req_hex(self.slave_id, 0x06, address, value & 0xFFFF, self.tx_count + 1)
+        if self.on_packet_log:
+            self.on_packet_log(f"[TX 写入报文] ID:{self.slave_id} | FC:06(写单个保持寄存器) | 地址:{address} | 数值:{value} | 帧:[{req_hex}]", "TX")
         res = self.client.write_register(address, value & 0xFFFF, device_id=self.slave_id)
         if res.isError():
-            return False, str(res)
+            err_msg = str(res)
+            if self.on_packet_log:
+                self.on_packet_log(f"[ERR 写入异常] ID:{self.slave_id} | FC:06 | 错误: {err_msg}", "ERROR")
+            return False, err_msg
+        if self.on_packet_log:
+            self.on_packet_log(f"[RX 写入响应] ID:{self.slave_id} | FC:06 | 写入保持寄存器成功", "RX")
         return True, "写入成功"
 
     def write_single_coil(self, address: int, value: bool) -> Tuple[bool, str]:
         """功能码 05: 写单个线圈."""
         if not self.is_connected and not self.connect():
             return False, "未连接"
+        coil_val = 0xFF00 if value else 0x0000
+        req_hex = build_modbus_tcp_req_hex(self.slave_id, 0x05, address, coil_val, self.tx_count + 1)
+        if self.on_packet_log:
+            self.on_packet_log(f"[TX 写入报文] ID:{self.slave_id} | FC:05(写单个线圈) | 地址:{address} | 状态:{value} | 帧:[{req_hex}]", "TX")
         res = self.client.write_coil(address, value, device_id=self.slave_id)
         if res.isError():
-            return False, str(res)
+            err_msg = str(res)
+            if self.on_packet_log:
+                self.on_packet_log(f"[ERR 写入异常] ID:{self.slave_id} | FC:05 | 错误: {err_msg}", "ERROR")
+            return False, err_msg
+        if self.on_packet_log:
+            self.on_packet_log(f"[RX 写入响应] ID:{self.slave_id} | FC:05 | 写入线圈成功", "RX")
         return True, "写入成功"
 
     def write_typed(
@@ -382,9 +465,20 @@ class ModbusPollEngine:
         if len(regs) == 1:
             return self.write_single_register(address, regs[0])
         else:
+            if self.on_packet_log:
+                hex_regs = ", ".join(f"0x{r:04X}" for r in regs)
+                self.on_packet_log(
+                    f"[TX 写入报文] ID:{self.slave_id} | FC:10(写多个保持寄存器) | 起始地址:{address} | 寄存器数:{len(regs)} | 值:[{hex_regs}]",
+                    "TX",
+                )
             res = self.client.write_registers(address, regs, device_id=self.slave_id)
             if res.isError():
-                return False, str(res)
+                err_msg = str(res)
+                if self.on_packet_log:
+                    self.on_packet_log(f"[ERR 写入异常] ID:{self.slave_id} | FC:10 | 错误: {err_msg}", "ERROR")
+                return False, err_msg
+            if self.on_packet_log:
+                self.on_packet_log(f"[RX 写入响应] ID:{self.slave_id} | FC:10 | 成功写入 {len(regs)} 个寄存器", "RX")
             return True, f"成功写入 {len(regs)} 个寄存器"
 
     def start_polling(self, area: str, start_addr: int, count: int, interval_ms: int = 1000) -> None:

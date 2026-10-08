@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from modbus_codec import ByteOrderMode, ModbusDataType
