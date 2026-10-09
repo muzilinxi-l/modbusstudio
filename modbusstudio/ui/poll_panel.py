@@ -6,6 +6,7 @@ Modbus Studio - 主机轮询工作台面板 (Poll Panel)
 """
 
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import TYPE_CHECKING, Optional
@@ -31,7 +32,7 @@ from ..services import PollService
 
 
 class PollPanel(ttk.Frame):
-    """主机轮询调试与实时监视工作台"""
+    """主机轮询调试与实时监视工作台 (全异步非阻塞，杜绝界面冻结)"""
 
     AREA_CHOICES = [
         AreaType.HOLDING.friendly_name,
@@ -49,6 +50,8 @@ class PollPanel(ttk.Frame):
         self._poll_timer_id = None
         self._tx_count = 0
         self._rx_count = 0
+        self._is_poll_busy = False
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PollWorker")
 
         self._build_ui()
         self._refresh_poll_com_ports()
@@ -231,15 +234,30 @@ class PollPanel(ttk.Frame):
             self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
         else:
             cfg = self._get_connection_config()
-            ok, msg = self.app.poll_service.connect(cfg)
-            if ok:
-                self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
-                self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
-            else:
-                messagebox.showerror("连接失败", msg)
+            self.lbl_conn_status.config(text="● 连接中...", foreground="#ffc107")
+            self.btn_connect.config(state="disabled")
+
+            def do_connect():
+                ok, msg = self.app.poll_service.connect(cfg)
+                def on_done():
+                    if hasattr(self, "winfo_exists") and self.winfo_exists():
+                        self.btn_connect.config(state="normal")
+                        if ok:
+                            self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
+                            self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
+                        else:
+                            self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
+                            self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
+                            messagebox.showerror("连接失败", msg)
+                self.after(0, on_done)
+
+            self._executor.submit(do_connect)
 
     def _poll_once(self) -> None:
-        """执行单次轮询"""
+        """异步执行单次轮询，彻底解放 UI 线程，杜绝界面假死"""
+        if self._is_poll_busy:
+            return
+
         cfg = self._get_connection_config()
         try:
             start_addr = int(self.entry_start_addr.get().strip())
@@ -258,15 +276,25 @@ class PollPanel(ttk.Frame):
             byte_order=bo_enum,
         )
 
+        self._is_poll_busy = True
         self._tx_count += 1
-        res: PollResult = self.app.poll_service.read_registers(task)
-        if res.success:
-            self._rx_count += 1
-            self._update_result_tree(res)
-        else:
-            self.app.logging_service.post("ERROR", cfg.unit_id, f"读取失败: {res.error_msg}")
-
         self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
+
+        def do_read():
+            res: PollResult = self.app.poll_service.read_registers(task)
+            def on_done():
+                self._is_poll_busy = False
+                if not hasattr(self, "winfo_exists") or not self.winfo_exists():
+                    return
+                if res.success:
+                    self._rx_count += 1
+                    self._update_result_tree(res)
+                else:
+                    self.app.logging_service.post("ERROR", cfg.unit_id, f"读取失败: {res.error_msg}")
+                self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
+            self.after(0, on_done)
+
+        self._executor.submit(do_read)
 
     def _toggle_poll_loop(self) -> None:
         if self._is_polling_loop:

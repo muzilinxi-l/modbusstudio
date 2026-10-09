@@ -719,8 +719,15 @@ class SlavePanel(ttk.Frame):
                     point.byte_order = ByteOrder.normalize(prop_val)
                     PointService.re_encode_point(point)
                 elif prop_name == "data_type":
-                    point.data_type = DataType.normalize(prop_val)
-                    PointService.re_encode_point(point)
+                    ok, new_pt, _ = PointService.validate_and_build_point(
+                        point.address, point.description, point.area, prop_val, point.byte_order, point.value, point.sim_rule
+                    )
+                    if ok and new_pt:
+                        point.data_type = new_pt.data_type
+                        point.value = new_pt.value
+                        point.raw_hex = new_pt.raw_hex
+                    else:
+                        continue
                 elif prop_name == "value":
                     ok, new_pt, _ = PointService.validate_and_build_point(
                         point.address, point.description, point.area, point.data_type, point.byte_order, prop_val, point.sim_rule

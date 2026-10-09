@@ -8,7 +8,10 @@ from modbusstudio.ui import MainWindow
 
 
 def test_main_window_theme_switching():
-    root = tb.Window(themename="bootstrap-light")
+    try:
+        root = tb.Window(themename="bootstrap-light")
+    except Exception as e:
+        pytest.skip(f"当前环境不支持初始化 Tk 顶层窗口或缺少 Tcl 组件: {e}")
     try:
         app = ModbusStudioAppCore()
         win = MainWindow(root, app)

@@ -140,3 +140,96 @@ def test_sine_simulation_and_runtime_sync():
     assert p_num.value != 500 or p_num.raw_hex != "0x01F4"
 
     slave_svc.stop_slave(dev.id)
+
+
+def test_status_word_numeric_protection():
+    """验证包含 Status/Fault 的点位若明确声明了 Unsigned short 1，绝不降级为 BOOL"""
+    mock_app = HemsAppModel(
+        app_id=102,
+        app_type=1,
+        english_name="Inverter",
+        chinese_name="逆变器",
+        model_name="PCS",
+        controller_lib="Mb",
+        enable=1,
+        raw_more={
+            "Realtime Variables": [
+                {
+                    "Register Start Address": "10",
+                    "English Name": "Communication Status",
+                    "Chinese Name": "通信状态",
+                    "Function Code": "4",
+                    "Variable Transfer Format": "Unsigned short 1",
+                },
+                {
+                    "Register Start Address": "11",
+                    "English Name": "System Fault Code",
+                    "Chinese Name": "系统故障代码",
+                    "Function Code": "3",
+                    "Variable Transfer Format": "Signed short 1",
+                }
+            ]
+        }
+    )
+    pts = mock_app.extract_studio_points()
+    assert pts[0]["data_type"] == ModbusDataType.UINT16
+    assert "InputRegister" in pts[0]["area"]
+    assert pts[1]["data_type"] == ModbusDataType.INT16
+    assert "HoldingRegister" in pts[1]["area"]
+
+
+def test_composite_key_multi_area_same_address_isolation():
+    """验证同一个从机在 0x、1x、3x、4x 的地址 1 同时存在时，底层复合键隔离互不干扰"""
+    log_svc = LoggingService()
+    slave_svc = SlaveService(log_svc)
+    dev = SlaveDevice(
+        id="dev_multi_area",
+        name="多区域同地址从机",
+        conn_config=ConnectionConfig(comm_type=CommType.TCP, port=25040, unit_id=1)
+    )
+
+    areas_types = [
+        (AreaType.COIL, DataType.BOOL, 1),
+        (AreaType.DISCRETE, DataType.BOOL, 0),
+        (AreaType.INPUT, DataType.UINT16, 1234),
+        (AreaType.HOLDING, DataType.INT16, -567),
+    ]
+    for area, dt, val in areas_types:
+        ok, p, _ = PointService.validate_and_build_point(
+            address=1,
+            description=f"Point_{area.value}",
+            area=area,
+            data_type=dt,
+            byte_order=ByteOrder.ABCD,
+            val_input=val,
+            sim_rule="固定"
+        )
+        assert ok
+        dev.add_point(p)
+
+    slave_svc.register_device(dev)
+    ok, _ = slave_svc.start_slave(dev.id)
+    assert ok
+
+    # 验证底层引擎已注册了 4 个相互独立的复合键
+    engine = slave_svc._active_engines[dev.id]
+    for area, dt, val in areas_types:
+        k = (area.value, 1)
+        assert k in engine.points
+        assert engine.points[k]["data_type"] == dt.value
+
+    slave_svc.stop_slave(dev.id)
+
+
+def test_boolean_float_text_parsing():
+    """验证布尔解析时 '0.0' 不会被错误误判为 True"""
+    from modbusstudio.modbus_engine import ModbusSlaveEngine
+    engine = ModbusSlaveEngine()
+    engine.write_typed_value(AreaType.COIL.value, 1, "0.0", ModbusDataType.BOOL)
+    vals = engine.read_raw_values(AreaType.COIL.value, 1, 1)
+    assert vals[0] == 0, "0.0 必须被解析为 0"
+
+    engine.write_typed_value(AreaType.COIL.value, 1, "1.0", ModbusDataType.BOOL)
+    vals = engine.read_raw_values(AreaType.COIL.value, 1, 1)
+    assert vals[0] == 1, "1.0 必须被解析为 1"
+

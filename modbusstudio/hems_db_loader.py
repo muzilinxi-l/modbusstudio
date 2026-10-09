@@ -250,6 +250,7 @@ class HemsAppModel:
 
             # 智能判定存储区域，确保与数据类型严格对应合规
             fc_str = str(p.get("Function Code") or "").strip()
+            is_explicit_numeric = bool(fmt_str and dtype != ModbusDataType.BOOL)
             is_alarm_or_status = any(k in desc.lower() or k in eng_name.lower() for k in ("alarm", "status", "fault", "protect", "warn", "告警", "保护", "故障", "状态"))
 
             if fc_str in ("1", "01"):
@@ -259,20 +260,26 @@ class HemsAppModel:
                 area = AreaType.DISCRETE_INPUT
                 dtype = ModbusDataType.BOOL
             elif fc_str in ("4", "04"):
-                # 如果点位为布尔量或告警状态，在 Modbus 规约中输入区布尔量严格对应离散输入 (1x)
-                if dtype == ModbusDataType.BOOL or is_alarm_or_status:
+                # 如果点位明确声明为数值型(如 16 位状态字/故障代码)，严格尊重其数值格式，不降级为 BOOL
+                if is_explicit_numeric:
+                    area = AreaType.INPUT_REGISTER
+                elif dtype == ModbusDataType.BOOL or is_alarm_or_status:
                     area = AreaType.DISCRETE_INPUT
                     dtype = ModbusDataType.BOOL
                 else:
                     area = AreaType.INPUT_REGISTER
             elif fc_str in ("3", "03"):
-                if dtype == ModbusDataType.BOOL:
+                if is_explicit_numeric:
+                    area = AreaType.HOLDING_REGISTER
+                elif dtype == ModbusDataType.BOOL:
                     area = AreaType.COIL
                 else:
                     area = AreaType.HOLDING_REGISTER
             else:
-                # 未配 Function Code 时，根据数据类型与语义推断：布尔/告警归入离散输入，其余归入保持寄存器
-                if dtype == ModbusDataType.BOOL or is_alarm_or_status:
+                # 未配 Function Code 时：若明确声明了数值型则归入保持寄存器；若为布尔/告警则归入离散输入
+                if is_explicit_numeric:
+                    area = AreaType.HOLDING_REGISTER
+                elif dtype == ModbusDataType.BOOL or is_alarm_or_status:
                     area = AreaType.DISCRETE_INPUT
                     dtype = ModbusDataType.BOOL
                 else:
@@ -425,10 +432,20 @@ class HemsDatabase:
         var_key = "Realtime Variables" if "Realtime Variables" in more else "Referred Variables"
         db_vars = []
         for p in points:
+            area_str = str(p.get("area", "")).upper()
+            if "COIL" in area_str or "线圈" in str(p.get("area", "")) or "0X" in area_str:
+                fc = "1"
+            elif "DISCRETE" in area_str or "离散" in str(p.get("area", "")) or "1X" in area_str:
+                fc = "2"
+            elif "INPUT" in area_str or "输入" in str(p.get("area", "")) or "3X" in area_str:
+                fc = "4"
+            else:
+                fc = "3"
+
             db_vars.append({
                 "English Name": p.get("desc"),
                 "Chinese Name": p.get("desc"),
-                "Function Code": "3" if AreaType.HOLDING_REGISTER in p.get("area", "") else "4",
+                "Function Code": fc,
                 "Register Start Address": str(p.get("address")),
                 "Variable Transfer Format": p.get("data_type").value if hasattr(p.get("data_type"), "value") else str(p.get("data_type")),
                 "Scale Factor": str(p.get("scale", 1)),

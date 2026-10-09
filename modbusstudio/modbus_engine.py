@@ -438,7 +438,10 @@ class ModbusSlaveEngine:
         """以指定数据类型和变位模式写入数值 (同时兼容 mode 与 byte_order 参数)."""
         actual_mode = byte_order if byte_order is not None else mode
         if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area or "0X" in str(area).upper() or "1X" in str(area).upper():
-            b_val = bool(int(value)) if str(value).isdigit() else bool(value)
+            try:
+                b_val = bool(int(float(str(value).strip())))
+            except Exception:
+                b_val = str(value).strip().lower() in ("1", "true", "yes", "on")
             self.write_raw_values(area, address, [1 if b_val else 0])
         else:
             regs = encode_value(value, data_type, actual_mode)
@@ -459,7 +462,7 @@ class ModbusSlaveEngine:
         return decode_value(raw, data_type, mode)
 
     def _run_simulation_loop(self) -> None:
-        """后台模拟更新循环 (强关联数据类型安全更新，杜绝无符号溢出与异常巨值)."""
+        """后台模拟更新循环 (支持 (area, addr) 复合键，消除多物理区域同地址冲突)."""
         step = 0
         import math
         import random
@@ -468,7 +471,21 @@ class ModbusSlaveEngine:
             time.sleep(1.0)
             step = (step + 1) % 100000
 
-            for addr, point in list(self.points.items()):
+            # 制作字典项安全快照，防止多线程迭代期间大小并发变动
+            items_snapshot = list(self.points.items())
+            has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
+
+            for key, point in items_snapshot:
+                # 若存在复合键 (area, addr)，忽略历史单一整型 key 以避免重复模拟
+                if has_composite and not isinstance(key, tuple):
+                    continue
+
+                if isinstance(key, tuple) and len(key) >= 2:
+                    k_area, addr = str(key[0]), int(key[1])
+                else:
+                    addr = int(key)
+                    k_area = point.get("area", AreaType.HOLDING_REGISTER)
+
                 sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
                 if sim_mode == "固定":
                     continue

@@ -371,7 +371,7 @@ class SlaveService:
                         mode=point.byte_order.value,
                         byte_order=point.byte_order.value,
                     )
-                    engine.points[point.address] = {
+                    pt_dict = {
                         "address": point.address,
                         "desc": point.description,
                         "area": point.area.value,
@@ -383,6 +383,8 @@ class SlaveService:
                         "sim_rule": point.sim_rule,
                         "current_val": point.value,
                     }
+                    engine.points[(point.area.value, point.address)] = pt_dict
+                    engine.points[point.address] = pt_dict
                 except Exception as ex:
                     logger.warning(f"同步点位到底层失败 {point.address}: {ex}")
 
@@ -441,7 +443,7 @@ class SlaveService:
                     mode=point.byte_order.value,
                     byte_order=point.byte_order.value,
                 )
-                engine.points[point.address] = {
+                pt_dict = {
                     "address": point.address,
                     "desc": point.description,
                     "area": point.area.value,
@@ -453,6 +455,8 @@ class SlaveService:
                     "sim_rule": point.sim_rule,
                     "current_val": point.value,
                 }
+                engine.points[(point.area.value, point.address)] = pt_dict
+                engine.points[point.address] = pt_dict
             except Exception as e:
                 logger.error(f"动态同步点位到底层失败: {e}")
 
