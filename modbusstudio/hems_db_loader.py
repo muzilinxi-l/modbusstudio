@@ -14,8 +14,13 @@ import sqlite3
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from modbus_codec import ByteOrderMode, ModbusDataType, parse_hems_type
-from modbus_engine import AreaType
+try:
+    from .modbus_codec import ByteOrderMode, ModbusDataType, parse_hems_type
+    from .modbus_engine import AreaType
+except ImportError:
+    from modbus_codec import ByteOrderMode, ModbusDataType, parse_hems_type
+    from modbus_engine import AreaType
+
 
 logger = logging.getLogger("HemsDbLoader")
 

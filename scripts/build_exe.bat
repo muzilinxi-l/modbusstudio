@@ -5,7 +5,7 @@ echo       正在将 Modbus Studio 打包为独立 EXE 可执行文件
 echo ========================================================
 echo.
 
-cd /d "%~dp0"
+cd /d "%~dp0\.."
 
 :: 检查虚拟环境
 if exist ".venv\Scripts\pyinstaller.exe" (
