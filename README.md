@@ -19,7 +19,11 @@
 4. **全工业数据类型与 4 种工业变位（字节序 / 字序 Endianness）**：
    - 支持 `BOOL`, `INT16`, `UINT16`, `INT32`, `UINT32`, `FLOAT32`, `FLOAT64`, `STRING`, `HEX16`。
    - 支持 **`ABCD`**（标准大端）、**`CDAB`**（字交换，光储逆变器/电表最常用）、**`BADC`**（字节交换）、**`DCBA`**（纯小端）。
-5. **HEMS 业务数据库深度联动**：
+5. **多站地址同端口/串口物理级并发与隔离 (Server Hub 模式)**：
+   - 彻底遵循工业级 Modbus 官方协议（MBAP Header Unit ID 动态寻址）：支持同一 IP:Port（如 `0.0.0.0:502`）或同一个串口总线挂载数十个不同站地址（Unit ID）的从机并发通信。
+   - 物理传输层与逻辑从机解耦，各从机点表与波形模拟（正弦波等）完全物理隔离，独立启停互不影响。
+   - 详见深度架构文档：[MULTI_STATION_ARCHITECTURE.md](file:///F:/GitHub/python/MULTI_STATION_ARCHITECTURE.md)。
+6. **HEMS 业务数据库深度联动**：
    - 适配 `extra/hems.cdb`（支持 SQLite/CDB 格式），支持一键载入 `app` 表业务设备模型并抽取真实点表。
    - 内置业务配对中心 (基于 More 字段)，支持储能 PCS、BMS、光伏逆变器变量路由映射。
 
