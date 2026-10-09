@@ -49,3 +49,7 @@ extra/
 *.sqlite
 *.sqlite3
 *.db
+
+# Runtime logs
+logs/
+*.csv

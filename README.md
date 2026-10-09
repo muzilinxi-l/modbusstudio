@@ -1,61 +1,102 @@
-# Modbus Studio - 工业级 Modbus Slave 模拟器与 Poll 调试助手
+# Modbus Studio 2.0 - 现代 Modbus 多从机/主机仿真工作站与 HEMS 业务数据库联调平台
 
-参考并超越 GitHub 开源项目 [Lance-He/Modbus-Salve-Simulator](https://github.com/Lance-He/Modbus-Salve-Simulator)，专为现代工业协议调试打造的 **Modbus Slave 从机模拟 + Modbus Poll 主机轮询（二合一）** 工业工作站。
+专为现代工业协议调试与 HEMS 能源微电网业务打造的 **Modbus Slave 多从机模拟 + Modbus Poll 主机轮询（二合一）** 工业工作站。
 
 ---
 
 ## 🌟 核心特性与技术亮点
 
-1. **二合一双模式支持**：
-   - **Modbus Slave 模拟器**：支持 0x (Coil)、1x (Discrete Input)、3x (Input Register)、4x (Holding Register) 四大区，支持独立启停、后台数据动态模拟（正弦波、随机波动、累加计数）。
-   - **Modbus Poll 主机调试器**：支持连接任意目标 Modbus 从机，支持单次读取、周期循环轮询、快捷写入（FC 05/06/16），统计 Tx/Rx/Error 与 RTT 通信延迟。
-2. **全工业数据类型全面支持**：
-   - `BOOL` (1-bit，开关量/继电器)
-   - `INT16` / `UINT16` (1 个寄存器，16 位有符号/无符号整数)
-   - `INT32` / `UINT32` (2 个寄存器，32 位有符号/无符号整数)
-   - `INT64` / `UINT64` (4 个寄存器，64 位大整数)
-   - `FLOAT32` (2 个寄存器，IEEE 754 单精度浮点数)
-   - `DOUBLE64` (4 个寄存器，IEEE 754 双精度浮点数)
-   - `HEX16` / `HEX32` (十六进制原码)
-   - `BINARY16` (16 位二进制位串显示)
-   - `STRING` (ASCII 工业字符串)
-3. **完整的 4 种工业变位（字节序 / 字序 Endianness）转换**：
-   - **`ABCD`**：标准大端 (Big-Endian)，高字节高字在前（默认通用标准）。
-   - **`CDAB`**：字交换模式 (Word Swap / Mid-Little Endian)，在**欧姆龙、三菱、各类智能电表/多功能仪表**中极其常见。
-   - **`BADC`**：字节交换模式 (Byte Swap)。
-   - **`DCBA`**：纯小端模式 (Little-Endian)，所有字节全逆序。
-   - 切换变位模式时，数据表格将实时自适应重新解码，无需重新发起网络请求。
-4. **可视化 GUI 交互**：
-   - 基于 Python 标准内置 `tkinter` + `ttk`，开箱即用，免额外臃肿 GUI 依赖。
-   - **表格直接就地双击编辑**：双击任意点位单元格即可修改数值，系统自动根据选择的数据类型与变位规则打包成 16 位寄存器切片下发。
+1. **分层解耦的清晰架构 (Clean Architecture & SOLID)**：
+   - **界面只收集输入、展示结果**：界面把配置交给业务服务，连接、初始化点表、失败处理和状态更新由业务与通信模块协同完成。
+   - **业务操作统一入口 (`services.py`)**：单点增改、数据库导入、规则批量生成均调用统一的点位操作入口，杜绝各自解释校验位、字节序和地址。
+   - **独立数据模型 (`models.py`)**：定义设备、连接、点位与轮询结果，完全独立于 UI (Tkinter) 与网络协议库，零外部硬件强绑定。
+   - **通信资源明确管理**：同一个连接或串口的启停、读写与关闭统一调度，严格防范串口冲突与端口竞争。
+2. **高吞吐通信稳定性设计 (彻底解决闪退与未响应)**：
+   - **双缓冲节流渲染池 (Throttled Log Engine)**：后台通信线程以纳秒级速度将高频报文投递到线程安全队列中，主线程每 80ms 批量合并拉取刷新一次，单次插入降低重绘开销 90% 以上。
+   - **日志最大行数修剪保护**：文本缓冲区超过 1500 行自动滚动清理头部旧行，保障内存平稳，杜绝高频报文下的界面卡顿、假死 `(未响应)` 与底层崩溃闪退。
+3. **高 DPI 屏幕排版全面自适应**：
+   - 彻底废除生硬的字符宽度硬编码，采用紧凑内边距 (`padx=2, pady=1`) 与弹性扩展网格，在 Windows 100%、125%、150% 甚至 200% 缩放比例下，各类功能按钮文本完整展示，绝无截断吞字。
+4. **全工业数据类型与 4 种工业变位（字节序 / 字序 Endianness）**：
+   - 支持 `BOOL`, `INT16`, `UINT16`, `INT32`, `UINT32`, `FLOAT32`, `FLOAT64`, `STRING`, `HEX16`。
+   - 支持 **`ABCD`**（标准大端）、**`CDAB`**（字交换，光储逆变器/电表最常用）、**`BADC`**（字节交换）、**`DCBA`**（纯小端）。
+5. **HEMS 业务数据库深度联动**：
+   - 适配 `extra/hems.cdb`（支持 SQLite/CDB 格式），支持一键载入 `app` 表业务设备模型并抽取真实点表。
+   - 内置业务配对中心 (基于 More 字段)，支持储能 PCS、BMS、光伏逆变器变量路由映射。
 
 ---
 
-## 📁 文件架构
+## 📁 目录组织架构
 
-- [`modbus_codec.py`](file:///f:/GitHub/python/modbus_codec.py)：**核心编解码与变位转换引擎**。包含 `transform_bytes`、`encode_value`、`decode_value`，100% 单元测试覆盖。
-- [`modbus_engine.py`](file:///f:/GitHub/python/modbus_engine.py)：**协议与通信底层封装**。包含 `ModbusSlaveEngine`（异步服务+线程安全）与 `ModbusPollEngine`（主机轮询+连接监控）。
-- [`modbus_studio.py`](file:///f:/GitHub/python/modbus_studio.py)：**工业级图形界面应用入口**。提供 Slave / Poll 双选项卡与实时监控日志。
-- [`modbus_slave.py`](file:///f:/GitHub/python/modbus_slave.py)：轻量级命令行版从机模拟示例。
-- [`modbus_master.py`](file:///f:/GitHub/python/modbus_master.py)：轻量级命令行版客户端示例。
-- [`.vscode/launch.json`](file:///f:/GitHub/python/.vscode/launch.json)：VS Code 一键 F5 启动配置。
-
----
-
-## 🚀 启动与使用指南
-
-### 1. 启动图形化客户端 (Modbus Studio)
-在 VS Code 界面中按 **F5**（配置选择 `Python: 启动 Modbus Studio (GUI 双模式客户端/从机)`），或在终端执行：
-```bash
-python modbus_studio.py
+```text
+项目根目录/
+├── pyproject.toml          # 项目信息、Python要求、依赖、工具配置
+├── README.md              # 安装、启动、测试说明
+├── .gitignore             # 忽略 .venv、*.cdb、*.sqlite、build、dist 等
+│
+├── modbusstudio/          # 应用程序核心包
+│   ├── __init__.py        # 版本声明与公开接口
+│   ├── __main__.py        # 统一启动入口 (python -m modbusstudio)
+│   ├── app.py             # 核心协调器，装配各模块与应用生命周期
+│   ├── models.py          # 纯数据实体 (Point, SlaveDevice, PollTask 等)
+│   ├── services.py        # 业务操作统一入口 (PointService, SlaveService, PollService, LoggingService)
+│   │
+│   ├── ui/                # UI 视图层 (纯界面收集输入与展示结果)
+│   │   ├── __init__.py
+│   │   ├── main_window.py # 主窗体容器、高可靠节流日志视窗
+│   │   ├── slave_panel.py # 从机模拟工作台 (双行控制栏、点表表格、批量操作栏)
+│   │   └── poll_panel.py  # 主机轮询工作台 (目标连接、读取请求、实时监视表)
+│   │
+│   ├── modbus_engine.py   # 通信引擎 (多从机服务、主机轮询、报文钩子)
+│   ├── modbus_codec.py    # 编解码器 (全类型与 4 种变位模式算法)
+│   ├── hems_db_loader.py  # HEMS 业务数据库 (extra/hems.cdb) 适配器
+│   └── hems_pairing.py    # 业务配对关系推导与解析算法
+│
+├── tests/                 # 自动化测试用例集
+│   ├── test_codec.py      # 编解码往返精度与变位单测
+│   ├── test_engine.py     # 业务服务、点位构建与端口防冲突单测
+│   └── test_hems_import.py# HEMS 数据库解析与点表抽取单测
+│
+├── docs/                  # 技术设计文档与规范说明
+└── ModbusStudio.spec      # Windows PyInstaller 打包配置
 ```
 
-### 2. 玩转 Slave 与 Poll 联动自测
-1. 在 **🖥️ Modbus Slave 从机模拟器** 界面：
-   - 点击 **▶ 启动服务**（默认端口 `5020`，Slave ID `1`）。
-   - 此时表格中的预置点位（温度、压力、电量、状态字）已开始运行并根据规则实时波动。
-2. 切换到 **📡 Modbus Poll 主机轮询调试器** 界面：
-   - 点击 **🔗 连接从机**。
-   - 点击 **🔄 启动轮询 (1s)**，即可看到下方表格实时同步显示从机的数据！
-   - 切换顶部的 **全局变位模式**（例如在 `ABCD` 和 `CDAB` 之间切换），观察 Float32 和 Int32 解释出的数值如何实时自适应转换。
-   - 在“快捷写入测试”中输入任意目标值并点击 **🚀 发送写入请求**，切回从机界面即可观察到值已同步被修改。
+---
+
+## 🚀 启动与运行指南
+
+### 1. 环境准备
+推荐使用 Python 3.10+ 环境：
+```bash
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -e .
+```
+
+### 2. 启动应用程序
+在项目根目录下执行以下任一命令即可启动：
+```bash
+# 推荐：包模块方式启动
+python -m modbusstudio
+
+# 或直接运行 app.py
+python modbusstudio/app.py
+```
+
+### 3. 运行自动化单元测试
+运行 pytest 执行全量测试用例：
+```bash
+pytest -v
+```
+
+---
+
+## 📦 打包独立 Windows 可执行程序 (.exe)
+
+项目内置预配置的 `ModbusStudio.spec`，执行以下命令即可在 `dist/` 目录下生成独立单文件 `ModbusStudio.exe`：
+```bash
+pyinstaller ModbusStudio.spec
+```
+或直接执行根目录下的批处理脚本：
+```bash
+.\build_exe.bat
+```
