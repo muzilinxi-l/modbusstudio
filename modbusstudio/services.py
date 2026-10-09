@@ -152,8 +152,15 @@ class PointService:
         bo_enum = ByteOrder.normalize(byte_order)
         sim_str = SimRule.normalize(sim_rule)
 
+        # 确保存储区域与数据类型严格双向匹配：
         if area_enum in (AreaType.COIL, AreaType.DISCRETE):
             dt_enum = DataType.BOOL
+        elif dt_enum == DataType.BOOL:
+            # 布尔量绝不可放在 3x/4x 寄存器，自动校正为对应物理布尔区域
+            if area_enum == AreaType.INPUT:
+                area_enum = AreaType.DISCRETE
+            elif area_enum == AreaType.HOLDING:
+                area_enum = AreaType.COIL
 
         val_converted = val_input
         try:
@@ -175,13 +182,20 @@ class PointService:
         except Exception as e:
             return False, None, f"数值格式与类型 {dt_enum.value} 不匹配: {e}"
 
-        raw_hex = "0x0000"
-        try:
-            raw_regs = encode_value(val_converted, dt_enum.value, bo_enum.value)
-            if raw_regs:
-                raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
-        except Exception as e:
-            logger.warning(f"点位初始值编码转换警告: {e}")
+        # 原始十六进制编码 (遵循 Modbus 工业标准与原始代码规范)：
+        # 布尔量 (0x / 1x) 显示单字节状态 0x00 或 0x01；寄存器量显示 0x0000 及多字组合
+        if area_enum in (AreaType.COIL, AreaType.DISCRETE) or dt_enum == DataType.BOOL:
+            b_val = 1 if (val_converted is True or str(val_converted).strip().lower() in ("1", "true", "yes", "on")) else 0
+            val_converted = b_val
+            raw_hex = "0x01" if b_val else "0x00"
+        else:
+            raw_hex = "0x0000"
+            try:
+                raw_regs = encode_value(val_converted, dt_enum.value, bo_enum.value)
+                if raw_regs:
+                    raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
+            except Exception as e:
+                logger.warning(f"点位初始值编码转换警告: {e}")
 
         point = ModbusPoint(
             address=addr_int,
@@ -203,9 +217,13 @@ class PointService:
     def re_encode_point(cls, point: ModbusPoint) -> None:
         """根据当前值与变位配置重新生成十六进制原始字"""
         try:
-            raw_regs = encode_value(point.value, point.data_type.value, point.byte_order.value)
-            if raw_regs:
-                point.raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
+            if point.area in (AreaType.COIL, AreaType.DISCRETE) or point.data_type == DataType.BOOL:
+                b_val = 1 if (point.value is True or str(point.value).strip().lower() in ("1", "true", "yes", "on")) else 0
+                point.raw_hex = "0x01" if b_val else "0x00"
+            else:
+                raw_regs = encode_value(point.value, point.data_type.value, point.byte_order.value)
+                if raw_regs:
+                    point.raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
         except Exception as e:
             logger.warning(f"重新编码点位失败: {e}")
 
@@ -350,13 +368,19 @@ class SlaveService:
                         address=point.address,
                         value=point.value,
                         data_type=point.data_type.value,
+                        mode=point.byte_order.value,
                         byte_order=point.byte_order.value,
                     )
                     engine.points[point.address] = {
-                        "type": point.data_type.value,
-                        "mode": point.byte_order.value,
-                        "sim_rule": point.sim_rule,
+                        "address": point.address,
+                        "desc": point.description,
                         "area": point.area.value,
+                        "data_type": point.data_type.value,
+                        "type": point.data_type.value,
+                        "byte_order": point.byte_order.value,
+                        "mode": point.byte_order.value,
+                        "sim_mode": point.sim_rule,
+                        "sim_rule": point.sim_rule,
                         "current_val": point.value,
                     }
                 except Exception as ex:
@@ -414,13 +438,19 @@ class SlaveService:
                     address=point.address,
                     value=point.value,
                     data_type=point.data_type.value,
+                    mode=point.byte_order.value,
                     byte_order=point.byte_order.value,
                 )
                 engine.points[point.address] = {
-                    "type": point.data_type.value,
-                    "mode": point.byte_order.value,
-                    "sim_rule": point.sim_rule,
+                    "address": point.address,
+                    "desc": point.description,
                     "area": point.area.value,
+                    "data_type": point.data_type.value,
+                    "type": point.data_type.value,
+                    "byte_order": point.byte_order.value,
+                    "mode": point.byte_order.value,
+                    "sim_mode": point.sim_rule,
+                    "sim_rule": point.sim_rule,
                     "current_val": point.value,
                 }
             except Exception as e:

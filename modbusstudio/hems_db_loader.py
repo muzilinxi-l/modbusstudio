@@ -243,22 +243,60 @@ class HemsAppModel:
             chn_name = p.get("Chinese Name", eng_name)
             desc = chn_name if chn_name and chn_name != eng_name else eng_name
 
-            fc_str = str(p.get("Function Code", "3"))
-            area = AreaType.HOLDING_REGISTER
-            if fc_str in ("1", "01"):
-                area = AreaType.COIL
-            elif fc_str in ("2", "02"):
-                area = AreaType.DISCRETE_INPUT
-            elif fc_str in ("4", "04"):
-                area = AreaType.INPUT_REGISTER
-            else:
-                area = AreaType.HOLDING_REGISTER
-
             fmt_str = p.get("Variable Transfer Format")
             dtype = map_db_format_to_data_type(fmt_str)
             order = map_db_format_to_byte_order(fmt_str, default_mode=ByteOrderMode.CDAB)
-
             scale = float(p.get("Scale Factor", 1.0) or 1.0)
+
+            # 智能判定存储区域，确保与数据类型严格对应合规
+            fc_str = str(p.get("Function Code") or "").strip()
+            is_alarm_or_status = any(k in desc.lower() or k in eng_name.lower() for k in ("alarm", "status", "fault", "protect", "warn", "告警", "保护", "故障", "状态"))
+
+            if fc_str in ("1", "01"):
+                area = AreaType.COIL
+                dtype = ModbusDataType.BOOL
+            elif fc_str in ("2", "02"):
+                area = AreaType.DISCRETE_INPUT
+                dtype = ModbusDataType.BOOL
+            elif fc_str in ("4", "04"):
+                # 如果点位为布尔量或告警状态，在 Modbus 规约中输入区布尔量严格对应离散输入 (1x)
+                if dtype == ModbusDataType.BOOL or is_alarm_or_status:
+                    area = AreaType.DISCRETE_INPUT
+                    dtype = ModbusDataType.BOOL
+                else:
+                    area = AreaType.INPUT_REGISTER
+            elif fc_str in ("3", "03"):
+                if dtype == ModbusDataType.BOOL:
+                    area = AreaType.COIL
+                else:
+                    area = AreaType.HOLDING_REGISTER
+            else:
+                # 未配 Function Code 时，根据数据类型与语义推断：布尔/告警归入离散输入，其余归入保持寄存器
+                if dtype == ModbusDataType.BOOL or is_alarm_or_status:
+                    area = AreaType.DISCRETE_INPUT
+                    dtype = ModbusDataType.BOOL
+                else:
+                    area = AreaType.HOLDING_REGISTER
+
+            # 识别并提取数据库中配置的初始值 / 默认值 / 实时值
+            db_val = None
+            for key in ("Value", "Default Value", "Initial Value", "Realtime Value", "Current Value", "Raw Value"):
+                if p.get(key) is not None and str(p.get(key)).strip() != "":
+                    db_val = p.get(key)
+                    break
+
+            if db_val is not None:
+                try:
+                    if dtype == ModbusDataType.BOOL:
+                        current_val = 1 if str(db_val).strip().lower() in ("1", "true", "yes", "on") else 0
+                    elif dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64):
+                        current_val = float(db_val)
+                    else:
+                        current_val = int(float(str(db_val).strip()))
+                except Exception:
+                    current_val = 0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0
+            else:
+                current_val = 0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0
 
             result.append({
                 "address": addr,
@@ -267,7 +305,7 @@ class HemsAppModel:
                 "data_type": dtype,
                 "byte_order": order,
                 "scale": scale,
-                "current_val": 0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0,
+                "current_val": current_val,
                 "sim_mode": "随机波动" if dtype in (ModbusDataType.FLOAT32, ModbusDataType.INT16, ModbusDataType.UINT16) else "固定",
             })
         return result

@@ -431,15 +431,17 @@ class ModbusSlaveEngine:
         area: str,
         address: int,
         value: Any,
-        data_type: ModbusDataType,
-        mode: ByteOrderMode = ByteOrderMode.ABCD,
+        data_type: Any,
+        mode: Any = ByteOrderMode.ABCD,
+        byte_order: Any = None,
     ) -> None:
-        """以指定数据类型和变位模式写入数值."""
-        if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area:
+        """以指定数据类型和变位模式写入数值 (同时兼容 mode 与 byte_order 参数)."""
+        actual_mode = byte_order if byte_order is not None else mode
+        if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area or "0X" in str(area).upper() or "1X" in str(area).upper():
             b_val = bool(int(value)) if str(value).isdigit() else bool(value)
             self.write_raw_values(area, address, [1 if b_val else 0])
         else:
-            regs = encode_value(value, data_type, mode)
+            regs = encode_value(value, data_type, actual_mode)
             self.write_raw_values(area, address, regs)
 
     def read_typed_value(
@@ -497,7 +499,18 @@ class ModbusSlaveEngine:
                 )
                 if is_fc01_02:
                     curr_bool_int = 1 if (curr is True or str(curr) in ("1", "True", "true")) else 0
-                    new_val = 0 if curr_bool_int == 1 else 1
+                    if sim_mode == "正弦波":
+                        # 正弦波对于布尔量：按时钟相位正负半周切换高低电平 (0/1)
+                        phase = (step * 0.35) + ((addr % 10) * 0.4)
+                        new_val = 1 if math.sin(phase) >= 0 else 0
+                    elif sim_mode == "方波":
+                        phase = (step + (addr % 5)) % 6
+                        new_val = 1 if phase >= 3 else 0
+                    elif sim_mode == "随机波动":
+                        new_val = random.choice([0, 1])
+                    else:
+                        new_val = 0 if curr_bool_int == 1 else 1
+
                     point["current_val"] = new_val
                     self.write_typed_value(area, addr, new_val, data_type, mode)
                     if self.on_point_value_changed:

@@ -57,17 +57,18 @@ class AreaType(str, Enum):
             return val
         if hasattr(val, "value"):
             val = val.value
-        s = str(val).strip()
+        s = str(val).strip().upper()
         if "." in s:
             s = s.split(".")[-1]
-        if "4" in s or "保持" in s or "HOLDING" in s.upper():
-            return cls.HOLDING
-        if "3" in s or "输入" in s or "INPUT" in s.upper():
-            return cls.INPUT
-        if "0" in s or "线圈" in s or "COIL" in s.upper():
-            return cls.COIL
-        if "1" in s or "离散" in s or "DISCRETE" in s.upper():
+        # 必须优先判定离散输入与线圈，防止被通用的"输入/INPUT"误匹配
+        if "DISCRETE" in s or "离散" in s or "1X" in s or s.startswith("1"):
             return cls.DISCRETE
+        if "COIL" in s or "线圈" in s or "0X" in s or s.startswith("0"):
+            return cls.COIL
+        if "HOLDING" in s or "保持" in s or "4X" in s or s.startswith("4"):
+            return cls.HOLDING
+        if "INPUT" in s or "输入" in s or "3X" in s or s.startswith("3"):
+            return cls.INPUT
         return cls.HOLDING
 
 
