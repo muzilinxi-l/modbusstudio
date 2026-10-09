@@ -125,16 +125,32 @@ class SlavePanel(ttk.Frame):
         self.entry_slave_port = ttk.Entry(self.tcp_frame, width=6)
         self.entry_slave_port.pack(side="left", padx=1)
 
-        # RTU 控件
+        # RTU 控件 (完整工业级串口五要素配置)
         self.rtu_frame = ttk.Frame(self.slave_conn_container)
         ttk.Label(self.rtu_frame, text="串口:").pack(side="left", padx=1)
-        self.combo_slave_com = ttk.Combobox(self.rtu_frame, width=8)
+        self.combo_slave_com = ttk.Combobox(self.rtu_frame, width=7)
         self.combo_slave_com.pack(side="left", padx=1)
         btn_com_refresh = ttk.Button(self.rtu_frame, text="🔄", width=3, style="Small.TButton", command=self._refresh_slave_com_ports)
         btn_com_refresh.pack(side="left", padx=1)
-        ttk.Label(self.rtu_frame, text="波特率:").pack(side="left", padx=1)
+
+        ttk.Label(self.rtu_frame, text="波特率:").pack(side="left", padx=(3, 1))
         self.combo_slave_baud = ttk.Combobox(self.rtu_frame, width=7, values=["9600", "19200", "38400", "57600", "115200"])
         self.combo_slave_baud.pack(side="left", padx=1)
+
+        ttk.Label(self.rtu_frame, text="校验:").pack(side="left", padx=(3, 1))
+        self.combo_slave_parity = ttk.Combobox(self.rtu_frame, width=6, state="readonly", values=["None (N)", "Even (E)", "Odd (O)"])
+        self.combo_slave_parity.set("None (N)")
+        self.combo_slave_parity.pack(side="left", padx=1)
+
+        ttk.Label(self.rtu_frame, text="数据位:").pack(side="left", padx=(3, 1))
+        self.combo_slave_databit = ttk.Combobox(self.rtu_frame, width=3, state="readonly", values=["8", "7"])
+        self.combo_slave_databit.set("8")
+        self.combo_slave_databit.pack(side="left", padx=1)
+
+        ttk.Label(self.rtu_frame, text="停止位:").pack(side="left", padx=(3, 1))
+        self.combo_slave_stopbit = ttk.Combobox(self.rtu_frame, width=3, state="readonly", values=["1", "2"])
+        self.combo_slave_stopbit.set("1")
+        self.combo_slave_stopbit.pack(side="left", padx=1)
 
         ttk.Label(left1, text="从机 ID:").pack(side="left", padx=(4, 1))
         self.entry_slave_id = ttk.Entry(left1, width=4)
@@ -279,19 +295,19 @@ class SlavePanel(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
 
         col_configs = [
-            ("addr", "起始地址", 70, "center"),
-            ("desc", "点位描述 / 业务字段", 180, "w"),
-            ("area", "存储区域", 110, "center"),
-            ("type", "数据类型", 80, "center"),
-            ("order", "变位模式", 70, "center"),
-            ("val", "当前解析数值", 100, "center"),
-            ("raw_hex", "原始寄存器(Hex)", 140, "center"),
-            ("sim", "动态模拟", 80, "center"),
-            ("reg_cnt", "占用字数", 60, "center"),
+            ("addr", "起始地址", 75, "center", False),
+            ("desc", "点位描述 / 业务字段", 280, "w", True),
+            ("area", "存储区域", 115, "center", False),
+            ("type", "数据类型", 85, "center", False),
+            ("order", "变位模式", 75, "center", False),
+            ("val", "当前解析数值", 110, "center", False),
+            ("raw_hex", "原始寄存器(Hex)", 140, "center", False),
+            ("sim", "动态模拟", 80, "center", False),
+            ("reg_cnt", "占用字数", 65, "center", False),
         ]
-        for col_id, heading, width, align in col_configs:
+        for col_id, heading, width, align, stretch in col_configs:
             self.tree.heading(col_id, text=heading, command=lambda c=col_id: self._sort_by_column(c, False))
-            self.tree.column(col_id, width=width, anchor=align)
+            self.tree.column(col_id, width=width, minwidth=60, anchor=align, stretch=stretch)
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
@@ -344,6 +360,10 @@ class SlavePanel(ttk.Frame):
         self.entry_slave_port.insert(0, str(cfg.port))
         self.combo_slave_com.set(cfg.com_port)
         self.combo_slave_baud.set(str(cfg.baudrate))
+        parity_map = {"N": "None (N)", "E": "Even (E)", "O": "Odd (O)"}
+        self.combo_slave_parity.set(parity_map.get(cfg.parity, "None (N)"))
+        self.combo_slave_databit.set(str(cfg.data_bits))
+        self.combo_slave_stopbit.set(str(cfg.stop_bits))
         self.entry_slave_id.delete(0, "end")
         self.entry_slave_id.insert(0, str(cfg.unit_id))
 
@@ -466,6 +486,10 @@ class SlavePanel(ttk.Frame):
             device.conn_config.port = int(self.entry_slave_port.get().strip() or "502")
             device.conn_config.com_port = self.combo_slave_com.get().strip() or "COM1"
             device.conn_config.baudrate = int(self.combo_slave_baud.get().strip() or "9600")
+            parity_str = self.combo_slave_parity.get().strip()
+            device.conn_config.parity = "E" if "Even" in parity_str or "E" in parity_str else ("O" if "Odd" in parity_str or "O" in parity_str else "N")
+            device.conn_config.data_bits = int(self.combo_slave_databit.get().strip() or "8")
+            device.conn_config.stop_bits = int(self.combo_slave_stopbit.get().strip() or "1")
             device.conn_config.unit_id = int(self.entry_slave_id.get().strip() or "1")
         except Exception as e:
             messagebox.showerror("配置错误", f"通信参数格式有误: {e}")
@@ -785,24 +809,37 @@ class SlavePanel(ttk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title("从业务数据库导入设备模型与点表")
-        dlg.geometry("760x520")
-        dlg.minsize(680, 440)
+        dlg.geometry("1020x640")
+        dlg.minsize(860, 480)
         dlg.transient(self)
         dlg.grab_set()
 
-        # 顶部提示与搜索框
-        top_f = ttk.Frame(dlg)
-        top_f.pack(fill="x", padx=12, pady=(10, 4))
-        ttk.Label(top_f, text="选择要导入的业务设备模型 (app 表):", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+        from .main_window import get_app_icon_path
+        icon_path = get_app_icon_path()
+        if icon_path and os.path.exists(icon_path):
+            try:
+                dlg.iconbitmap(icon_path)
+            except Exception:
+                pass
+
+        # 顶部筛选与搜索栏
+        filter_f = ttk.Frame(dlg)
+        filter_f.pack(fill="x", padx=14, pady=(10, 6))
+
+        ttk.Label(filter_f, text="设备分类筛选:", font=("Microsoft YaHei UI", 9, "bold")).pack(side="left", padx=(0, 6))
+        type_var = tk.StringVar(value="all")
+        ttk.Radiobutton(filter_f, text="全部业务模块", variable=type_var, value="all").pack(side="left", padx=4)
+        ttk.Radiobutton(filter_f, text="Type=1 (南向采集设备)", variable=type_var, value="1").pack(side="left", padx=4)
+        ttk.Radiobutton(filter_f, text="Type=2 (北向对外服务)", variable=type_var, value="2").pack(side="left", padx=4)
 
         search_var = tk.StringVar()
-        ttk.Label(top_f, text="🔍 搜索:").pack(side="right", padx=(6, 2))
-        entry_search = ttk.Entry(top_f, textvariable=search_var, width=16)
+        entry_search = ttk.Entry(filter_f, textvariable=search_var, width=18)
         entry_search.pack(side="right")
+        ttk.Label(filter_f, text="🔍 快速搜索:").pack(side="right", padx=(10, 2))
 
         # 设备列表表格
         table_f = ttk.Frame(dlg)
-        table_f.pack(fill="both", expand=True, padx=12, pady=4)
+        table_f.pack(fill="both", expand=True, padx=14, pady=4)
 
         scroll_y = ttk.Scrollbar(table_f, orient="vertical")
         scroll_y.pack(side="right", fill="y")
@@ -811,7 +848,7 @@ class SlavePanel(ttk.Frame):
 
         tree_apps = ttk.Treeview(
             table_f,
-            columns=("id", "name", "eng_name", "role", "comm", "pt_cnt"),
+            columns=("id", "enable", "name", "eng_name", "role", "comm", "pt_cnt"),
             show="headings",
             selectmode="browse",
             yscrollcommand=scroll_y.set,
@@ -822,40 +859,50 @@ class SlavePanel(ttk.Frame):
         tree_apps.pack(fill="both", expand=True)
 
         app_cols = [
-            ("id", "App ID", 65, "center"),
-            ("name", "业务设备名称", 170, "w"),
-            ("eng_name", "英文标识", 150, "w"),
-            ("role", "业务方向/角色", 110, "center"),
-            ("comm", "通讯参数", 140, "center"),
-            ("pt_cnt", "点位数量", 80, "center"),
+            ("id", "App ID", 65, "center", False),
+            ("enable", "使能状态", 85, "center", False),
+            ("name", "业务设备名称 (中文)", 240, "w", True),
+            ("eng_name", "英文标识 (Name)", 220, "w", True),
+            ("role", "业务方向/角色", 120, "center", False),
+            ("comm", "通讯参数", 160, "center", False),
+            ("pt_cnt", "点位数量", 80, "center", False),
         ]
-        for cid, chead, cw, calign in app_cols:
+        for cid, chead, cw, calign, cstretch in app_cols:
             tree_apps.heading(cid, text=chead)
-            tree_apps.column(cid, width=cw, anchor=calign)
+            tree_apps.column(cid, width=cw, anchor=calign, stretch=cstretch)
 
         # 预载点位统计
         app_item_map = {}
         for a in apps:
             pts = a.extract_studio_points()
-            role_tag = "南向物理设备" if a.is_south_master else "北向转发从机" if a.is_north_slave else "策略模块"
+            role_tag = "南向物理设备 (Type=1)" if a.is_south_master else "北向转发从机 (Type=2)" if a.is_north_slave else f"业务模块 (Type={a.app_type})"
             comm_str = f"串口 {a.serial_info['port_name']}" if a.comm_type == "RTU" else f"TCP {a.ip}:{a.port}"
             pt_count_str = f"{len(pts)} 点"
-            app_item_map[a.app_id] = (a, pts, role_tag, comm_str, pt_count_str)
+            enable_tag = "✅ 已使能" if a.enable == 1 else "⚪ 未使能"
+            app_item_map[a.app_id] = (a, pts, role_tag, comm_str, pt_count_str, enable_tag)
 
-        def populate_tree(keyword: str = ""):
+        def populate_tree(*args):
             for item in tree_apps.get_children():
                 tree_apps.delete(item)
-            kw = keyword.strip().lower()
+            kw = search_var.get().strip().lower()
+            sel_type = type_var.get()
+
             first_valid_item = None
-            for app_id, (a, pts, role_tag, comm_str, pt_count_str) in app_item_map.items():
-                disp_name = a.chinese_name or a.english_name
-                if kw and kw not in disp_name.lower() and kw not in a.english_name.lower() and kw not in str(app_id):
+            for app_id, (a, pts, role_tag, comm_str, pt_count_str, enable_tag) in app_item_map.items():
+                if sel_type == "1" and a.app_type != 1:
                     continue
+                if sel_type == "2" and a.app_type != 2:
+                    continue
+
+                disp_name = a.chinese_name or a.english_name
+                if kw and (kw not in disp_name.lower() and kw not in a.english_name.lower() and kw not in str(app_id)):
+                    continue
+
                 item_id = tree_apps.insert(
                     "",
                     "end",
                     iid=str(app_id),
-                    values=(app_id, disp_name, a.english_name, role_tag, comm_str, pt_count_str),
+                    values=(app_id, enable_tag, disp_name, a.english_name, role_tag, comm_str, pt_count_str),
                 )
                 if first_valid_item is None and len(pts) > 0:
                     first_valid_item = item_id
@@ -869,11 +916,12 @@ class SlavePanel(ttk.Frame):
                 tree_apps.focus(first)
 
         populate_tree()
-        search_var.trace_add("write", lambda *args: populate_tree(search_var.get()))
+        search_var.trace_add("write", populate_tree)
+        type_var.trace_add("write", populate_tree)
 
         # 导入模式选项
         mode_f = ttk.LabelFrame(dlg, text="导入模式与目标设定")
-        mode_f.pack(fill="x", padx=12, pady=6)
+        mode_f.pack(fill="x", padx=14, pady=6)
 
         import_mode_var = tk.StringVar(value="new_instance")
         rb_new = ttk.Radiobutton(
@@ -906,7 +954,7 @@ class SlavePanel(ttk.Frame):
                 messagebox.showwarning("提示", "请先在列表中选中一个业务设备", parent=dlg)
                 return
             sel_app_id = int(sel[0])
-            sel_app, points_data, role_tag, comm_str, pt_cnt_str = app_item_map[sel_app_id]
+            sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag = app_item_map[sel_app_id]
 
             if not points_data:
                 if not messagebox.askyesno("提示", f"设备 [{sel_app.chinese_name or sel_app.english_name}] 在数据库中未包含任何可解析的 Modbus 点位。\n是否仍要创建空白实例？", parent=dlg):
@@ -924,10 +972,13 @@ class SlavePanel(ttk.Frame):
                 comm_mode = CommType.RTU if sel_app.comm_type == "RTU" else CommType.TCP
                 cfg = ConnectionConfig(
                     comm_type=comm_mode,
-                    host="127.0.0.1",
+                    host=sel_app.ip if sel_app.ip else "127.0.0.1",
                     port=sel_app.port if sel_app.port else (502 + len(devices)),
                     com_port=sel_app.serial_info.get("port_name", "COM1") if sel_app.comm_type == "RTU" else "COM1",
                     baudrate=sel_app.serial_info.get("baudrate", 9600) if sel_app.comm_type == "RTU" else 9600,
+                    data_bits=sel_app.serial_info.get("databit", 8) if sel_app.comm_type == "RTU" else 8,
+                    parity=sel_app.serial_info.get("parity", "N") if sel_app.comm_type == "RTU" else "N",
+                    stop_bits=sel_app.serial_info.get("stopbit", 1) if sel_app.comm_type == "RTU" else 1,
                     unit_id=new_unit,
                 )
                 target_dev = SlaveDevice(id=new_id, name=new_name, conn_config=cfg)

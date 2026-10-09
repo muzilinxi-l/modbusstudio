@@ -140,6 +140,13 @@ def main():
         root.geometry("1240x840")
         root.minsize(1020, 640)
 
+    # 默认最大化模式启动工作台 (告别缩小版浮窗)
+    if sys.platform == "win32":
+        try:
+            root.state("zoomed")
+        except Exception:
+            pass
+
     app = ModbusStudioAppCore()
     main_window = MainWindow(root, app)
 

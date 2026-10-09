@@ -21,6 +21,25 @@ if TYPE_CHECKING:
     from ..services import LogEntry
 
 
+def get_app_icon_path() -> Optional[str]:
+    """跨源码运行与 PyInstaller 打包环境的图标定位器"""
+    candidates = []
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, "app.ico"))
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(sys.executable), "app.ico"))
+    curr_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(curr_dir, "app.ico"))
+    candidates.append(os.path.join(os.path.dirname(curr_dir), "app.ico"))
+    candidates.append(os.path.join(os.path.dirname(os.path.dirname(curr_dir)), "app.ico"))
+    candidates.append(os.path.abspath("app.ico"))
+
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 class MainWindow(ttk.Frame):
     """主窗口视图容器"""
 
@@ -41,9 +60,9 @@ class MainWindow(ttk.Frame):
         self.root.geometry("1240x840")
         self.root.minsize(1020, 640)
 
-        # 设置图标
-        icon_path = os.path.abspath("app.ico")
-        if os.path.exists(icon_path):
+        # 锁定恢复专属图标，替换第三方默认蓝羽毛
+        icon_path = get_app_icon_path()
+        if icon_path:
             try:
                 self.root.iconbitmap(icon_path)
             except Exception:
@@ -72,6 +91,13 @@ class MainWindow(ttk.Frame):
         self.style.configure("TRadiobutton", padding=1)
         self.style.configure("Treeview", rowheight=24, font=("Microsoft YaHei UI", 9))
         self.style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
+
+        # 显式强化 Treeview 行选定态高亮对比度映射 (彻底解决暗色/亮色主题下全选与未选无法辨识的缺陷)
+        self.style.map(
+            "Treeview",
+            background=[("selected", "#0d6efd")],
+            foreground=[("selected", "#ffffff")],
+        )
 
     def _build_layout(self) -> None:
         # 0. 顶部应用导航与主题控制栏
@@ -174,7 +200,21 @@ class MainWindow(ttk.Frame):
         try:
             if self.style:
                 self.style.theme_use(theme_name)
+                # 重新映射 Treeview 选中态高亮，确保换肤后对比度持续生效
+                self.style.map(
+                    "Treeview",
+                    background=[("selected", "#0d6efd")],
+                    foreground=[("selected", "#ffffff")],
+                )
             self.combo_theme.set(theme_name)
+
+            # 换肤后确保自定义图标不被重置
+            icon_path = get_app_icon_path()
+            if icon_path:
+                try:
+                    self.root.iconbitmap(icon_path)
+                except Exception:
+                    pass
 
             # 自适应优化终端日志底色与高亮对比度
             is_dark = "dark" in theme_name.lower()
