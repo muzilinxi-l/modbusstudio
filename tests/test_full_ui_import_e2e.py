@@ -142,14 +142,16 @@ def run_full_ui_import_self_test():
     print(f"[Step 7] 点表 Treeview 渲染行数: {rendered_rows} 行")
     assert rendered_rows == loaded_cnt, f"点表渲染行数 ({rendered_rows}) 与装载点位数 ({loaded_cnt}) 不符！"
 
-    # 8. 验证动态自适应列宽机制与行高
+    # 8. 验证动态自适应列宽机制与行高 (适配防抖平滑机制)
     class MockEvent:
         width = 1600
     slave_panel._on_table_resize(MockEvent())
+    slave_panel._apply_table_resize()
     desc_w_1600 = slave_panel.tree.column("desc", "width")
     
     MockEvent.width = 1000
     slave_panel._on_table_resize(MockEvent())
+    slave_panel._apply_table_resize()
     desc_w_1000 = slave_panel.tree.column("desc", "width")
     assert desc_w_1600 > desc_w_1000, f"动态列宽未随容器缩放: 1600下={desc_w_1600}, 1000下={desc_w_1000}"
     print(f"[Step 8] 动态自适应列宽验证通过: 1600宽下desc={desc_w_1600}px, 1000宽下desc={desc_w_1000}px")

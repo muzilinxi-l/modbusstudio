@@ -108,3 +108,51 @@ def test_slave_engine_pre_startup_data_persistence():
     engine.write_typed_value("4x_HoldingRegister", 12000, 65000, ModbusDataType.UINT16, ByteOrderMode.ABCD)
     assert engine.read_typed_value("4x_HoldingRegister", 12000, ModbusDataType.UINT16, ByteOrderMode.ABCD) == 65000
 
+
+def test_input_register_3x_read_write():
+    """测试输入寄存器 (3x_InputRegister) 的精确读写与 DataBlock 路由映射"""
+    from modbusstudio.modbus_engine import ModbusSlaveEngine, ModbusDataType, ByteOrderMode
+    engine = ModbusSlaveEngine(comm_type="TCP", port=5998)
+
+    # 写入输入寄存器 3x 地址 844
+    engine.write_typed_value("3x_InputRegister", 844, 1234, ModbusDataType.UINT16, ByteOrderMode.ABCD)
+
+    # 从输入寄存器读出原始寄存器值
+    raw = engine.read_raw_values("3x_InputRegister", 844, 1)
+    assert raw[0] == 1234, f"输入寄存器未正确写入底层 _input_registers: {raw}"
+
+    # 验证保持寄存器未被误写 (应当仍为 0)
+    raw_hr = engine.read_raw_values("4x_HoldingRegister", 844, 1)
+    assert raw_hr[0] == 0, f"输入寄存器写入误污染了保持寄存器: {raw_hr}"
+
+
+def test_sine_wave_simulation_value_changes():
+    """测试正弦波模拟算法生成动态波形数值"""
+    from modbusstudio.modbus_engine import ModbusSlaveEngine, ModbusDataType, ByteOrderMode
+    engine = ModbusSlaveEngine(comm_type="TCP", port=5997)
+
+    # 配置正弦波点位
+    engine.points[844] = {
+        "type": "UINT16",
+        "mode": "ABCD",
+        "sim_rule": "正弦波",
+        "area": "3x_InputRegister",
+        "current_val": 0,
+    }
+
+    recorded_values = []
+    engine.on_point_value_changed = lambda area, addr, val: recorded_values.append(val)
+
+    # 启动服务短时间运行
+    engine.start()
+    import time
+    time.sleep(2.5)
+    engine.stop()
+
+    assert len(recorded_values) >= 2, f"正弦波未能按秒产生数据: {recorded_values}"
+    assert all(isinstance(v, int) for v in recorded_values), "UINT16 正弦波输出应当为整数"
+    assert all(v >= 0 for v in recorded_values), "UINT16 正弦波不应当产生负数"
+    # 数值不应当全部相同为 0
+    assert any(v > 0 for v in recorded_values), f"正弦波数值未生效，仍为全0: {recorded_values}"
+
+

@@ -161,6 +161,8 @@ class ModbusSlaveEngine:
         self._sim_running = False
         # 外部通信问询与响应报文回调: (message, level) -> None
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
+        # 模拟点位数值实时变动通知回调: (area, address, new_val) -> None
+        self.on_point_value_changed: Optional[Callable[[str, int, Any], None]] = None
 
     @property
     def is_running(self) -> bool:
@@ -367,21 +369,23 @@ class ModbusSlaveEngine:
             self._is_running = False
 
     def _get_function_code(self, area: str) -> int:
-        if AreaType.COIL in area:
+        area_s = str(area).upper()
+        if "0X" in area_s or "COIL" in area_s or "线圈" in str(area):
             return 1
-        elif AreaType.DISCRETE_INPUT in area:
+        elif "1X" in area_s or "DISCRETE" in area_s or "离散" in str(area):
             return 2
-        elif AreaType.INPUT_REGISTER in area:
+        elif "3X" in area_s or "INPUT" in area_s or "输入" in str(area):
             return 4
         return 3  # HOLDING_REGISTER
 
     def _get_datablock(self, area: str):
-        """获取本地直接数据块 (支持在服务未启动时预热写入)."""
-        if AreaType.COIL in area:
+        """获取本地直接数据块 (支持在服务未启动时预热写入，严密匹配存储区域)."""
+        area_s = str(area).upper()
+        if "0X" in area_s or "COIL" in area_s or "线圈" in str(area):
             return self._coils
-        elif AreaType.DISCRETE_INPUT in area:
+        elif "1X" in area_s or "DISCRETE" in area_s or "离散" in str(area):
             return self._discrete_inputs
-        elif AreaType.INPUT_REGISTER in area:
+        elif "3X" in area_s or "INPUT" in area_s or "输入" in str(area):
             return self._input_registers
         return self._holding_registers
 
@@ -460,6 +464,8 @@ class ModbusSlaveEngine:
 
         while self._sim_running:
             time.sleep(1.0)
+            step = (step + 1) % 100000
+
             for addr, point in list(self.points.items()):
                 sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
                 if sim_mode == "固定":
@@ -480,10 +486,12 @@ class ModbusSlaveEngine:
                 area = point.get("area", AreaType.HOLDING_REGISTER)
                 curr = point.get("current_val", point.get("value", 0))
 
-                # 功能码 01(线圈) 与 02(离散输入)：只要有模拟规则，数据就在 0 和 1 之间变动，不受模拟规则数学公式限制
+                # 功能码 01(线圈) 与 02(离散输入)：只要有模拟规则，数据就在 0 和 1 之间翻转变动
                 is_fc01_02 = (
-                    AreaType.COIL in area
-                    or AreaType.DISCRETE_INPUT in area
+                    "0X" in str(area).upper()
+                    or "1X" in str(area).upper()
+                    or "COIL" in str(area).upper()
+                    or "DISCRETE" in str(area).upper()
                     or point.get("fc") in (1, 2)
                     or data_type == ModbusDataType.BOOL
                 )
@@ -492,6 +500,11 @@ class ModbusSlaveEngine:
                     new_val = 0 if curr_bool_int == 1 else 1
                     point["current_val"] = new_val
                     self.write_typed_value(area, addr, new_val, data_type, mode)
+                    if self.on_point_value_changed:
+                        try:
+                            self.on_point_value_changed(area, addr, new_val)
+                        except Exception:
+                            pass
                     continue
 
                 # 功能码 03(保持寄存器) 与 04(输入寄存器)：受具体模拟规则算法与数据类型限制
@@ -502,50 +515,67 @@ class ModbusSlaveEngine:
                 if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
                     continue
 
-                # 4. 数值类型强类型模拟 (严格遵守上下限，无符号数绝不产生负数)
-                else:
-                    limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
-                    min_v, max_v, v_type = limits
+                # 3. 数值类型强类型模拟 (严格遵守上下限，无符号数绝不产生负数)
+                limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
+                min_v, max_v, v_type = limits
 
-                    if sim_mode == "累加递增":
-                        if v_type is int:
-                            wrap_limit = min(max_v, 10000)
-                            if min_v == 0:  # 无符号数 (UINT16 / UINT32 / UINT64)
-                                new_val = (curr + 1) if curr < wrap_limit else 0
-                            else:
-                                new_val = (curr + 1) if curr < wrap_limit else 0
-                        else:
-                            new_val = round((curr + 0.5) % 1000.0, 2)
-
-                    elif sim_mode == "随机波动":
-                        if v_type is int:
-                            # 整数步长为整数，且无符号整型下限必须严格大于等于 0
-                            delta = random.choice([-2, -1, 0, 1, 2])
-                            if min_v == 0 and curr <= 1:
-                                delta = random.choice([0, 1, 2, 3])
-                            new_val = int(max(min_v, min(max_v, curr + delta)))
-                        else:
-                            delta = random.uniform(-0.5, 0.5)
-                            new_val = round(max(min_v, min(max_v, curr + delta)), 2)
-
-                    elif sim_mode == "正弦波":
-                        if min_v == 0:
-                            base = max(30.0, float(curr) if curr > 0 else 50.0)
-                            amp = min(20.0, base * 0.5)
-                            calc_val = base + amp * math.sin(step * 0.2)
-                        else:
-                            calc_val = 50.0 + 20.0 * math.sin(step * 0.2)
-
-                        if v_type is int:
-                            new_val = int(max(min_v, min(max_v, round(calc_val))))
-                        else:
-                            new_val = round(max(min_v, min(max_v, calc_val)), 2)
+                if sim_mode in ("累加递增", "步进递增"):
+                    if v_type is int:
+                        wrap_limit = min(max_v, 10000)
+                        new_val = (curr + 1) if curr < wrap_limit else min_v
                     else:
-                        new_val = curr
+                        new_val = round((curr + 0.5) % 1000.0, 2)
+
+                elif sim_mode == "随机波动":
+                    if v_type is int:
+                        delta = random.choice([-2, -1, 0, 1, 2])
+                        if min_v == 0 and curr <= 1:
+                            delta = random.choice([0, 1, 2, 3])
+                        new_val = int(max(min_v, min(max_v, curr + delta)))
+                    else:
+                        delta = random.uniform(-0.5, 0.5)
+                        new_val = round(max(min_v, min(max_v, curr + delta)), 2)
+
+                elif sim_mode == "正弦波":
+                    # 正弦波算法：结合时钟 step 与点位地址 addr 相位偏移，生成丝滑不同步的正弦波浪
+                    phase = (step * 0.25) + ((addr % 100) * 0.15)
+                    sin_factor = math.sin(phase)
+                    if min_v == 0:  # 无符号整型 (如 UINT16: 0~65535)
+                        base = 50.0 if (curr == 0) else max(25.0, float(curr))
+                        amp = min(25.0, base * 0.5)
+                        calc_val = base + amp * sin_factor
+                    else:  # 有符号整型/浮点数 (如 INT16: -32768~32767)
+                        base = 0.0 if (curr == 0) else float(curr)
+                        calc_val = base + 30.0 * sin_factor
+
+                    if v_type is int:
+                        new_val = int(max(min_v, min(max_v, round(calc_val))))
+                    else:
+                        new_val = round(max(min_v, min(max_v, calc_val)), 2)
+
+                elif sim_mode == "方波":
+                    phase = (step + (addr % 10)) % 10
+                    high_val = 100 if min_v == 0 else 50
+                    low_val = 0 if min_v == 0 else -50
+                    val_out = high_val if phase >= 5 else low_val
+                    if v_type is int:
+                        new_val = int(max(min_v, min(max_v, val_out)))
+                    else:
+                        new_val = float(max(min_v, min(max_v, val_out)))
+
+                else:
+                    new_val = curr
 
                 # 保存并写入底层 Context
                 point["current_val"] = new_val
                 self.write_typed_value(area, addr, new_val, data_type, mode)
+
+                # 回调通知外部模型同步
+                if self.on_point_value_changed:
+                    try:
+                        self.on_point_value_changed(area, addr, new_val)
+                    except Exception:
+                        pass
 
 
 # =====================================================================

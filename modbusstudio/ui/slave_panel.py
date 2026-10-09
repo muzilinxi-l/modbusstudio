@@ -59,6 +59,7 @@ class SlavePanel(ttk.Frame):
 
         self._build_ui()
         self._load_initial_data()
+        self.after(1000, self._start_runtime_sync_loop)
 
     # =========================================================================
     # UI 布局构建 (采用两行配置栏与紧凑自适应排版，杜绝高 DPI 截断)
@@ -474,6 +475,32 @@ class SlavePanel(ttk.Frame):
                     p.register_count,
                 ),
             )
+
+    def _start_runtime_sync_loop(self) -> None:
+        """主线程定时循环 (1s)：平滑同步运行中从机的动态变位模拟数值至表格界面"""
+        try:
+            if self._current_device_id and hasattr(self, "tree") and self.tree.winfo_exists():
+                device = self.app.slave_service.get_device(self._current_device_id)
+                if device and device.is_running:
+                    # 检查是否有点位开启了动态模拟 (固定点位跳过重绘)
+                    has_sim = any(p.sim_rule != "固定" for p in device.points.values())
+                    if has_sim:
+                        for row_id in self.tree.get_children():
+                            vals = self.tree.item(row_id, "values")
+                            if vals and len(vals) >= 8:
+                                addr = int(vals[0])
+                                area_name = vals[2]
+                                sim_mode = vals[7]
+                                if sim_mode != "固定":
+                                    p = device.get_point(area_name, addr)
+                                    if p:
+                                        self.tree.set(row_id, "val", p.value)
+                                        self.tree.set(row_id, "raw_hex", p.raw_hex)
+        except Exception:
+            pass
+        finally:
+            if hasattr(self, "winfo_exists") and self.winfo_exists():
+                self.after(1000, self._start_runtime_sync_loop)
 
     # =========================================================================
     # 核心业务操作入口：完全遵循用户指令设计

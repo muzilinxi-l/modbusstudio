@@ -339,6 +339,9 @@ class SlaveService:
                 msg,
             )
 
+            # 注册动态模拟数值变动回调：实时反向同步给应用模型实体
+            engine.on_point_value_changed = lambda area, addr, val: self._on_engine_point_value_changed(device_id, area, addr, val)
+
             # 同步所有已配置的点位到底层 DataBlock
             for point in device.points.values():
                 try:
@@ -354,6 +357,7 @@ class SlaveService:
                         "mode": point.byte_order.value,
                         "sim_rule": point.sim_rule,
                         "area": point.area.value,
+                        "current_val": point.value,
                     }
                 except Exception as ex:
                     logger.warning(f"同步点位到底层失败 {point.address}: {ex}")
@@ -370,6 +374,17 @@ class SlaveService:
             device.runtime_info = f"启动失败: {e}"
             self.logging_service.post("ERROR", cfg.unit_id, f"从机 [{device.name}] 启动失败: {e}")
             return False, f"启动异常: {e}"
+
+    def _on_engine_point_value_changed(self, device_id: str, area_str: str, address: int, new_val: Any) -> None:
+        """接收底层引擎模拟新数值并反向同步至 Device 点位实体"""
+        device = self.get_device(device_id)
+        if not device:
+            return
+        area_enum = AreaType.normalize(area_str)
+        point = device.get_point(area_enum, address)
+        if point:
+            point.value = new_val
+            PointService.re_encode_point(point)
 
     def stop_slave(self, device_id: str) -> Tuple[bool, str]:
         """统一停止从机服务并释放串口/网络句柄"""
@@ -406,6 +421,7 @@ class SlaveService:
                     "mode": point.byte_order.value,
                     "sim_rule": point.sim_rule,
                     "area": point.area.value,
+                    "current_val": point.value,
                 }
             except Exception as e:
                 logger.error(f"动态同步点位到底层失败: {e}")
