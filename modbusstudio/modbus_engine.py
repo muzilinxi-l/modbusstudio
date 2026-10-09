@@ -140,11 +140,12 @@ class ModbusSlaveEngine:
         self._server_task: Optional[asyncio.Task] = None
         self._is_running = False
 
-        # 初始化 4 大存储区，每个存储区预分配 1000 个点位
-        self._coils = ModbusSequentialDataBlock(1, [False] * 1000)
-        self._discrete_inputs = ModbusSequentialDataBlock(1, [False] * 1000)
-        self._input_registers = ModbusSequentialDataBlock(1, [0] * 1000)
-        self._holding_registers = ModbusSequentialDataBlock(1, [0] * 1000)
+        # 初始化 4 大存储区，每个存储区预分配 65535 个点位 (标准 Modbus 地址 1~65535)
+        self._coils = ModbusSequentialDataBlock(1, [False] * 65535)
+        self._discrete_inputs = ModbusSequentialDataBlock(1, [False] * 65535)
+        self._input_registers = ModbusSequentialDataBlock(1, [0] * 65535)
+        self._holding_registers = ModbusSequentialDataBlock(1, [0] * 65535)
+
 
         self._device_context = ModbusDeviceContext(
             di=self._discrete_inputs,
@@ -356,6 +357,8 @@ class ModbusSlaveEngine:
                 pass
             except Exception as e:
                 logger.error(f"Slave 服务运行异常 ({self.comm_type}): {e}")
+                if self.on_packet_log:
+                    self.on_packet_log(f"[服务异常崩溃] 无法启动/监听 {self.comm_type}: {e}", "ERROR")
 
         try:
             self._loop.run_until_complete(_serve())
@@ -372,48 +375,52 @@ class ModbusSlaveEngine:
             return 4
         return 3  # HOLDING_REGISTER
 
-    def read_raw_values(self, area: str, address: int, count: int) -> List[int]:
-        """读取底层原始数据 (线程安全跨事件循环调用)."""
-        if not self._server or not self._loop or not self._server.context:
-            return [0] * count
-        dev0 = getattr(self._server.context, "devices", {}).get(0)
-        if not dev0:
-            return [0] * count
+    def _get_datablock(self, area: str):
+        """获取本地直接数据块 (支持在服务未启动时预热写入)."""
+        if AreaType.COIL in area:
+            return self._coils
+        elif AreaType.DISCRETE_INPUT in area:
+            return self._discrete_inputs
+        elif AreaType.INPUT_REGISTER in area:
+            return self._input_registers
+        return self._holding_registers
 
-        fc = self._get_function_code(area)
-        try:
-            fut = asyncio.run_coroutine_threadsafe(
-                dev0.async_getValues(fc, address, count), self._loop
-            )
-            res = fut.result(timeout=1.0)
-            if isinstance(res, list):
-                return [1 if x is True else 0 if x is False else int(x) for x in res]
-        except Exception as e:
-            logger.error(f"read_raw_values 失败: {e}")
+    def read_raw_values(self, area: str, address: int, count: int) -> List[int]:
+        """读取底层原始数据 (线程安全，支持服务启动前后无缝读取)."""
+        block = self._get_datablock(area)
+        if block and hasattr(block, "simdata") and block.simdata:
+            try:
+                base_addr = block.simdata[0].address
+                start_idx = address - 1 - base_addr
+                values_list = block.simdata[0].values
+                res = []
+                for i in range(count):
+                    idx = start_idx + i
+                    if 0 <= idx < len(values_list):
+                        v = values_list[idx]
+                        res.append(1 if v is True else 0 if v is False else int(v))
+                    else:
+                        res.append(0)
+                return res
+            except Exception as e:
+                logger.error(f"read_raw_values 异常: {e}")
         return [0] * count
 
     def write_raw_values(self, area: str, address: int, values: List[int]) -> None:
-        """写入底层原始数据 (线程安全跨事件循环调用)."""
-        if not self._server or not self._loop or not self._server.context:
-            return
-        dev0 = getattr(self._server.context, "devices", {}).get(0)
-        if not dev0:
-            return
-
-        fc = self._get_function_code(area)
-        try:
-            if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area:
-                bool_vals = [bool(x) for x in values]
-                fut = asyncio.run_coroutine_threadsafe(
-                    dev0.async_setValues(fc, address, bool_vals), self._loop
-                )
-            else:
-                fut = asyncio.run_coroutine_threadsafe(
-                    dev0.async_setValues(fc, address, [int(x) & 0xFFFF for x in values]), self._loop
-                )
-            fut.result(timeout=1.0)
-        except Exception as e:
-            logger.error(f"write_raw_values 失败: {e}")
+        """写入底层原始数据 (线程安全，支持服务启动前后无缝同步写入)."""
+        block = self._get_datablock(area)
+        if block and hasattr(block, "simdata") and block.simdata:
+            try:
+                base_addr = block.simdata[0].address
+                start_idx = address - 1 - base_addr
+                values_list = block.simdata[0].values
+                is_bit = (AreaType.COIL in area or AreaType.DISCRETE_INPUT in area)
+                for i, val in enumerate(values):
+                    idx = start_idx + i
+                    if 0 <= idx < len(values_list):
+                        values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+            except Exception as ex:
+                logger.warning(f"写入数据块异常 ({area}:{address}): {ex}")
 
     def write_typed_value(
         self,
@@ -453,16 +460,25 @@ class ModbusSlaveEngine:
 
         while self._sim_running:
             time.sleep(1.0)
-            step += 1
             for addr, point in list(self.points.items()):
-                sim_mode = point.get("sim_mode", "固定")
+                sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
                 if sim_mode == "固定":
                     continue
 
-                data_type = point.get("data_type", ModbusDataType.INT16)
-                mode = point.get("byte_order", ByteOrderMode.ABCD)
+                dt_raw = point.get("data_type") or point.get("type") or ModbusDataType.INT16
+                try:
+                    data_type = dt_raw if isinstance(dt_raw, ModbusDataType) else ModbusDataType(str(dt_raw))
+                except Exception:
+                    data_type = ModbusDataType.INT16
+
+                bo_raw = point.get("byte_order") or point.get("mode") or ByteOrderMode.ABCD
+                try:
+                    mode = bo_raw if isinstance(bo_raw, ByteOrderMode) else ByteOrderMode(str(bo_raw))
+                except Exception:
+                    mode = ByteOrderMode.ABCD
+
                 area = point.get("area", AreaType.HOLDING_REGISTER)
-                curr = point.get("current_val", 0)
+                curr = point.get("current_val", point.get("value", 0))
 
                 # 功能码 01(线圈) 与 02(离散输入)：只要有模拟规则，数据就在 0 和 1 之间变动，不受模拟规则数学公式限制
                 is_fc01_02 = (

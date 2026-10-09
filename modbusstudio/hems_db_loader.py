@@ -290,7 +290,7 @@ class HemsDatabase:
             logger.warning(f"数据库文件不存在: {self.db_path}")
             return []
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
@@ -357,7 +357,7 @@ class HemsDatabase:
         if not os.path.exists(self.db_path):
             return False
 
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
         cursor = conn.cursor()
         cursor.execute("SELECT More FROM app WHERE Id = ?;", (app_id,))
         row = cursor.fetchone()

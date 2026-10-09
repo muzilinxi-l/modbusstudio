@@ -102,6 +102,18 @@ class LoggingService:
                 break
         return entries
 
+    def close(self) -> None:
+        """安全刷新并关闭磁盘日志文件句柄"""
+        if self._csv_file:
+            try:
+                self._csv_file.flush()
+                self._csv_file.close()
+            except Exception:
+                pass
+            self._csv_file = None
+            self._csv_writer = None
+
+
 
 class PointService:
     """点位业务统一操作入口（负责校验、构建模型、编解码转换）"""

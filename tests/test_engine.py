@@ -90,3 +90,21 @@ def test_slave_service_port_collision_prevention():
     ok, msg = slave_svc.start_slave("s2")
     assert ok is False
     assert "TCP端口冲突" in msg
+
+
+def test_slave_engine_pre_startup_data_persistence():
+    """测试在服务器启动前写入点位，数据正确写入本地数据块并能读出"""
+    from modbusstudio.modbus_engine import ModbusSlaveEngine, ModbusDataType, ByteOrderMode
+    engine = ModbusSlaveEngine(comm_type="TCP", port=5999)
+    # 服务尚未启动
+    assert engine.is_running is False
+    engine.write_typed_value("4x_HoldingRegister", 10, 752.4, ModbusDataType.FLOAT32, ByteOrderMode.CDAB)
+    # 读出验证
+    read_val = engine.read_typed_value("4x_HoldingRegister", 10, ModbusDataType.FLOAT32, ByteOrderMode.CDAB)
+    import pytest
+    assert pytest.approx(read_val, rel=1e-4) == 752.4
+
+    # 验证高地址支持 (例如 12000)
+    engine.write_typed_value("4x_HoldingRegister", 12000, 65000, ModbusDataType.UINT16, ByteOrderMode.ABCD)
+    assert engine.read_typed_value("4x_HoldingRegister", 12000, ModbusDataType.UINT16, ByteOrderMode.ABCD) == 65000
+

@@ -109,6 +109,8 @@ class ModbusStudioAppCore:
                 self.slave_service.stop_slave(dev.id)
         if self.poll_service.is_connected:
             self.poll_service.disconnect()
+        self.logging_service.close()
+
 
 
 def main():
