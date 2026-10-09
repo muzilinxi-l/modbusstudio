@@ -809,8 +809,8 @@ class SlavePanel(ttk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title("从业务数据库导入设备模型与点表")
-        dlg.geometry("1020x640")
-        dlg.minsize(860, 480)
+        dlg.geometry("1160x700")
+        dlg.minsize(980, 520)
         dlg.transient(self)
         dlg.grab_set()
 
@@ -859,27 +859,37 @@ class SlavePanel(ttk.Frame):
         tree_apps.pack(fill="both", expand=True)
 
         app_cols = [
-            ("id", "App ID", 65, "center", False),
-            ("enable", "使能状态", 85, "center", False),
-            ("name", "业务设备名称 (中文)", 240, "w", True),
-            ("eng_name", "英文标识 (Name)", 220, "w", True),
-            ("role", "业务方向/角色", 120, "center", False),
-            ("comm", "通讯参数", 160, "center", False),
-            ("pt_cnt", "点位数量", 80, "center", False),
+            ("id", "App ID", 85, 75, "center", False),
+            ("enable", "使能状态", 110, 100, "center", False),
+            ("name", "业务设备名称 (中文)", 260, 200, "w", True),
+            ("eng_name", "英文标识 (Name)", 240, 180, "w", True),
+            ("role", "业务方向 / 角色", 160, 140, "center", False),
+            ("comm", "通讯配置参数", 220, 190, "center", False),
+            ("pt_cnt", "点位数量", 95, 85, "center", False),
         ]
-        for cid, chead, cw, calign, cstretch in app_cols:
+        for cid, chead, cw, cminw, calign, cstretch in app_cols:
             tree_apps.heading(cid, text=chead)
-            tree_apps.column(cid, width=cw, anchor=calign, stretch=cstretch)
+            tree_apps.column(cid, width=cw, minwidth=cminw, anchor=calign, stretch=cstretch)
 
         # 预载点位统计
         app_item_map = {}
         for a in apps:
             pts = a.extract_studio_points()
             role_tag = "南向物理设备 (Type=1)" if a.is_south_master else "北向转发从机 (Type=2)" if a.is_north_slave else f"业务模块 (Type={a.app_type})"
-            comm_str = f"串口 {a.serial_info['port_name']}" if a.comm_type == "RTU" else f"TCP {a.ip}:{a.port}"
+            comm_str = f"串口 {a.serial_info.get('port_name', 'RS-485')}" if a.comm_type == "RTU" else f"TCP {a.ip}:{a.port}"
             pt_count_str = f"{len(pts)} 点"
             enable_tag = "✅ 已使能" if a.enable == 1 else "⚪ 未使能"
             app_item_map[a.app_id] = (a, pts, role_tag, comm_str, pt_count_str, enable_tag)
+
+        last_selected_app_id = [None]
+
+        def on_tree_select(event=None):
+            sel = tree_apps.selection()
+            if sel:
+                last_selected_app_id[0] = sel[0]
+
+        tree_apps.bind("<<TreeviewSelect>>", on_tree_select)
+        tree_apps.bind("<ButtonRelease-1>", on_tree_select)
 
         def populate_tree(*args):
             for item in tree_apps.get_children():
@@ -904,23 +914,20 @@ class SlavePanel(ttk.Frame):
                     iid=str(app_id),
                     values=(app_id, enable_tag, disp_name, a.english_name, role_tag, comm_str, pt_count_str),
                 )
-                if first_valid_item is None and len(pts) > 0:
+                if first_valid_item is None:
                     first_valid_item = item_id
 
             if first_valid_item:
                 tree_apps.selection_set(first_valid_item)
                 tree_apps.focus(first_valid_item)
-            elif tree_apps.get_children():
-                first = tree_apps.get_children()[0]
-                tree_apps.selection_set(first)
-                tree_apps.focus(first)
+                last_selected_app_id[0] = first_valid_item
 
         populate_tree()
         search_var.trace_add("write", populate_tree)
         type_var.trace_add("write", populate_tree)
 
         # 导入模式选项
-        mode_f = ttk.LabelFrame(dlg, text="导入模式与目标设定")
+        mode_f = ttk.LabelFrame(dlg, text="导入模式与目标设定 (支持双击上方列表任意行直接导入)")
         mode_f.pack(fill="x", padx=14, pady=6)
 
         import_mode_var = tk.StringVar(value="new_instance")
@@ -949,89 +956,149 @@ class SlavePanel(ttk.Frame):
         rb_append.pack(anchor="w", padx=8, pady=2)
 
         def do_import():
-            sel = tree_apps.selection()
-            if not sel:
-                messagebox.showwarning("提示", "请先在列表中选中一个业务设备", parent=dlg)
-                return
-            sel_app_id = int(sel[0])
-            sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag = app_item_map[sel_app_id]
-
-            if not points_data:
-                if not messagebox.askyesno("提示", f"设备 [{sel_app.chinese_name or sel_app.english_name}] 在数据库中未包含任何可解析的 Modbus 点位。\n是否仍要创建空白实例？", parent=dlg):
+            try:
+                sel = tree_apps.selection()
+                sel_id_str = sel[0] if sel else (last_selected_app_id[0] or tree_apps.focus())
+                if not sel_id_str:
+                    messagebox.showwarning("提示", "请先在列表中选中一个业务设备", parent=dlg)
+                    return
+                sel_app_id = int(sel_id_str)
+                if sel_app_id not in app_item_map:
+                    messagebox.showwarning("提示", f"未找到 App ID [{sel_app_id}] 对应的数据", parent=dlg)
                     return
 
-            mode = import_mode_var.get()
+                sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag = app_item_map[sel_app_id]
 
-            # 1. 模式判断：新建实例
-            if mode == "new_instance":
-                devices = self.app.slave_service.get_devices()
-                new_unit = len(devices) + 1
-                new_name = f"从机{new_unit} [{sel_app.chinese_name or sel_app.english_name}]"
-                new_id = f"slave_{time.time_ns()}"
+                if not points_data:
+                    if not messagebox.askyesno("提示", f"设备 [{sel_app.chinese_name or sel_app.english_name}] 在数据库中未包含任何可解析的 Modbus 点位。\n是否仍要创建空白实例？", parent=dlg):
+                        return
 
-                comm_mode = CommType.RTU if sel_app.comm_type == "RTU" else CommType.TCP
-                cfg = ConnectionConfig(
-                    comm_type=comm_mode,
-                    host=sel_app.ip if sel_app.ip else "127.0.0.1",
-                    port=sel_app.port if sel_app.port else (502 + len(devices)),
-                    com_port=sel_app.serial_info.get("port_name", "COM1") if sel_app.comm_type == "RTU" else "COM1",
-                    baudrate=sel_app.serial_info.get("baudrate", 9600) if sel_app.comm_type == "RTU" else 9600,
-                    data_bits=sel_app.serial_info.get("databit", 8) if sel_app.comm_type == "RTU" else 8,
-                    parity=sel_app.serial_info.get("parity", "N") if sel_app.comm_type == "RTU" else "N",
-                    stop_bits=sel_app.serial_info.get("stopbit", 1) if sel_app.comm_type == "RTU" else 1,
-                    unit_id=new_unit,
-                )
-                target_dev = SlaveDevice(id=new_id, name=new_name, conn_config=cfg)
-                self.app.slave_service.register_device(target_dev)
-                self._current_device_id = new_id
-            else:
-                if not self._current_device_id:
-                    messagebox.showwarning("提示", "当前未选定从机实例！", parent=dlg)
-                    return
-                target_dev = self.app.slave_service.get_device(self._current_device_id)
-                if not target_dev:
-                    return
-                if mode == "replace":
-                    target_dev.points.clear()
-                    target_dev.name = f"从机{target_dev.conn_config.unit_id} [{sel_app.chinese_name or sel_app.english_name}]"
+                mode = import_mode_var.get()
 
-            # 2. 批量构建与装载点位
-            imported_count = 0
-            for pt in points_data:
-                addr = pt.get("address", 0)
-                desc = pt.get("desc", "")
-                dt = pt.get("data_type", "INT16")
-                bo = pt.get("byte_order", "CDAB")
-                area = pt.get("area", "4x")
-                val = pt.get("current_val", 0)
-                sim = pt.get("sim_mode", "固定")
+                # 1. 模式判断：新建实例
+                if mode == "new_instance":
+                    devices = self.app.slave_service.get_devices()
+                    new_unit = len(devices) + 1
+                    new_name = f"从机{new_unit} [{sel_app.chinese_name or sel_app.english_name}]"
+                    new_id = f"slave_{time.time_ns()}"
 
-                ok, point, _ = PointService.validate_and_build_point(
-                    address=addr,
-                    description=desc,
-                    area=area,
-                    data_type=dt,
-                    byte_order=bo,
-                    val_input=val,
-                    sim_rule=sim,
-                )
-                if ok and point:
-                    target_dev.add_point(point)
-                    if target_dev.is_running:
-                        self.app.slave_service.sync_point_to_runtime(target_dev.id, point)
-                    imported_count += 1
+                    comm_mode = CommType.RTU if str(sel_app.comm_type).upper() == "RTU" else CommType.TCP
+                    s_info = getattr(sel_app, "serial_info", {}) or {}
 
-            self._update_instance_combobox()
-            self._load_device_to_ui(target_dev.id)
-            dlg.destroy()
-            messagebox.showinfo(
-                "导入成功",
-                f"已成功为从机服务 [{target_dev.name}] 装载 {imported_count} 个 Modbus 点位！\n"
-                f"通讯参数已适配: {target_dev.conn_config.summary}",
-            )
+                    baud = 9600
+                    try:
+                        baud = int(s_info.get("baudrate", 9600) or 9600)
+                    except Exception:
+                        pass
+
+                    databit = 8
+                    try:
+                        databit = int(s_info.get("databit", 8) or 8)
+                    except Exception:
+                        pass
+
+                    parity = str(s_info.get("parity", "N") or "N").strip().upper()
+                    if parity not in ("N", "E", "O"):
+                        parity = "N"
+
+                    stopbit = 1
+                    try:
+                        stopbit = int(float(str(s_info.get("stopbit", 1) or 1)))
+                    except Exception:
+                        pass
+
+                    com_name = str(s_info.get("port_name", "COM1") or "COM1")
+                    ip_addr = getattr(sel_app, "ip", "127.0.0.1") or "127.0.0.1"
+                    try:
+                        port_num = int(getattr(sel_app, "port", 502) or 502)
+                    except Exception:
+                        port_num = 502 + len(devices)
+
+                    cfg = ConnectionConfig(
+                        comm_type=comm_mode,
+                        host=ip_addr,
+                        port=port_num,
+                        com_port=com_name,
+                        baudrate=baud,
+                        data_bits=databit,
+                        parity=parity,
+                        stop_bits=stopbit,
+                        unit_id=new_unit,
+                    )
+                    target_dev = SlaveDevice(id=new_id, name=new_name, conn_config=cfg)
+                    self.app.slave_service.register_device(target_dev)
+                    self._current_device_id = new_id
+                else:
+                    if not self._current_device_id:
+                        messagebox.showwarning("提示", "当前未选定从机实例！", parent=dlg)
+                        return
+                    target_dev = self.app.slave_service.get_device(self._current_device_id)
+                    if not target_dev:
+                        return
+                    if mode == "replace":
+                        target_dev.points.clear()
+                        target_dev.name = f"从机{target_dev.conn_config.unit_id} [{sel_app.chinese_name or sel_app.english_name}]"
+
+                # 2. 批量构建与装载点位
+                imported_count = 0
+                fail_count = 0
+                fail_reasons = []
+                for pt in points_data:
+                    try:
+                        addr = int(pt.get("address", 0))
+                        desc = str(pt.get("desc", f"Point_{addr}"))
+                        dt = pt.get("data_type", "INT16")
+                        bo = pt.get("byte_order", "CDAB")
+                        area = pt.get("area", "4x")
+                        val = pt.get("current_val", 0)
+                        sim = pt.get("sim_mode", "固定")
+                        scale = float(pt.get("scale", 1.0) or 1.0)
+
+                        ok, point, err = PointService.validate_and_build_point(
+                            address=addr,
+                            description=desc,
+                            area=area,
+                            data_type=dt,
+                            byte_order=bo,
+                            val_input=val,
+                            sim_rule=sim,
+                            scale=scale,
+                        )
+                        if ok and point:
+                            target_dev.add_point(point)
+                            if target_dev.is_running:
+                                self.app.slave_service.sync_point_to_runtime(target_dev.id, point)
+                            imported_count += 1
+                        else:
+                            fail_count += 1
+                            if len(fail_reasons) < 3:
+                                fail_reasons.append(f"点位 {addr}: {err}")
+                    except Exception as pte:
+                        fail_count += 1
+                        if len(fail_reasons) < 3:
+                            fail_reasons.append(f"点位异常: {pte}")
+
+                self._current_device_id = target_dev.id
+                self._update_instance_combobox()
+                self._load_device_to_ui(target_dev.id)
+                self._refresh_tree(target_dev)
+
+                dlg.destroy()
+
+                msg = f"已成功为从机服务 [{target_dev.name}] 导入并装载 {imported_count} 个 Modbus 点位！\n\n通讯配置: {target_dev.conn_config.summary}"
+                if fail_count > 0:
+                    msg += f"\n\n(注意: 有 {fail_count} 个点位未能解析成功: {'; '.join(fail_reasons)})"
+                messagebox.showinfo("导入成功", msg, parent=self.winfo_toplevel())
+                self.app.logging_service.post("SYS", target_dev.conn_config.unit_id, f"成功从数据库导入设备 [{target_dev.name}]，共载入 {imported_count} 个点位")
+            except Exception as ex:
+                import traceback
+                logger.error(f"导入点表出现异常: {ex}\n{traceback.format_exc()}")
+                messagebox.showerror("导入失败", f"导入过程中发生异常:\n{ex}", parent=dlg)
+
+        tree_apps.bind("<Double-1>", lambda event: do_import())
 
         btn_f = ttk.Frame(dlg)
-        btn_f.pack(fill="x", padx=12, pady=(4, 10))
+        btn_f.pack(fill="x", padx=14, pady=(6, 12))
         ttk.Button(btn_f, text="立即导入点表", style="primary.TButton", command=do_import).pack(side="right", padx=4)
         ttk.Button(btn_f, text="取消", style="Small.TButton", command=dlg.destroy).pack(side="right", padx=4)
 
