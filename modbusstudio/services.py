@@ -278,6 +278,26 @@ class SlaveService:
             return True, f"成功移除从机 {device_id}"
         return False, "从机不存在"
 
+    def clear_all_devices(self) -> int:
+        """停止所有运行中的底层通信服务，并完全清空所有从机设备实例与点表
+
+        Returns:
+            int: 成功停止并清空的从机实例总数
+        """
+        count = len(self._devices)
+        # 1. 逐个停止运行中的底层通信引擎并释放资源
+        for device_id, engine in list(self._active_engines.items()):
+            try:
+                engine.stop()
+            except Exception as e:
+                logger.error(f"停止底层引擎异常 [{device_id}]: {e}")
+        self._active_engines.clear()
+
+        # 2. 清空所有内存设备实体
+        self._devices.clear()
+        self.logging_service.post("SYS", 0, f"已安全停止底层通信并清空所有历史从机服务实例 (共 {count} 个)")
+        return count
+
     def start_slave(self, device_id: str) -> Tuple[bool, str]:
         """统一启动从机服务，装配点表并开启网络/串口监听"""
         device = self.get_device(device_id)

@@ -384,6 +384,19 @@ class SlavePanel(ttk.Frame):
                 idx = [d.id for d in devices].index(self._current_device_id)
                 self.combo_instances.current(idx)
             self._load_device_to_ui(self._current_device_id)
+        else:
+            self._current_device_id = None
+            self.combo_instances.set("（暂无从机实例，请点击【导入设备点表】或【新建服务】）")
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            self.lbl_slave_status.config(text="● 未就绪 (无活动从机)", foreground="#6c757d")
+            self.btn_toggle_slave.config(text="▶️ 启动服务", style="secondary.TButton")
+
+    def _clear_all_slaves_and_reset_ui(self) -> None:
+        """清空所有从机服务实例并重置主工作台 UI 界面"""
+        self.app.slave_service.clear_all_devices()
+        self._current_device_id = None
+        self._update_instance_combobox()
 
     def _load_device_to_ui(self, device_id: str) -> None:
         device = self.app.slave_service.get_device(device_id)
@@ -827,15 +840,27 @@ class SlavePanel(ttk.Frame):
         ttk.Button(btn_box, text="取消", command=dlg.destroy).pack(side="right", padx=4)
 
     def _select_database_file(self) -> None:
+        """关联或切换业务数据库文件，并自动停止清空所有历史从机实例"""
         db_path = filedialog.askopenfilename(
-            title="选择 HEMS 数据库文件",
+            title="选择业务数据库文件 (切换将自动清空当前从机实例)",
             filetypes=[("HEMS 数据库", "*.cdb;*.sqlite;*.db"), ("所有文件", "*.*")],
             initialdir=os.path.abspath("extra"),
         )
         if db_path and os.path.exists(db_path):
+            old_count = len(self.app.slave_service.get_devices())
             self.app.db_path = db_path
-            self.app.logging_service.post("SYS", 0, f"已成功关联业务数据库: {db_path}")
-            messagebox.showinfo("数据库关联成功", f"当前数据库：\n{db_path}")
+
+            # 切换数据库时：停止并清空当前已添加的所有从机实例与点表
+            self._clear_all_slaves_and_reset_ui()
+            self.app.logging_service.post(
+                "SYS",
+                0,
+                f"已成功切换业务数据库: {db_path}，已自动停止并清空原有的 {old_count} 个从机服务实例",
+            )
+            messagebox.showinfo(
+                "数据库切换成功",
+                f"当前数据库已更新为：\n{db_path}\n\n已成功停止并清空原有的 {old_count} 个从机服务实例与点表！\n请点击【导入设备点表】载入新数据库中的设备与点位。",
+            )
 
     def _open_import_db_dialog(self) -> None:
         """打开从业务数据库导入设备模型与点表弹窗 (支持多选批量与容量配额限制)"""

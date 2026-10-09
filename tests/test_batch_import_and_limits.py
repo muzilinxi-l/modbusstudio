@@ -224,3 +224,27 @@ def test_db_import_dialog_default_selection_policy():
     finally:
         root.destroy()
 
+
+def test_clear_all_devices_on_database_switch():
+    """测试切换数据库时，自动停止底层引擎并清空所有已添加的从机服务实例与点表"""
+    log_svc = LoggingService()
+    slave_svc = SlaveService(log_svc)
+
+    # 1. 预先添加 3 个从机实例
+    for i in range(3):
+        cfg = ConnectionConfig(comm_type=CommType.TCP, port=502 + i, unit_id=i + 1)
+        dev = SlaveDevice(id=f"slave_{i}", name=f"Slave_{i}", conn_config=cfg)
+        ok, p, _ = PointService.validate_and_build_point(i, f"P_{i}", "4x", "INT16", "ABCD", i * 10)
+        dev.add_point(p)
+        slave_svc.register_device(dev)
+
+    assert len(slave_svc.get_devices()) == 3
+
+    # 2. 调用 clear_all_devices 清空
+    cleared_count = slave_svc.clear_all_devices()
+    assert cleared_count == 3
+    assert len(slave_svc.get_devices()) == 0
+    assert slave_svc.count_devices_by_comm(CommType.TCP) == 0
+    assert slave_svc.count_devices_by_comm(CommType.RTU) == 0
+
+
