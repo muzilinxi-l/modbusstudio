@@ -7,10 +7,15 @@ Modbus Studio - 从机模拟工作台面板 (Slave Panel)
 """
 
 from __future__ import annotations
+import logging
 import os
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+import traceback
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+
+logger = logging.getLogger("SlavePanel")
 
 try:
     import serial.tools.list_ports
@@ -295,19 +300,20 @@ class SlavePanel(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
 
         col_configs = [
-            ("addr", "起始地址", 75, "center", False),
-            ("desc", "点位描述 / 业务字段", 280, "w", True),
-            ("area", "存储区域", 115, "center", False),
-            ("type", "数据类型", 85, "center", False),
-            ("order", "变位模式", 75, "center", False),
-            ("val", "当前解析数值", 110, "center", False),
-            ("raw_hex", "原始寄存器(Hex)", 140, "center", False),
-            ("sim", "动态模拟", 80, "center", False),
-            ("reg_cnt", "占用字数", 65, "center", False),
+            ("addr", "起始地址", 95, 85, "center", False),
+            ("desc", "点位描述 / 业务字段", 340, 240, "w", True),
+            ("area", "存储区域", 135, 120, "center", False),
+            ("type", "数据类型", 110, 95, "center", False),
+            ("order", "变位模式", 95, 85, "center", False),
+            ("val", "当前解析数值", 130, 110, "center", False),
+            ("raw_hex", "原始寄存器(Hex)", 160, 135, "center", False),
+            ("sim", "动态模拟", 100, 90, "center", False),
+            ("reg_cnt", "占用字数", 90, 80, "center", False),
         ]
-        for col_id, heading, width, align, stretch in col_configs:
-            self.tree.heading(col_id, text=heading, command=lambda c=col_id: self._sort_by_column(c, False))
-            self.tree.column(col_id, width=width, minwidth=60, anchor=align, stretch=stretch)
+        for col_id, heading, width, min_w, align, stretch in col_configs:
+            head_align = align if col_id == "desc" else "center"
+            self.tree.heading(col_id, text=heading, anchor=head_align, command=lambda c=col_id: self._sort_by_column(c, False))
+            self.tree.column(col_id, width=width, minwidth=min_w, anchor=align, stretch=stretch)
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
 
@@ -809,8 +815,16 @@ class SlavePanel(ttk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title("从业务数据库导入设备模型与点表")
-        dlg.geometry("1160x700")
-        dlg.minsize(980, 520)
+
+        screen_w = dlg.winfo_screenwidth()
+        screen_h = dlg.winfo_screenheight()
+        win_w = min(1200, max(1080, int(screen_w * 0.82)))
+        win_h = min(780, max(640, int(screen_h * 0.78)))
+        pos_x = max(0, (screen_w - win_w) // 2)
+        pos_y = max(0, (screen_h - win_h) // 2)
+        dlg.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+        dlg.minsize(960, 520)
+        dlg.resizable(True, True)
         dlg.transient(self)
         dlg.grab_set()
 
@@ -868,7 +882,8 @@ class SlavePanel(ttk.Frame):
             ("pt_cnt", "点位数量", 95, 85, "center", False),
         ]
         for cid, chead, cw, cminw, calign, cstretch in app_cols:
-            tree_apps.heading(cid, text=chead)
+            head_align = calign if cid in ("name", "eng_name") else "center"
+            tree_apps.heading(cid, text=chead, anchor=head_align)
             tree_apps.column(cid, width=cw, minwidth=cminw, anchor=calign, stretch=cstretch)
 
         # 预载点位统计
