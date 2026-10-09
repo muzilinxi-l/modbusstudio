@@ -226,14 +226,34 @@ class DbImportDialog:
         self.type_var.trace_add("write", lambda *args: self._filter_tree())
 
     def _on_table_resize(self, event=None) -> None:
-        """动态感知容器宽度变化，等比例调整列宽"""
+        """动态感知容器宽度变化，等比例调整列宽 (带防抖与平滑优化，避免频繁重绘卡顿)"""
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return
         width = event.width if event else self.table_frame.winfo_width()
-        avail_w = width - 25
+        if width < 400:
+            return
+
+        # 阈值过滤：宽度微小变化 (< 6px) 直接跳过
+        if hasattr(self, "_last_rendered_width") and abs(width - self._last_rendered_width) < 6:
+            return
+
+        # 20ms 防抖调度：丢弃高频连续拖动事件，合并执行，确保窗口拖动丝滑顺畅
+        if hasattr(self, "_resize_job") and self._resize_job is not None:
+            self.dlg.after_cancel(self._resize_job)
+
+        self._pending_width = width
+        self._resize_job = self.dlg.after(20, self._apply_table_resize)
+
+    def _apply_table_resize(self) -> None:
+        """执行列宽实际重算与应用"""
+        self._resize_job = None
+        if not hasattr(self, "tree") or not self.tree.winfo_exists():
+            return
+        avail_w = getattr(self, "_pending_width", self.table_frame.winfo_width()) - 25
         if avail_w < 400:
             return
-        for cid, chead, ratio, min_w, align in self.col_specs:
+        self._last_rendered_width = self._pending_width
+        for cid, _, ratio, min_w, _ in self.col_specs:
             w = max(min_w, int(avail_w * ratio))
             self.tree.column(cid, width=w)
 
@@ -251,7 +271,7 @@ class DbImportDialog:
         self._filter_tree()
 
     def _filter_tree(self) -> None:
-        """根据分类和搜索关键字过滤呈现设备"""
+        """根据分类和搜索关键字过滤呈现设备，并在 Type=1 或 Type=2 时默认全选已使能设备"""
         for item in self.tree.get_children():
             self.tree.delete(item)
 
@@ -259,6 +279,7 @@ class DbImportDialog:
         sel_type = self.type_var.get()
 
         first_item = None
+        enabled_items = []
         for app_id, (a, pts, role_tag, comm_str, pt_count_str, enable_tag) in self.app_item_map.items():
             if sel_type == "1" and a.app_type != 1:
                 continue
@@ -277,10 +298,28 @@ class DbImportDialog:
             )
             if first_item is None:
                 first_item = item_id
+            if a.enable == 1:
+                enabled_items.append(item_id)
 
-        if first_item:
-            self.tree.selection_set(first_item)
-            self.tree.focus(first_item)
+        # 核心交互策略：
+        # 1. 只有选择 Type=1 (南向采集设备) 或 Type=2 (北向对外服务) 时，默认全选该分类下所有“已使能”的设备！
+        # 2. 在“全部业务模块” (all) 模式下，不进行全部选中，仅单选第一项（方便精准按需单点）
+        if sel_type in ("1", "2"):
+            if enabled_items:
+                self.tree.selection_set(enabled_items)
+                self.tree.focus(enabled_items[0])
+            elif first_item:
+                self.tree.selection_set(first_item)
+                self.tree.focus(first_item)
+            else:
+                self.tree.selection_set([])
+        else:
+            if first_item:
+                self.tree.selection_set(first_item)
+                self.tree.focus(first_item)
+            else:
+                self.tree.selection_set([])
+
         self._on_tree_selection_changed()
 
     def _on_tree_selection_changed(self, event=None) -> None:

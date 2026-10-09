@@ -319,15 +319,34 @@ class SlavePanel(ttk.Frame):
         table_frame.bind("<Configure>", self._on_table_resize)
 
     def _on_table_resize(self, event=None) -> None:
-        """动态感知容器宽度变化，等比例自适应分配每一列宽，适配任意电脑屏幕与DPI"""
+        """动态感知容器宽度变化，等比例自适应分配每一列宽 (防抖平滑优化，杜绝拖动丢帧卡顿)"""
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return
         width = event.width if event else self.tree.winfo_width()
-        avail_w = width - 25
-        if avail_w < 450:
+        if width < 450:
             return
 
-        for col_id, heading, ratio, min_w, align in self._table_col_configs:
+        # 阈值过滤：微小像素变动跳过
+        if hasattr(self, "_last_rendered_width") and abs(width - self._last_rendered_width) < 6:
+            return
+
+        # 20ms 防抖调度
+        if hasattr(self, "_resize_job") and self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+
+        self._pending_width = width
+        self._resize_job = self.after(20, self._apply_table_resize)
+
+    def _apply_table_resize(self) -> None:
+        """执行实际主点表列宽分配"""
+        self._resize_job = None
+        if not hasattr(self, "tree") or not self.tree.winfo_exists():
+            return
+        avail_w = getattr(self, "_pending_width", self.tree.winfo_width()) - 25
+        if avail_w < 450:
+            return
+        self._last_rendered_width = self._pending_width
+        for col_id, _, ratio, min_w, _ in self._table_col_configs:
             dyn_w = max(min_w, int(avail_w * ratio))
             self.tree.column(col_id, width=dyn_w)
 

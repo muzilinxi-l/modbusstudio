@@ -189,3 +189,38 @@ def test_batch_device_merge_and_replace():
 
     assert len(target_dev.points) == 1
     assert target_dev.get_point("4x_HoldingRegister", 20) is not None
+
+
+def test_db_import_dialog_default_selection_policy():
+    """测试导入弹窗分类策略：Type=1 或 Type=2 时默认全选已使能设备，全部业务模块不全选"""
+    import tkinter as tk
+    from modbusstudio.app import ModbusStudioAppCore
+    from modbusstudio.ui.dialogs import DbImportDialog
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        app = ModbusStudioAppCore()
+        dlg = DbImportDialog(root, app, lambda d: None)
+
+        # 1. 验证默认 "all" 模式下：不进行全部选中（仅选中 1 项或首项）
+        dlg.type_var.set("all")
+        all_sel = dlg.tree.selection()
+        assert len(all_sel) <= 1, f"'all' 模式下不应当全选，当前选中: {len(all_sel)}"
+
+        # 2. 验证切换至 "1" (南向采集设备) 模式：必须默认全选当前所有已使能设备！
+        dlg.type_var.set("1")
+        sel_type1 = dlg.tree.selection()
+        assert len(sel_type1) > 1, f"Type=1 模式下应当自动全选所有已使能设备，当前选中数: {len(sel_type1)}"
+        for item_id in sel_type1:
+            a = dlg.app_item_map[int(item_id)][0]
+            assert a.enable == 1, f"未使能设备不应被默认全选: App ID {a.app_id}"
+
+        # 3. 验证切换回 "all" 模式：恢复为单选首项
+        dlg.type_var.set("all")
+        assert len(dlg.tree.selection()) <= 1
+
+        dlg.dlg.destroy()
+    finally:
+        root.destroy()
+
