@@ -22,6 +22,8 @@ from .models import (
     ConnectionConfig,
     DataType,
     LogEntry,
+    MAX_RTU_SLAVE_INSTANCES,
+    MAX_TCP_SLAVE_INSTANCES,
     ModbusPoint,
     PollResult,
     PollTask,
@@ -217,13 +219,56 @@ class SlaveService:
         self._active_engines: Dict[str, ModbusSlaveEngine] = {}
 
     def get_devices(self) -> List[SlaveDevice]:
+        """获取当前已配置的所有从机设备列表"""
         return list(self._devices.values())
 
     def get_device(self, device_id: str) -> Optional[SlaveDevice]:
+        """根据唯一标识获取从机设备实例"""
         return self._devices.get(device_id)
 
-    def register_device(self, device: SlaveDevice) -> None:
+    def count_devices_by_comm(self, comm_type: CommType) -> int:
+        """按物理通信协议类型统计当前已注册的从机实例数量
+
+        Args:
+            comm_type: 通信物理类型 (TCP 或 RTU)
+
+        Returns:
+            int: 该协议下当前实例数
+        """
+        return sum(1 for d in self._devices.values() if d.conn_config.comm_type == comm_type)
+
+    def can_register_device(self, comm_type: CommType) -> Tuple[bool, str]:
+        """检查特定通信协议的从机实例数是否达到系统硬性配额上限 (独立限制 100 个)
+
+        Args:
+            comm_type: 通信物理类型 (TCP 或 RTU)
+
+        Returns:
+            Tuple[bool, str]: (是否允许创建, 错误或提示信息)
+        """
+        limit = MAX_RTU_SLAVE_INSTANCES if comm_type == CommType.RTU else MAX_TCP_SLAVE_INSTANCES
+        current = self.count_devices_by_comm(comm_type)
+        if current >= limit:
+            proto_name = "Modbus RTU (串口)" if comm_type == CommType.RTU else "Modbus TCP (以太网)"
+            return False, f"{proto_name} 从机服务实例已达系统容量上限 ({limit} 个)，禁止继续创建！"
+        return True, ""
+
+    def register_device(self, device: SlaveDevice, check_quota: bool = True) -> Tuple[bool, str]:
+        """注册从机设备，并执行容量配额硬限制检查
+
+        Args:
+            device: 从机设备实体
+            check_quota: 是否检查协议配额（默认为 True；若是更新已有设备则不计新增）
+
+        Returns:
+            Tuple[bool, str]: (是否注册成功, 状态描述信息)
+        """
+        if check_quota and device.id not in self._devices:
+            ok, err = self.can_register_device(device.conn_config.comm_type)
+            if not ok:
+                return False, err
         self._devices[device.id] = device
+        return True, "注册成功"
 
     def remove_device(self, device_id: str) -> Tuple[bool, str]:
         if device_id in self._active_engines:

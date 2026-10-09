@@ -12,6 +12,14 @@ from PIL import ImageGrab
 
 user32 = ctypes.windll.user32
 
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 
 def test_exe_launch_and_window_zoomed():
     exe_path = os.path.abspath("dist/ModbusStudio.exe")
@@ -51,10 +59,20 @@ def test_exe_launch_and_window_zoomed():
 
         assert main_hwnd is not None, "未能在超时时间内检测到 Modbus Studio 主窗口"
 
-        # 检查是否为原生最大化模式
+        # 检查是否为居中启动 (用户明确要求初次打开不进行最大化桌面)
         is_zoomed = bool(user32.IsZoomed(main_hwnd))
-        print(f"[3/4] 验证窗口全屏/最大化状态: IsZoomed = {is_zoomed}")
-        assert is_zoomed is True, "EXE 启动后未处于默认最大化(zoomed)状态！"
+        print(f"[3/4] 验证窗口居中/非强制最大化状态: IsZoomed = {is_zoomed}")
+        assert is_zoomed is False, "EXE 启动后应当为适中居中窗口，而非强制最大化！"
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        rect = RECT()
+        user32.GetWindowRect(main_hwnd, ctypes.byref(rect))
+        w = rect.right - rect.left
+        h = rect.bottom - rect.top
+        print(f"      窗口尺寸: 宽={w}px, 高={h}px")
+        assert w >= 800 and h >= 500, f"窗口尺寸过小或异常压缩: {w}x{h}"
 
         # 尝试抓取当前主界面截屏 (若会话不支持则安全跳过)
         try:

@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('app.ico', '.')]
 binaries = []
-hiddenimports = ['modbusstudio', 'modbusstudio.ui', 'modbusstudio.services', 'modbusstudio.models']
+hiddenimports = ['modbusstudio', 'modbusstudio.ui', 'modbusstudio.ui.dialogs', 'modbusstudio.services', 'modbusstudio.models']
 tmp_ret = collect_all('pymodbus')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tb_ret = collect_all('ttkbootstrap')

@@ -23,6 +23,17 @@ class CommType(str, Enum):
         return cls.TCP
 
 
+# -----------------------------------------------------------------------------
+# 系统资源配额与容量上限常量 (System Resource Quotas)
+# -----------------------------------------------------------------------------
+MAX_TCP_SLAVE_INSTANCES: int = 100
+"""以太网 Modbus TCP 从机服务实例最大承载数量上限"""
+
+MAX_RTU_SLAVE_INSTANCES: int = 100
+"""串行总线 Modbus RTU 从机服务实例最大承载数量上限"""
+
+
+
 class AreaType(str, Enum):
     """Modbus 存储区域类型"""
     HOLDING = "4x_HoldingRegister"
