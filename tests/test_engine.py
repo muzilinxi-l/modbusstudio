@@ -72,8 +72,8 @@ def test_slave_service_registration_and_retrieval():
     assert len(slave_svc.get_devices()) == 1
 
 
-def test_slave_service_port_collision_prevention():
-    """测试端口冲突防护"""
+def test_slave_service_station_collision_prevention():
+    """测试同物理端口下相同站地址 (Unit ID) 冲突拦截"""
     log_svc = LoggingService(log_dir="logs")
     slave_svc = SlaveService(log_svc)
 
@@ -81,7 +81,8 @@ def test_slave_service_port_collision_prevention():
     dev1 = SlaveDevice(id="s1", name="从机1", conn_config=cfg1)
     dev1.is_running = True  # 模拟已在运行
 
-    cfg2 = ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=5020, unit_id=2)
+    # 相同端口、相同站地址 (Unit ID = 1) -> 应当拦截
+    cfg2 = ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=5020, unit_id=1)
     dev2 = SlaveDevice(id="s2", name="从机2", conn_config=cfg2)
 
     slave_svc.register_device(dev1)
@@ -89,7 +90,39 @@ def test_slave_service_port_collision_prevention():
 
     ok, msg = slave_svc.start_slave("s2")
     assert ok is False
-    assert "TCP端口冲突" in msg
+    assert "站地址冲突" in msg
+
+
+def test_slave_service_same_port_multi_station_support():
+    """测试同物理端口下不同站地址 (Unit ID) 支持并发启动"""
+    log_svc = LoggingService(log_dir="logs")
+    slave_svc = SlaveService(log_svc)
+
+    cfg1 = ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=5044, unit_id=1)
+    dev1 = SlaveDevice(id="s1", name="从机1", conn_config=cfg1)
+
+    cfg2 = ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=5044, unit_id=2)
+    dev2 = SlaveDevice(id="s2", name="从机2", conn_config=cfg2)
+
+    slave_svc.register_device(dev1)
+    slave_svc.register_device(dev2)
+
+    try:
+        ok1, msg1 = slave_svc.start_slave("s1")
+        assert ok1 is True, f"从机1 启动失败: {msg1}"
+        assert dev1.is_running is True
+
+        # 同端口、不同站号 (Unit ID = 2) -> 应当顺利启动
+        ok2, msg2 = slave_svc.start_slave("s2")
+        assert ok2 is True, f"从机2 启动失败: {msg2}"
+        assert dev2.is_running is True
+
+        # 独立停止从机1，从机2依然保持运行
+        slave_svc.stop_slave("s1")
+        assert dev1.is_running is False
+        assert dev2.is_running is True
+    finally:
+        slave_svc.clear_all_devices()
 
 
 def test_slave_engine_pre_startup_data_persistence():

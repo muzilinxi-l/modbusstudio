@@ -325,17 +325,25 @@ class SlaveService:
         if device.is_running:
             return True, f"从机 {device.name} 已经在运行中"
 
-        # 检查通信资源冲突
+        # 检查通信资源冲突：标准 Modbus 规范下，仅当同一物理端点且从机站地址 (Unit ID) 完全相同时才判定为冲突
         cfg = device.conn_config
         for other_id, other_dev in self._devices.items():
             if other_id != device_id and other_dev.is_running:
                 other_cfg = other_dev.conn_config
-                if cfg.comm_type == CommType.RTU and other_cfg.comm_type == CommType.RTU:
-                    if cfg.com_port.upper() == other_cfg.com_port.upper():
-                        return False, f"串口冲突：{cfg.com_port} 已被从机 [{other_dev.name}] 独占占用！"
-                elif cfg.comm_type == CommType.TCP and other_cfg.comm_type == CommType.TCP:
-                    if cfg.port == other_cfg.port and (cfg.host == other_cfg.host or cfg.host == "0.0.0.0" or other_cfg.host == "0.0.0.0"):
-                        return False, f"TCP端口冲突：{cfg.host}:{cfg.port} 已被从机 [{other_dev.name}] 监听！"
+                if cfg.comm_type == other_cfg.comm_type:
+                    same_endpoint = False
+                    if cfg.comm_type == CommType.RTU:
+                        same_endpoint = (cfg.com_port.upper().strip() == other_cfg.com_port.upper().strip())
+                    elif cfg.comm_type == CommType.TCP:
+                        same_endpoint = (
+                            cfg.port == other_cfg.port
+                            and (cfg.host == other_cfg.host or cfg.host in ("0.0.0.0", "") or other_cfg.host in ("0.0.0.0", ""))
+                        )
+
+                    if same_endpoint and cfg.unit_id == other_cfg.unit_id:
+                        proto_name = "串口" if cfg.comm_type == CommType.RTU else "TCP网络"
+                        ep_desc = cfg.com_port if cfg.comm_type == CommType.RTU else f"{cfg.host}:{cfg.port}"
+                        return False, f"站地址冲突：{proto_name} [{ep_desc}] 下已存在站地址为 {cfg.unit_id} 的运行中从机 [{other_dev.name}]！"
 
         try:
             engine = ModbusSlaveEngine(

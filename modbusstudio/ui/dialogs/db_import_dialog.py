@@ -427,12 +427,14 @@ class DbImportDialog:
         next_unit = len(existing_devices) + 1
         base_port = 502 + len(existing_devices)
 
-        for idx, (sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag) in enumerate(apps_data_list):
-            unit_id = next_unit + idx
-            disp_name = sel_app.chinese_name or sel_app.english_name
-            new_name = f"从机{unit_id} [{disp_name}]"
-            new_id = f"slave_{time.time_ns()}_{idx}"
+        # 记录已分配的 (端点, 站号) 映射，确保同端点下站号严格互异且支持并发
+        used_endpoint_units = set()
+        for dev in existing_devices:
+            cfg_e = dev.conn_config
+            ep_tag = cfg_e.com_port.upper().strip() if cfg_e.comm_type == CommType.RTU else f"{cfg_e.host}:{cfg_e.port}"
+            used_endpoint_units.add((ep_tag, cfg_e.unit_id))
 
+        for idx, (sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag) in enumerate(apps_data_list):
             is_rtu = (str(sel_app.comm_type).upper() == "RTU")
             comm_mode = CommType.RTU if is_rtu else CommType.TCP
             s_info = getattr(sel_app, "serial_info", {}) or {}
@@ -466,6 +468,23 @@ class DbImportDialog:
                 port_num = int(getattr(sel_app, "port", base_port + idx) or (base_port + idx))
             except Exception:
                 port_num = base_port + idx
+
+            ep_key = com_name.upper().strip() if comm_mode == CommType.RTU else f"{ip_addr}:{port_num}"
+
+            # 站号分配：优先采用数据库中配置的真实从机站地址；若冲突或未指定，顺延分配当前端点下未被占用的站号
+            db_unit = getattr(sel_app, "slave_id", None)
+            if db_unit is not None and (ep_key, db_unit) not in used_endpoint_units:
+                unit_id = db_unit
+            else:
+                cand = 1
+                while (ep_key, cand) in used_endpoint_units:
+                    cand += 1
+                unit_id = cand
+            used_endpoint_units.add((ep_key, unit_id))
+
+            disp_name = sel_app.chinese_name or sel_app.english_name
+            new_name = f"从机{unit_id} [{disp_name}]"
+            new_id = f"slave_{time.time_ns()}_{idx}"
 
             cfg = ConnectionConfig(
                 comm_type=comm_mode,

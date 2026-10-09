@@ -117,6 +117,27 @@ class HemsAppModel:
         # 解析通信方式与网络/串口参数
         self.comm_type, self.serial_info = self._parse_comm_mode()
         self.ip, self.port = self._parse_network_address()
+        self.slave_id = self._parse_slave_id()
+
+    def _parse_slave_id(self) -> Optional[int]:
+        """从 Pollings 或 Local Parameters 中提取设备配置的真实从机站地址 (Unit ID / Slave ID)."""
+        # 1. 优先从轮询规则中提取
+        for p in self.pollings:
+            s_id = p.get("Slave Id") or p.get("Slave ID") or p.get("Device Address") or p.get("Unit ID")
+            if s_id is not None and str(s_id).strip().isdigit():
+                val = int(str(s_id).strip())
+                if 1 <= val <= 247:
+                    return val
+
+        # 2. 从 Local Parameters 中提取
+        for k in ("Slave Id", "Slave ID", "Device Address", "Station ID", "Unit ID", "从机地址", "站地址"):
+            val_s = str(self.local_params.get(k, "")).strip()
+            if val_s.isdigit():
+                val = int(val_s)
+                if 1 <= val <= 247:
+                    return val
+
+        return None
 
     def _parse_comm_mode(self) -> Tuple[str, Dict[str, Any]]:
         """从 Local Parameters 中解析通信类型与串口参数."""

@@ -587,13 +587,18 @@ class SlavePanel(ttk.Frame):
 
     def _start_all_slaves(self) -> None:
         devices = self.app.slave_service.get_devices()
+        fail_msgs = []
         for dev in devices:
             if not dev.is_running:
-                self.app.slave_service.start_slave(dev.id)
+                ok, msg = self.app.slave_service.start_slave(dev.id)
+                if not ok:
+                    fail_msgs.append(f"[{dev.name}]: {msg}")
         if self._current_device_id:
             dev = self.app.slave_service.get_device(self._current_device_id)
             if dev:
                 self._update_status_indicator(dev)
+        if fail_msgs:
+            messagebox.showwarning("部分从机启动提示", "以下从机未能成功启动：\n" + "\n".join(fail_msgs[:5]))
 
     def _stop_all_slaves(self) -> None:
         devices = self.app.slave_service.get_devices()
