@@ -89,8 +89,8 @@ class MainWindow(ttk.Frame):
         self.style.configure("TLabel", padding=1)
         self.style.configure("TCheckbutton", padding=1)
         self.style.configure("TRadiobutton", padding=1)
-        self.style.configure("Treeview", rowheight=24, font=("Microsoft YaHei UI", 9))
-        self.style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
+        self.style.configure("Treeview", rowheight=28, font=("Microsoft YaHei UI", 9))
+        self.style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"), padding=(4, 2))
 
         # 显式强化 Treeview 行选定态高亮对比度映射 (彻底解决暗色/亮色主题下全选与未选无法辨识的缺陷)
         self.style.map(
@@ -200,7 +200,8 @@ class MainWindow(ttk.Frame):
         try:
             if self.style:
                 self.style.theme_use(theme_name)
-                # 重新映射 Treeview 选中态高亮，确保换肤后对比度持续生效
+                self.style.configure("Treeview", rowheight=28, font=("Microsoft YaHei UI", 9))
+                self.style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"), padding=(4, 2))
                 self.style.map(
                     "Treeview",
                     background=[("selected", "#0d6efd")],

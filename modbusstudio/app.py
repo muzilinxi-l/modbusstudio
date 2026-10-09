@@ -131,21 +131,20 @@ def main():
         root = tb.Window(
             title="Modbus Studio - 业务配置与变位仿真调试工作站",
             themename=initial_theme,
-            size=(1240, 840),
-            minsize=(1020, 640),
         )
     except Exception:
         root = tk.Tk()
         root.title("Modbus Studio - 业务配置与变位仿真调试工作站")
-        root.geometry("1240x840")
-        root.minsize(1020, 640)
 
-    # 默认最大化模式启动工作台 (告别缩小版浮窗)
-    if sys.platform == "win32":
-        try:
-            root.state("zoomed")
-        except Exception:
-            pass
+    # 动态感知当前屏幕尺寸，以优雅黄金比例居中展示 (初次打开不强制最大化，视线舒适且绝不压缩)
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    win_w = min(1360, max(1200, int(screen_w * 0.78)))
+    win_h = min(880, max(760, int(screen_h * 0.78)))
+    pos_x = max(0, (screen_w - win_w) // 2)
+    pos_y = max(0, (screen_h - win_h) // 2)
+    root.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
+    root.minsize(1020, 640)
 
     app = ModbusStudioAppCore()
     main_window = MainWindow(root, app)

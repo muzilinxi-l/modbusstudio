@@ -299,23 +299,37 @@ class SlavePanel(ttk.Frame):
         self.tree_scroll_x.config(command=self.tree.xview)
         self.tree.pack(side="left", fill="both", expand=True)
 
-        col_configs = [
-            ("addr", "起始地址", 95, 85, "center", False),
-            ("desc", "点位描述 / 业务字段", 340, 240, "w", True),
-            ("area", "存储区域", 135, 120, "center", False),
-            ("type", "数据类型", 110, 95, "center", False),
-            ("order", "变位模式", 95, 85, "center", False),
-            ("val", "当前解析数值", 130, 110, "center", False),
-            ("raw_hex", "原始寄存器(Hex)", 160, 135, "center", False),
-            ("sim", "动态模拟", 100, 90, "center", False),
-            ("reg_cnt", "占用字数", 90, 80, "center", False),
+        self._table_col_configs = [
+            ("addr", "起始地址", 0.08, 80, "center"),
+            ("desc", "点位描述 / 业务字段", 0.28, 220, "w"),
+            ("area", "存储区域", 0.12, 115, "center"),
+            ("type", "数据类型", 0.09, 85, "center"),
+            ("order", "变位模式", 0.08, 75, "center"),
+            ("val", "当前解析数值", 0.11, 100, "center"),
+            ("raw_hex", "原始寄存器(Hex)", 0.12, 120, "center"),
+            ("sim", "动态模拟", 0.07, 80, "center"),
+            ("reg_cnt", "占用字数", 0.05, 60, "center"),
         ]
-        for col_id, heading, width, min_w, align, stretch in col_configs:
+        for col_id, heading, ratio, min_w, align in self._table_col_configs:
             head_align = align if col_id == "desc" else "center"
             self.tree.heading(col_id, text=heading, anchor=head_align, command=lambda c=col_id: self._sort_by_column(c, False))
-            self.tree.column(col_id, width=width, minwidth=min_w, anchor=align, stretch=stretch)
+            self.tree.column(col_id, width=max(min_w, int(1100 * ratio)), minwidth=min_w, anchor=align, stretch=False)
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
+        table_frame.bind("<Configure>", self._on_table_resize)
+
+    def _on_table_resize(self, event=None) -> None:
+        """动态感知容器宽度变化，等比例自适应分配每一列宽，适配任意电脑屏幕与DPI"""
+        if not hasattr(self, "tree") or not self.tree.winfo_exists():
+            return
+        width = event.width if event else self.tree.winfo_width()
+        avail_w = width - 25
+        if avail_w < 450:
+            return
+
+        for col_id, heading, ratio, min_w, align in self._table_col_configs:
+            dyn_w = max(min_w, int(avail_w * ratio))
+            self.tree.column(col_id, width=dyn_w)
 
     # =========================================================================
     # 数据加载与视图响应
@@ -872,19 +886,29 @@ class SlavePanel(ttk.Frame):
         scroll_x.config(command=tree_apps.xview)
         tree_apps.pack(fill="both", expand=True)
 
-        app_cols = [
-            ("id", "App ID", 85, 75, "center", False),
-            ("enable", "使能状态", 110, 100, "center", False),
-            ("name", "业务设备名称 (中文)", 260, 200, "w", True),
-            ("eng_name", "英文标识 (Name)", 240, 180, "w", True),
-            ("role", "业务方向 / 角色", 160, 140, "center", False),
-            ("comm", "通讯配置参数", 220, 190, "center", False),
-            ("pt_cnt", "点位数量", 95, 85, "center", False),
+        modal_cols = [
+            ("id", "App ID", 0.08, 70, "center"),
+            ("enable", "使能状态", 0.11, 95, "center"),
+            ("name", "业务设备名称 (中文)", 0.28, 180, "w"),
+            ("eng_name", "英文标识 (Name)", 0.24, 160, "w"),
+            ("role", "业务方向 / 角色", 0.12, 110, "center"),
+            ("comm", "通讯配置参数", 0.11, 110, "center"),
+            ("pt_cnt", "点位数量", 0.06, 65, "center"),
         ]
-        for cid, chead, cw, cminw, calign, cstretch in app_cols:
-            head_align = calign if cid in ("name", "eng_name") else "center"
+        for cid, chead, ratio, min_w, align in modal_cols:
+            head_align = align if cid in ("name", "eng_name") else "center"
             tree_apps.heading(cid, text=chead, anchor=head_align)
-            tree_apps.column(cid, width=cw, minwidth=cminw, anchor=calign, stretch=cstretch)
+            tree_apps.column(cid, width=max(min_w, int(960 * ratio)), minwidth=min_w, anchor=align, stretch=False)
+
+        def _on_modal_resize(event=None):
+            avail = (event.width - 25) if event else (tree_apps.winfo_width() - 25)
+            if avail < 400:
+                return
+            for cid, chead, ratio, min_w, align in modal_cols:
+                w = max(min_w, int(avail * ratio))
+                tree_apps.column(cid, width=w)
+
+        table_f.bind("<Configure>", _on_modal_resize)
 
         # 预载点位统计
         app_item_map = {}
