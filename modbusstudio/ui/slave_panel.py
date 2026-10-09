@@ -290,7 +290,7 @@ class SlavePanel(ttk.Frame):
             ("reg_cnt", "占用字数", 60, "center"),
         ]
         for col_id, heading, width, align in col_configs:
-            self.tree.heading(col_id, text=heading)
+            self.tree.heading(col_id, text=heading, command=lambda c=col_id: self._sort_by_column(c, False))
             self.tree.column(col_id, width=width, anchor=align)
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
@@ -385,7 +385,7 @@ class SlavePanel(ttk.Frame):
         for row in self.tree.get_children():
             self.tree.delete(row)
 
-        sorted_points = sorted(device.points.values(), key=lambda p: (p.area.value, p.address))
+        sorted_points = sorted(device.points.values(), key=lambda p: (p.address, p.area.value))
         for p in sorted_points:
             self.tree.insert(
                 "",
@@ -658,6 +658,19 @@ class SlavePanel(ttk.Frame):
         self.app.slave_service.sync_point_to_runtime(device.id, point)
         self._refresh_tree(device)
 
+    def _sort_by_column(self, col: str, reverse: bool = False) -> None:
+        """点击表头自动正序/倒序排列"""
+        items = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
+        try:
+            items.sort(key=lambda t: float(t[0]), reverse=reverse)
+        except (ValueError, TypeError):
+            items.sort(key=lambda t: t[0], reverse=reverse)
+
+        for index, (_, k) in enumerate(items):
+            self.tree.move(k, "", index)
+
+        self.tree.heading(col, command=lambda: self._sort_by_column(col, not reverse))
+
     # =========================================================================
     # 外部对话框桥接 (批量规则生成、数据库导入与业务配对)
     # =========================================================================
@@ -771,57 +784,205 @@ class SlavePanel(ttk.Frame):
             return
 
         dlg = tk.Toplevel(self)
-        dlg.title("从业务数据库导入设备点表")
-        dlg.geometry("560x420")
+        dlg.title("从业务数据库导入设备模型与点表")
+        dlg.geometry("760x520")
+        dlg.minsize(680, 440)
         dlg.transient(self)
         dlg.grab_set()
 
-        ttk.Label(dlg, text="请选择要导入的业务设备模型 (app 表):", font=("Microsoft YaHei UI", 10, "bold")).pack(pady=6)
-        dev_listbox = tk.Listbox(dlg, height=12)
-        dev_listbox.pack(fill="both", expand=True, padx=12, pady=4)
+        # 顶部提示与搜索框
+        top_f = ttk.Frame(dlg)
+        top_f.pack(fill="x", padx=12, pady=(10, 4))
+        ttk.Label(top_f, text="选择要导入的业务设备模型 (app 表):", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
 
+        search_var = tk.StringVar()
+        ttk.Label(top_f, text="🔍 搜索:").pack(side="right", padx=(6, 2))
+        entry_search = ttk.Entry(top_f, textvariable=search_var, width=16)
+        entry_search.pack(side="right")
+
+        # 设备列表表格
+        table_f = ttk.Frame(dlg)
+        table_f.pack(fill="both", expand=True, padx=12, pady=4)
+
+        scroll_y = ttk.Scrollbar(table_f, orient="vertical")
+        scroll_y.pack(side="right", fill="y")
+        scroll_x = ttk.Scrollbar(table_f, orient="horizontal")
+        scroll_x.pack(side="bottom", fill="x")
+
+        tree_apps = ttk.Treeview(
+            table_f,
+            columns=("id", "name", "eng_name", "role", "comm", "pt_cnt"),
+            show="headings",
+            selectmode="browse",
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
+        )
+        scroll_y.config(command=tree_apps.yview)
+        scroll_x.config(command=tree_apps.xview)
+        tree_apps.pack(fill="both", expand=True)
+
+        app_cols = [
+            ("id", "App ID", 65, "center"),
+            ("name", "业务设备名称", 170, "w"),
+            ("eng_name", "英文标识", 150, "w"),
+            ("role", "业务方向/角色", 110, "center"),
+            ("comm", "通讯参数", 140, "center"),
+            ("pt_cnt", "点位数量", 80, "center"),
+        ]
+        for cid, chead, cw, calign in app_cols:
+            tree_apps.heading(cid, text=chead)
+            tree_apps.column(cid, width=cw, anchor=calign)
+
+        # 预载点位统计
+        app_item_map = {}
         for a in apps:
-            tag = "南向" if a.is_south_master else "北向"
-            dev_listbox.insert("end", f"[{a.app_id}] [{tag}] {a.chinese_name or a.english_name} ({a.english_name})")
-        dev_listbox.select_set(0)
+            pts = a.extract_studio_points()
+            role_tag = "南向物理设备" if a.is_south_master else "北向转发从机" if a.is_north_slave else "策略模块"
+            comm_str = f"串口 {a.serial_info['port_name']}" if a.comm_type == "RTU" else f"TCP {a.ip}:{a.port}"
+            pt_count_str = f"{len(pts)} 点"
+            app_item_map[a.app_id] = (a, pts, role_tag, comm_str, pt_count_str)
+
+        def populate_tree(keyword: str = ""):
+            for item in tree_apps.get_children():
+                tree_apps.delete(item)
+            kw = keyword.strip().lower()
+            first_valid_item = None
+            for app_id, (a, pts, role_tag, comm_str, pt_count_str) in app_item_map.items():
+                disp_name = a.chinese_name or a.english_name
+                if kw and kw not in disp_name.lower() and kw not in a.english_name.lower() and kw not in str(app_id):
+                    continue
+                item_id = tree_apps.insert(
+                    "",
+                    "end",
+                    iid=str(app_id),
+                    values=(app_id, disp_name, a.english_name, role_tag, comm_str, pt_count_str),
+                )
+                if first_valid_item is None and len(pts) > 0:
+                    first_valid_item = item_id
+
+            if first_valid_item:
+                tree_apps.selection_set(first_valid_item)
+                tree_apps.focus(first_valid_item)
+            elif tree_apps.get_children():
+                first = tree_apps.get_children()[0]
+                tree_apps.selection_set(first)
+                tree_apps.focus(first)
+
+        populate_tree()
+        search_var.trace_add("write", lambda *args: populate_tree(search_var.get()))
+
+        # 导入模式选项
+        mode_f = ttk.LabelFrame(dlg, text="导入模式与目标设定")
+        mode_f.pack(fill="x", padx=12, pady=6)
+
+        import_mode_var = tk.StringVar(value="new_instance")
+        rb_new = ttk.Radiobutton(
+            mode_f,
+            text="新建为独立从机服务实例 (推荐，自动创建独立从机、命名并载入参数与全量点表)",
+            variable=import_mode_var,
+            value="new_instance",
+        )
+        rb_new.pack(anchor="w", padx=8, pady=2)
+
+        rb_replace = ttk.Radiobutton(
+            mode_f,
+            text="覆盖替换当前从机点表 (清空当前从机点表，完全替换为该设备点表)",
+            variable=import_mode_var,
+            value="replace",
+        )
+        rb_replace.pack(anchor="w", padx=8, pady=2)
+
+        rb_append = ttk.Radiobutton(
+            mode_f,
+            text="追加合并到当前从机点表 (保留当前点表，新增不重复点位)",
+            variable=import_mode_var,
+            value="append",
+        )
+        rb_append.pack(anchor="w", padx=8, pady=2)
 
         def do_import():
-            sel_idx = dev_listbox.curselection()
-            if not sel_idx or not self._current_device_id:
+            sel = tree_apps.selection()
+            if not sel:
+                messagebox.showwarning("提示", "请先在列表中选中一个业务设备", parent=dlg)
                 return
-            sel_app = apps[sel_idx[0]]
-            device = self.app.slave_service.get_device(self._current_device_id)
-            if not device:
-                return
+            sel_app_id = int(sel[0])
+            sel_app, points_data, role_tag, comm_str, pt_cnt_str = app_item_map[sel_app_id]
 
-            points_data = sel_app.extract_studio_points()
-            imported = 0
+            if not points_data:
+                if not messagebox.askyesno("提示", f"设备 [{sel_app.chinese_name or sel_app.english_name}] 在数据库中未包含任何可解析的 Modbus 点位。\n是否仍要创建空白实例？", parent=dlg):
+                    return
+
+            mode = import_mode_var.get()
+
+            # 1. 模式判断：新建实例
+            if mode == "new_instance":
+                devices = self.app.slave_service.get_devices()
+                new_unit = len(devices) + 1
+                new_name = f"从机{new_unit} [{sel_app.chinese_name or sel_app.english_name}]"
+                new_id = f"slave_{time.time_ns()}"
+
+                comm_mode = CommType.RTU if sel_app.comm_type == "RTU" else CommType.TCP
+                cfg = ConnectionConfig(
+                    comm_type=comm_mode,
+                    host="127.0.0.1",
+                    port=sel_app.port if sel_app.port else (502 + len(devices)),
+                    com_port=sel_app.serial_info.get("port_name", "COM1") if sel_app.comm_type == "RTU" else "COM1",
+                    baudrate=sel_app.serial_info.get("baudrate", 9600) if sel_app.comm_type == "RTU" else 9600,
+                    unit_id=new_unit,
+                )
+                target_dev = SlaveDevice(id=new_id, name=new_name, conn_config=cfg)
+                self.app.slave_service.register_device(target_dev)
+                self._current_device_id = new_id
+            else:
+                if not self._current_device_id:
+                    messagebox.showwarning("提示", "当前未选定从机实例！", parent=dlg)
+                    return
+                target_dev = self.app.slave_service.get_device(self._current_device_id)
+                if not target_dev:
+                    return
+                if mode == "replace":
+                    target_dev.points.clear()
+                    target_dev.name = f"从机{target_dev.conn_config.unit_id} [{sel_app.chinese_name or sel_app.english_name}]"
+
+            # 2. 批量构建与装载点位
+            imported_count = 0
             for pt in points_data:
                 addr = pt.get("address", 0)
                 desc = pt.get("desc", "")
-                dt_str = pt.get("data_type").value if hasattr(pt.get("data_type"), "value") else str(pt.get("data_type"))
-                bo_str = pt.get("byte_order").value if hasattr(pt.get("byte_order"), "value") else str(pt.get("byte_order"))
-                area_str = pt.get("area", AreaType.HOLDING.value)
+                dt = pt.get("data_type", "INT16")
+                bo = pt.get("byte_order", "CDAB")
+                area = pt.get("area", "4x")
                 val = pt.get("current_val", 0)
                 sim = pt.get("sim_mode", "固定")
 
                 ok, point, _ = PointService.validate_and_build_point(
-                    addr, desc, area_str, dt_str, bo_str, val, sim
+                    address=addr,
+                    description=desc,
+                    area=area,
+                    data_type=dt,
+                    byte_order=bo,
+                    val_input=val,
+                    sim_rule=sim,
                 )
                 if ok and point:
-                    device.add_point(point)
-                    self.app.slave_service.sync_point_to_runtime(device.id, point)
-                    imported += 1
+                    target_dev.add_point(point)
+                    if target_dev.is_running:
+                        self.app.slave_service.sync_point_to_runtime(target_dev.id, point)
+                    imported_count += 1
 
-            self._refresh_tree(device)
+            self._update_instance_combobox()
+            self._load_device_to_ui(target_dev.id)
             dlg.destroy()
-            messagebox.showinfo("导入完成", f"已成功将设备 [{sel_app.chinese_name or sel_app.english_name}] 的 {imported} 个点位导入至当前从机！")
+            messagebox.showinfo(
+                "导入成功",
+                f"已成功为从机服务 [{target_dev.name}] 装载 {imported_count} 个 Modbus 点位！\n"
+                f"通讯参数已适配: {target_dev.conn_config.summary}",
+            )
 
         btn_f = ttk.Frame(dlg)
-        btn_f.pack(fill="x", padx=12, pady=8)
-        ttk.Button(btn_f, text="确定导入", command=do_import).pack(side="right", padx=4)
-        ttk.Button(btn_f, text="取消", command=dlg.destroy).pack(side="right", padx=4)
-
+        btn_f.pack(fill="x", padx=12, pady=(4, 10))
+        ttk.Button(btn_f, text="立即导入点表", style="primary.TButton", command=do_import).pack(side="right", padx=4)
+        ttk.Button(btn_f, text="取消", style="Small.TButton", command=dlg.destroy).pack(side="right", padx=4)
 
     def _open_pairing_dialog(self) -> None:
         from ..hems_pairing import HemsPairingEngine
@@ -831,29 +992,96 @@ class SlavePanel(ttk.Frame):
                 return
 
         dlg = tk.Toplevel(self)
-        dlg.title("业务配对关系中心 (基于 app.More)")
-        dlg.geometry("700x480")
+        dlg.title("业务配对关系中心 (基于 app 表 More 字段配置)")
+        dlg.geometry("860x520")
+        dlg.minsize(720, 420)
         dlg.transient(self)
+        dlg.grab_set()
 
-        ttk.Label(dlg, text="业务配对关系中心 (基于 app 表 More 字段)", font=("Microsoft YaHei UI", 10, "bold")).pack(pady=6)
+        # 顶部提示与搜索
+        top_f = ttk.Frame(dlg)
+        top_f.pack(fill="x", padx=12, pady=(10, 4))
+        ttk.Label(top_f, text="业务配对关系中心 (北向引用变量 ➔ 南向物理变量):", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+
+        search_var = tk.StringVar()
+        ttk.Label(top_f, text="🔍 过滤:").pack(side="right", padx=(6, 2))
+        entry_search = ttk.Entry(top_f, textvariable=search_var, width=16)
+        entry_search.pack(side="right")
+
+        table_f = ttk.Frame(dlg)
+        table_f.pack(fill="both", expand=True, padx=12, pady=4)
+
+        scroll_y = ttk.Scrollbar(table_f, orient="vertical")
+        scroll_y.pack(side="right", fill="y")
+        scroll_x = ttk.Scrollbar(table_f, orient="horizontal")
+        scroll_x.pack(side="bottom", fill="x")
+
         tree_pair = ttk.Treeview(
-            dlg,
-            columns=("rule_id", "rule_type", "src", "target", "desc"),
+            table_f,
+            columns=("rule_id", "target_app", "target_reg", "src_app", "src_var", "datatype", "byteorder"),
             show="headings",
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
         )
-        tree_pair.heading("rule_id", text="规则ID")
-        tree_pair.heading("rule_type", text="业务类型")
-        tree_pair.heading("src", text="源变量 / 地址")
-        tree_pair.heading("target", text="目标变量 / 地址")
-        tree_pair.heading("desc", text="配对说明")
-        tree_pair.pack(fill="both", expand=True, padx=8, pady=4)
+        scroll_y.config(command=tree_pair.yview)
+        scroll_x.config(command=tree_pair.xview)
+        tree_pair.pack(fill="both", expand=True)
 
+        cols = [
+            ("rule_id", "规则编号", 90, "center"),
+            ("target_app", "目标北向服务", 140, "w"),
+            ("target_reg", "目标映射寄存器", 130, "center"),
+            ("src_app", "源南向采集设备", 150, "w"),
+            ("src_var", "源变量名 / 物理地址", 190, "w"),
+            ("datatype", "数据类型", 85, "center"),
+            ("byteorder", "变位模式", 75, "center"),
+        ]
+        for cid, chead, cw, calign in cols:
+            tree_pair.heading(cid, text=chead)
+            tree_pair.column(cid, width=cw, anchor=calign)
+
+        rules = []
         try:
             engine = HemsPairingEngine(self.app.db_path)
             rules = engine.load_rules()
-            for r in rules:
-                tree_pair.insert("", "end", values=(r.rule_id, r.rule_type, r.source_var, r.target_var, r.description))
         except Exception as e:
-            messagebox.showerror("加载配对规则失败", f"{e}", parent=dlg)
+            messagebox.showerror("加载配对规则失败", f"无法解析配对规则: {e}", parent=dlg)
 
-        ttk.Button(dlg, text="关闭", command=dlg.destroy).pack(pady=6)
+        def populate_rules(keyword: str = ""):
+            for item in tree_pair.get_children():
+                tree_pair.delete(item)
+            kw = keyword.strip().lower()
+            for i, r in enumerate(rules):
+                search_haystack = f"{r.rule_id} {r.target_app_name} {r.src_app_name} {r.src_var_name}".lower()
+                if kw and kw not in search_haystack:
+                    continue
+                target_reg_str = f"{r.target_register} (FC:{r.target_fc}, 站号:{r.target_slave_id})"
+                src_var_str = f"{r.src_var_name} [Addr:{r.src_address}]" if r.src_address is not None else f"{r.src_var_name} (内部)"
+                tree_pair.insert(
+                    "",
+                    "end",
+                    values=(
+                        f"R_{i+1:03d}",
+                        r.target_app_name,
+                        target_reg_str,
+                        r.src_app_name,
+                        src_var_str,
+                        r.data_type.value,
+                        r.byte_order.value,
+                    ),
+                )
+
+        populate_rules()
+        search_var.trace_add("write", lambda *args: populate_rules(search_var.get()))
+
+        # 底部状态栏
+        lbl_info = ttk.Label(
+            dlg,
+            text=f"共解析出 {len(rules)} 条端到端映射配对规则 (当南向采集点位更新时，自动路由映射到北向寄存器)",
+            foreground="#6c757d",
+            font=("Microsoft YaHei UI", 9),
+        )
+        lbl_info.pack(side="left", padx=12, pady=8)
+
+        btn_close = ttk.Button(dlg, text="关闭", style="Small.TButton", command=dlg.destroy)
+        btn_close.pack(side="right", padx=12, pady=8)

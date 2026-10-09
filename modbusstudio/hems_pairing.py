@@ -62,6 +62,27 @@ class PairingRule:
         self.data_type = map_db_format_to_data_type(target_format or src_format)
         self.byte_order = ByteOrderMode.CDAB
 
+    @property
+    def rule_id(self) -> str:
+        return f"R_{self.target_app_id}_{self.target_register}"
+
+    @property
+    def rule_type(self) -> str:
+        return "变量映射 (More)"
+
+    @property
+    def source_var(self) -> str:
+        src_addr_str = f" [地址: {self.src_address}]" if self.src_address is not None else ""
+        return f"[{self.src_app_name}] {self.src_var_name}{src_addr_str}"
+
+    @property
+    def target_var(self) -> str:
+        return f"[{self.target_app_name}] 寄存器: {self.target_register} (FC: {self.target_fc})"
+
+    @property
+    def description(self) -> str:
+        return f"站号: {self.target_slave_id} | 类型: {self.data_type.value} | 变位: {self.byte_order.value}"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "source": f"[{self.src_app_name}] {self.src_var_name} (Addr: {self.src_address})",
@@ -79,6 +100,10 @@ class HemsPairingEngine:
         self.apps = self.db.load_modbus_apps()
         self.rules: List[PairingRule] = []
         self._build_pairing_rules()
+
+    def load_rules(self) -> List[PairingRule]:
+        """返回解析出的所有配对规则列表"""
+        return self.rules
 
     def _build_pairing_rules(self):
         """解析所有基于 More 配置的配对规则."""

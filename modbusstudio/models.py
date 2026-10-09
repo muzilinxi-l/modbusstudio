@@ -41,17 +41,21 @@ class AreaType(str, Enum):
         return mapping.get(self, str(self.value))
 
     @classmethod
-    def normalize(cls, val: Union[str, AreaType]) -> AreaType:
+    def normalize(cls, val: Any) -> AreaType:
         if isinstance(val, AreaType):
             return val
+        if hasattr(val, "value"):
+            val = val.value
         s = str(val).strip()
-        if "4x" in s or "保持" in s or "Holding" in s:
+        if "." in s:
+            s = s.split(".")[-1]
+        if "4" in s or "保持" in s or "HOLDING" in s.upper():
             return cls.HOLDING
-        if "3x" in s or "输入" in s or "Input" in s:
+        if "3" in s or "输入" in s or "INPUT" in s.upper():
             return cls.INPUT
-        if "0x" in s or "线圈" in s or "Coil" in s:
+        if "0" in s or "线圈" in s or "COIL" in s.upper():
             return cls.COIL
-        if "1x" in s or "离散" in s or "Discrete" in s:
+        if "1" in s or "离散" in s or "DISCRETE" in s.upper():
             return cls.DISCRETE
         return cls.HOLDING
 
@@ -64,11 +68,20 @@ class ByteOrder(str, Enum):
     DCBA = "DCBA"  # Little-Endian
 
     @classmethod
-    def normalize(cls, val: str) -> ByteOrder:
+    def normalize(cls, val: Any) -> ByteOrder:
+        if isinstance(val, ByteOrder):
+            return val
+        if hasattr(val, "value"):
+            val = val.value
         s = str(val).strip().upper()
+        if "." in s:
+            s = s.split(".")[-1]
         for member in cls:
-            if member.value == s:
+            if member.value == s or member.name == s:
                 return member
+        for order in ("CDAB", "ABCD", "BADC", "DCBA"):
+            if order in s:
+                return cls(order)
         return cls.ABCD
 
 
@@ -97,11 +110,35 @@ class DataType(str, Enum):
         return 1
 
     @classmethod
-    def normalize(cls, val: str) -> DataType:
+    def normalize(cls, val: Any) -> DataType:
+        if isinstance(val, DataType):
+            return val
+        if hasattr(val, "value"):
+            val = val.value
         s = str(val).strip().upper()
+        if "." in s:
+            s = s.split(".")[-1]
         for member in cls:
-            if member.value == s:
+            if member.value == s or member.name == s:
                 return member
+        if "FLOAT64" in s or "DOUBLE" in s:
+            return cls.FLOAT64
+        if "FLOAT" in s or "FLOAT32" in s:
+            return cls.FLOAT32
+        if "UINT32" in s or "DWORD" in s:
+            return cls.UINT32
+        if "INT32" in s:
+            return cls.INT32
+        if "UINT16" in s or "USHORT" in s or "UNSIGNED SHORT" in s:
+            return cls.UINT16
+        if "INT16" in s or "SHORT" in s or "SIGNED SHORT" in s:
+            return cls.INT16
+        if "BOOL" in s or "BIT" in s:
+            return cls.BOOL
+        if "STRING" in s or "STR" in s:
+            return cls.STRING
+        if "HEX" in s:
+            return cls.HEX16
         return cls.UINT16
 
 
@@ -114,10 +151,16 @@ class SimRule(str, Enum):
     RECT = "方波"
 
     @classmethod
-    def normalize(cls, val: str) -> str:
+    def normalize(cls, val: Any) -> str:
+        if isinstance(val, SimRule):
+            return val.value
+        if hasattr(val, "value"):
+            val = val.value
         s = str(val).strip()
+        if "." in s:
+            s = s.split(".")[-1]
         for member in cls:
-            if member.value in s or member.name.lower() in s.lower():
+            if member.value == s or member.name == s or member.value in s:
                 return member.value
         return cls.CONSTANT.value
 
