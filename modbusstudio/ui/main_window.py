@@ -242,7 +242,14 @@ class MainWindow(ttk.Frame):
                 writer.writerow(["时间戳", "方向", "日志明细"])
                 for line in content.splitlines():
                     if line.strip():
-                        writer.writerow([line[:10], "", line])
+                        if line.startswith("[") and "]" in line:
+                            bracket_end = line.find("]")
+                            ts = line[1:bracket_end]
+                            detail = line[bracket_end + 1:].strip()
+                            writer.writerow([ts, "", detail])
+                        else:
+                            writer.writerow(["", "", line])
+
             messagebox.showinfo("导出成功", f"日志已成功导出至：\n{save_path}")
         except Exception as e:
             messagebox.showerror("导出失败", f"写入文件失败: {e}")

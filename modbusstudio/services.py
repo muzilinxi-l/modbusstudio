@@ -6,11 +6,13 @@ Modbus Studio - 业务服务层 (Application Services)
 """
 
 from __future__ import annotations
+from datetime import datetime
 import csv
 import logging
 import os
 import queue
 import time
+
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .models import (
@@ -67,10 +69,13 @@ class LoggingService:
             logger.error(f"创建日志 CSV 文件失败: {e}")
 
     def post(self, direction: str, slave_id: int, message: str, raw_frame_hex: str = "") -> None:
-        """后台通信线程快速非阻塞投递日志"""
-        now_str = time.strftime("%H:%M:%S")
+        """后台通信线程快速非阻塞投递日志 (支持毫秒级时间戳)"""
+        now = datetime.now()
+        now_time_ms = now.strftime("%H:%M:%S.%f")[:-3]        # 屏幕显示毫秒时间: 09:38:10.123
+        now_full_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 磁盘归档完整毫秒时间: 2026-10-09 09:38:10.123
+
         entry = LogEntry(
-            timestamp=now_str,
+            timestamp=now_time_ms,
             direction=direction,
             slave_id=slave_id,
             message=message,
@@ -87,7 +92,7 @@ class LoggingService:
 
         if self._csv_writer and self._csv_file:
             try:
-                self._csv_writer.writerow([now_str, direction, slave_id, message, raw_frame_hex])
+                self._csv_writer.writerow([now_full_ms, direction, slave_id, message, raw_frame_hex])
                 self._csv_file.flush()
             except Exception:
                 pass
