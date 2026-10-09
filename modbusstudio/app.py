@@ -114,7 +114,32 @@ class ModbusStudioAppCore:
 
 
 def main():
-    root = tk.Tk()
+    initial_theme = "bootstrap-light"
+    settings_file = os.path.abspath("settings.json")
+    if os.path.exists(settings_file):
+        try:
+            import json
+            with open(settings_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+                if "theme" in saved and saved["theme"]:
+                    initial_theme = saved["theme"]
+        except Exception:
+            pass
+
+    try:
+        import ttkbootstrap as tb
+        root = tb.Window(
+            title="Modbus Studio - 业务配置与变位仿真调试工作站",
+            themename=initial_theme,
+            size=(1240, 840),
+            minsize=(1020, 640),
+        )
+    except Exception:
+        root = tk.Tk()
+        root.title("Modbus Studio - 业务配置与变位仿真调试工作站")
+        root.geometry("1240x840")
+        root.minsize(1020, 640)
+
     app = ModbusStudioAppCore()
     main_window = MainWindow(root, app)
 

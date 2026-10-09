@@ -6,6 +6,8 @@ binaries = []
 hiddenimports = ['modbusstudio', 'modbusstudio.ui', 'modbusstudio.services', 'modbusstudio.models']
 tmp_ret = collect_all('pymodbus')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tb_ret = collect_all('ttkbootstrap')
+datas += tb_ret[0]; binaries += tb_ret[1]; hiddenimports += tb_ret[2]
 
 
 a = Analysis(

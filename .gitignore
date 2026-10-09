@@ -50,6 +50,7 @@ extra/
 *.sqlite3
 *.db
 
-# Runtime logs
+# Runtime logs & settings
 logs/
 *.csv
+settings.json

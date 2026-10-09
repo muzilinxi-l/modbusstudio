@@ -108,7 +108,7 @@ class PollPanel(ttk.Frame):
         right0 = ttk.Frame(row0)
         right0.pack(side="right")
 
-        self.btn_connect = ttk.Button(right0, text="🔌 建立连接", command=self._toggle_connect)
+        self.btn_connect = ttk.Button(right0, text="🔌 建立连接", style="primary.TButton", command=self._toggle_connect)
         self.btn_connect.pack(side="left", padx=3)
 
         self.lbl_conn_status = ttk.Label(right0, text="未连接", foreground="#6c757d", font=("Microsoft YaHei UI", 9, "bold"))
@@ -144,10 +144,10 @@ class PollPanel(ttk.Frame):
         self.combo_order.set("ABCD")
         self.combo_order.pack(side="left", padx=1)
 
-        btn_poll_once = ttk.Button(left1, text="🔍 单次读取", style="Small.TButton", command=self._poll_once)
+        btn_poll_once = ttk.Button(left1, text="🔍 单次读取", style="info.TButton", command=self._poll_once)
         btn_poll_once.pack(side="left", padx=(6, 2))
 
-        self.btn_poll_loop = ttk.Button(left1, text="🔁 连续轮询 (1s)", style="Small.TButton", command=self._toggle_poll_loop)
+        self.btn_poll_loop = ttk.Button(left1, text="🔁 连续轮询 (1s)", style="success.TButton", command=self._toggle_poll_loop)
         self.btn_poll_loop.pack(side="left", padx=2)
 
         right1 = ttk.Frame(row1)
@@ -228,13 +228,13 @@ class PollPanel(ttk.Frame):
         if self.app.poll_service.is_connected:
             self.app.poll_service.disconnect()
             self.lbl_conn_status.config(text="● 已断开", foreground="#dc3545")
-            self.btn_connect.config(text="🔌 建立连接")
+            self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
         else:
             cfg = self._get_connection_config()
             ok, msg = self.app.poll_service.connect(cfg)
             if ok:
                 self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
-                self.btn_connect.config(text="🔌 断开连接")
+                self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
             else:
                 messagebox.showerror("连接失败", msg)
 
@@ -274,10 +274,10 @@ class PollPanel(ttk.Frame):
             if self._poll_timer_id:
                 self.after_cancel(self._poll_timer_id)
                 self._poll_timer_id = None
-            self.btn_poll_loop.config(text="🔁 连续轮询 (1s)")
+            self.btn_poll_loop.config(text="🔁 连续轮询 (1s)", style="success.TButton")
         else:
             self._is_polling_loop = True
-            self.btn_poll_loop.config(text="⏹ 停止轮询")
+            self.btn_poll_loop.config(text="⏹ 停止轮询", style="danger.TButton")
             self._run_poll_cycle()
 
     def _run_poll_cycle(self) -> None:

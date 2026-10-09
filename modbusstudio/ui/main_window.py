@@ -6,6 +6,8 @@ Modbus Studio - 主窗口与节流日志视窗 (Main Window & Throttled Log View
 """
 
 from __future__ import annotations
+import csv
+import json
 import os
 import subprocess
 import sys
@@ -50,11 +52,13 @@ class MainWindow(ttk.Frame):
         self.pack(fill="both", expand=True)
 
     def _init_style(self) -> None:
-        self.style = ttk.Style(self.root)
-        try:
-            self.style.theme_use("clam")
-        except Exception:
-            pass
+        self.style = getattr(self.root, "style", None)
+        if self.style is None:
+            self.style = ttk.Style(self.root)
+            try:
+                self.style.theme_use("clam")
+            except Exception:
+                pass
 
         # 全局字体与紧凑内边距，防高 DPI 截断
         default_font = ("Microsoft YaHei UI", 9)
@@ -70,7 +74,10 @@ class MainWindow(ttk.Frame):
         self.style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
 
     def _build_layout(self) -> None:
-        # 主分割窗格 (上下分割：上方功能面板，下方日志监视)
+        # 0. 顶部应用导航与主题控制栏
+        self._build_header_bar()
+
+        # 1. 主分割窗格 (上下分割：上方功能面板，下方日志监视)
         self.main_paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.main_paned.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -93,6 +100,117 @@ class MainWindow(ttk.Frame):
         self.main_paned.add(self.log_container, weight=3)
 
         self._build_log_viewer(self.log_container)
+
+    def _build_header_bar(self) -> None:
+        """构建应用顶部标语与动态主题切换控制栏"""
+        header_bar = ttk.Frame(self)
+        header_bar.pack(fill="x", padx=6, pady=(3, 2))
+
+        # 左侧：品牌与版本标语
+        lbl_brand = ttk.Label(
+            header_bar,
+            text="⚡ Modbus Studio  ·  现代化多实例仿真与轮询调试平台",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        lbl_brand.pack(side="left", padx=2)
+
+        # 右侧：实时主题切换控制器
+        theme_box = ttk.Frame(header_bar)
+        theme_box.pack(side="right", padx=2)
+
+        lbl_theme = ttk.Label(theme_box, text="🎨 界面主题:")
+        lbl_theme.pack(side="left", padx=(4, 2))
+
+        # 探测当前环境支持的主题列表
+        available_themes = []
+        if self.style and hasattr(self.style, "theme_names"):
+            try:
+                available_themes = list(self.style.theme_names())
+            except Exception:
+                pass
+        if not available_themes:
+            available_themes = [
+                "bootstrap-light", "bootstrap-dark", "pydata-light", "pydata-dark",
+                "nord-light", "nord-dark", "minty-light", "dracula-dark",
+                "one-light", "one-dark", "catppuccin-light", "catppuccin-dark"
+            ]
+
+        current_theme = getattr(getattr(self.style, "theme", None), "name", "bootstrap-light")
+
+        self.combo_theme = ttk.Combobox(theme_box, values=available_themes, state="readonly", width=17)
+        if current_theme in available_themes:
+            self.combo_theme.set(current_theme)
+        elif available_themes:
+            self.combo_theme.current(0)
+        self.combo_theme.pack(side="left", padx=2)
+        self.combo_theme.bind("<<ComboboxSelected>>", self._on_theme_selected)
+
+        btn_toggle = ttk.Button(
+            theme_box,
+            text="🌓 明/暗快速切换",
+            style="Small.TButton",
+            command=self._toggle_light_dark,
+        )
+        btn_toggle.pack(side="left", padx=2)
+
+    def _on_theme_selected(self, event=None) -> None:
+        theme = self.combo_theme.get()
+        if theme:
+            self._apply_theme(theme)
+
+    def _toggle_light_dark(self) -> None:
+        current = self.combo_theme.get() or "bootstrap-light"
+        if "dark" in current.lower():
+            target = current.replace("dark", "light")
+            if self.style and hasattr(self.style, "theme_names") and target not in self.style.theme_names():
+                target = "bootstrap-light"
+        else:
+            target = current.replace("light", "dark")
+            if self.style and hasattr(self.style, "theme_names") and target not in self.style.theme_names():
+                target = "bootstrap-dark"
+        self._apply_theme(target)
+
+    def _apply_theme(self, theme_name: str) -> None:
+        try:
+            if self.style:
+                self.style.theme_use(theme_name)
+            self.combo_theme.set(theme_name)
+
+            # 自适应优化终端日志底色与高亮对比度
+            is_dark = "dark" in theme_name.lower()
+            if is_dark:
+                self.log_text.config(
+                    bg="#181824",
+                    fg="#cdd6f4",
+                    insertbackground="#ffffff",
+                )
+            else:
+                self.log_text.config(
+                    bg="#212529",
+                    fg="#f8f9fa",
+                    insertbackground="#ffffff",
+                )
+
+            # 持久化存储主题偏好
+            self._save_theme_preference(theme_name)
+        except Exception as e:
+            messagebox.showwarning("主题切换失败", f"无法切换至主题 [{theme_name}]: {e}")
+
+    def _save_theme_preference(self, theme_name: str) -> None:
+        settings_file = os.path.abspath("settings.json")
+        try:
+            data = {}
+            if os.path.exists(settings_file):
+                try:
+                    with open(settings_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            data["theme"] = theme_name
+            with open(settings_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
     def _build_log_viewer(self, parent: ttk.Frame) -> None:
         # 日志标题栏与操作按钮条 (单行自适应紧凑排布)

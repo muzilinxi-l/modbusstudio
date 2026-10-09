@@ -78,25 +78,25 @@ class SlavePanel(ttk.Frame):
         self.combo_instances.pack(side="left", padx=2)
         self.combo_instances.bind("<<ComboboxSelected>>", self._on_switch_slave_instance)
 
-        btn_new_inst = ttk.Button(left0, text="➕ 新建服务", style="Small.TButton", command=self._add_new_slave_instance)
+        btn_new_inst = ttk.Button(left0, text="➕ 新建服务", style="primary.Outline.TButton", command=self._add_new_slave_instance)
         btn_new_inst.pack(side="left", padx=2)
 
-        btn_del_inst = ttk.Button(left0, text="🗑️ 删除服务", style="Small.TButton", command=self._delete_current_slave_instance)
+        btn_del_inst = ttk.Button(left0, text="🗑️ 删除服务", style="danger.Outline.TButton", command=self._delete_current_slave_instance)
         btn_del_inst.pack(side="left", padx=2)
 
         right0 = ttk.Frame(row0)
         right0.pack(side="right")
 
-        self.btn_toggle_slave = ttk.Button(right0, text="▶️ 启动服务", command=self._toggle_current_slave_server)
+        self.btn_toggle_slave = ttk.Button(right0, text="▶️ 启动服务", style="success.TButton", command=self._toggle_current_slave_server)
         self.btn_toggle_slave.pack(side="left", padx=3)
 
         self.lbl_slave_status = ttk.Label(right0, text="未运行", foreground="#6c757d", font=("Microsoft YaHei UI", 9, "bold"))
         self.lbl_slave_status.pack(side="left", padx=4)
 
-        btn_start_all = ttk.Button(right0, text="⚡ 全部启动", style="Small.TButton", command=self._start_all_slaves)
+        btn_start_all = ttk.Button(right0, text="⚡ 全部启动", style="success.Outline.TButton", command=self._start_all_slaves)
         btn_start_all.pack(side="left", padx=2)
 
-        btn_stop_all = ttk.Button(right0, text="⏹ 全部停止", style="Small.TButton", command=self._stop_all_slaves)
+        btn_stop_all = ttk.Button(right0, text="⏹ 全部停止", style="danger.Outline.TButton", command=self._stop_all_slaves)
         btn_stop_all.pack(side="left", padx=2)
 
         # --- 第 1 行：通信模式与数据库操作 ---
@@ -143,13 +143,13 @@ class SlavePanel(ttk.Frame):
         right1 = ttk.Frame(row1)
         right1.pack(side="right")
 
-        btn_select_db = ttk.Button(right1, text="🗃️ 关联/切换数据库...", style="Small.TButton", command=self._select_database_file)
+        btn_select_db = ttk.Button(right1, text="🗃️ 关联/切换数据库...", style="secondary.Outline.TButton", command=self._select_database_file)
         btn_select_db.pack(side="left", padx=2)
 
-        btn_import_db = ttk.Button(right1, text="📂 导入设备点表...", style="Small.TButton", command=self._open_import_db_dialog)
+        btn_import_db = ttk.Button(right1, text="📂 导入设备点表...", style="info.TButton", command=self._open_import_db_dialog)
         btn_import_db.pack(side="left", padx=2)
 
-        btn_pair_center = ttk.Button(right1, text="🔗 业务配对中心 (基于 More)...", style="Small.TButton", command=self._open_pairing_dialog)
+        btn_pair_center = ttk.Button(right1, text="🔗 业务配对中心 (基于 More)...", style="primary.Outline.TButton", command=self._open_pairing_dialog)
         btn_pair_center.pack(side="left", padx=2)
 
         # 2. 单点配置与快速生成栏
@@ -159,7 +159,7 @@ class SlavePanel(ttk.Frame):
         row_pt = ttk.Frame(pt_box)
         row_pt.pack(fill="x", padx=2, pady=2)
 
-        btn_batch_gen = ttk.Button(row_pt, text="⚡ 批量输入规则生成点表...", style="Small.TButton", command=self._open_batch_generate_dialog)
+        btn_batch_gen = ttk.Button(row_pt, text="⚡ 批量输入规则生成点表...", style="primary.Outline.TButton", command=self._open_batch_generate_dialog)
         btn_batch_gen.pack(side="left", padx=(2, 6))
 
         ttk.Label(row_pt, text="地址:").pack(side="left")
@@ -195,7 +195,7 @@ class SlavePanel(ttk.Frame):
         self.combo_pt_sim.set("固定")
         self.combo_pt_sim.pack(side="left", padx=2)
 
-        btn_add_pt = ttk.Button(row_pt, text="➕ 单点添加", style="Small.TButton", command=self._on_click_add_point)
+        btn_add_pt = ttk.Button(row_pt, text="➕ 单点添加", style="success.TButton", command=self._on_click_add_point)
         btn_add_pt.pack(side="left", padx=4)
 
         # 3. 批量操作工具条
@@ -219,7 +219,7 @@ class SlavePanel(ttk.Frame):
         self.combo_batch_sim.set("固定")
         self.combo_batch_sim.pack(side="left", padx=2)
 
-        btn_apply_sim = ttk.Button(b_row0, text="⚡ 批量修改规则", style="Small.TButton", command=self._apply_batch_sim)
+        btn_apply_sim = ttk.Button(b_row0, text="⚡ 批量修改规则", style="secondary.TButton", command=self._apply_batch_sim)
         btn_apply_sim.pack(side="left", padx=3)
 
         btn_sel_all = ttk.Button(b_row0, text="☑ 全选点位", style="Small.TButton", command=self._select_all_points)
@@ -228,7 +228,7 @@ class SlavePanel(ttk.Frame):
         btn_desel_all = ttk.Button(b_row0, text="☐ 取消选择", style="Small.TButton", command=self._deselect_all_points)
         btn_desel_all.pack(side="left", padx=3)
 
-        btn_del_sel = ttk.Button(b_row0, text="🗑️ 批量删除选中", style="Small.TButton", command=self._batch_delete_selected)
+        btn_del_sel = ttk.Button(b_row0, text="🗑️ 批量删除选中", style="danger.Outline.TButton", command=self._batch_delete_selected)
         btn_del_sel.pack(side="left", padx=3)
 
         # 批量操作第 2 行：变位、类型、数值
@@ -239,21 +239,21 @@ class SlavePanel(ttk.Frame):
         self.combo_batch_order = ttk.Combobox(b_row1, state="readonly", width=6, values=self.BYTE_ORDER_CHOICES)
         self.combo_batch_order.set("ABCD")
         self.combo_batch_order.pack(side="left", padx=1)
-        btn_apply_order = ttk.Button(b_row1, text="批量修改变位", style="Small.TButton", command=self._apply_batch_order)
+        btn_apply_order = ttk.Button(b_row1, text="批量修改变位", style="secondary.TButton", command=self._apply_batch_order)
         btn_apply_order.pack(side="left", padx=2)
 
         ttk.Label(b_row1, text="目标类型:").pack(side="left", padx=(6, 1))
         self.combo_batch_type = ttk.Combobox(b_row1, state="readonly", width=8, values=self.DATA_TYPE_CHOICES)
         self.combo_batch_type.set("FLOAT32")
         self.combo_batch_type.pack(side="left", padx=1)
-        btn_apply_type = ttk.Button(b_row1, text="批量修改类型", style="Small.TButton", command=self._apply_batch_type)
+        btn_apply_type = ttk.Button(b_row1, text="批量修改类型", style="secondary.TButton", command=self._apply_batch_type)
         btn_apply_type.pack(side="left", padx=2)
 
         ttk.Label(b_row1, text="统一设值:").pack(side="left", padx=(6, 1))
         self.entry_batch_val = ttk.Entry(b_row1, width=7)
         self.entry_batch_val.insert(0, "0")
         self.entry_batch_val.pack(side="left", padx=1)
-        btn_apply_val = ttk.Button(b_row1, text="批量修改数值", style="Small.TButton", command=self._apply_batch_value)
+        btn_apply_val = ttk.Button(b_row1, text="批量修改数值", style="warning.TButton", command=self._apply_batch_value)
         btn_apply_val.pack(side="left", padx=2)
 
         # 4. 点表表格区域
@@ -353,10 +353,10 @@ class SlavePanel(ttk.Frame):
     def _update_status_indicator(self, device: SlaveDevice) -> None:
         if device.is_running:
             self.lbl_slave_status.config(text=f"● 运行中 ({device.conn_config.summary})", foreground="#28a745")
-            self.btn_toggle_slave.config(text="⏹ 停止服务")
+            self.btn_toggle_slave.config(text="⏹ 停止服务", style="danger.TButton")
         else:
             self.lbl_slave_status.config(text="● 已停止", foreground="#dc3545")
-            self.btn_toggle_slave.config(text="▶️ 启动服务")
+            self.btn_toggle_slave.config(text="▶️ 启动服务", style="success.TButton")
 
     def _on_slave_comm_type_change(self) -> None:
         mode = self.slave_comm_type_var.get()
