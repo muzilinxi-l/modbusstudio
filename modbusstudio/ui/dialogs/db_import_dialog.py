@@ -66,14 +66,34 @@ class DbImportDialog:
         self._set_dialog_icon()
 
         # 加载数据库设备数据
-        self.apps = self.app.db_loader.load_all_apps()
+        from ...hems_db_loader import HemsDatabase
+        if not self.app.db_path or not os.path.exists(self.app.db_path):
+            messagebox.showwarning("提示", "未找到有效的业务数据库，请先关联数据库！", parent=self.dlg)
+            self.dlg.destroy()
+            return
+
+        try:
+            db = HemsDatabase(self.app.db_path)
+            self.apps = db.load_modbus_apps()
+        except Exception as e:
+            logger.error(f"加载数据库失败: {e}")
+            messagebox.showerror("读取数据库失败", f"无法加载数据库: {e}", parent=self.dlg)
+            self.dlg.destroy()
+            return
+
         if not self.apps:
             messagebox.showwarning("提示", "所选数据库中未解析到有效的设备模型记录！", parent=self.dlg)
             self.dlg.destroy()
             return
 
-        self._build_ui()
-        self._populate_data()
+        try:
+            self._build_ui()
+            self._populate_data()
+        except Exception as ex:
+            import traceback
+            logger.error(f"构建导入弹窗界面异常: {ex}\n{traceback.format_exc()}")
+            messagebox.showerror("界面加载失败", f"渲染弹窗发生异常:\n{ex}", parent=self.dlg)
+            self.dlg.destroy()
 
     def _set_dialog_icon(self) -> None:
         """设置弹窗左上角与任务栏图标"""
