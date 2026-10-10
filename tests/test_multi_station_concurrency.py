@@ -170,3 +170,43 @@ def test_same_port_same_station_collision_rejection():
         assert "站地址冲突" in msg_b
     finally:
         slave_svc.clear_all_devices()
+
+
+# [REVIEW-FIX-2] 验收测试：验证 async_setValues 拒绝向 FC4 (输入寄存器) 写入数据
+def test_async_set_values_fc4_readonly_protection():
+    """验证对从机使用只读功能码 FC4 调用 async_setValues 时为 no-op，数据区不受修改"""
+    import asyncio
+    from modbusstudio.modbus_engine import MultiStationServerContext, ModbusSlaveEngine
+
+    engine = ModbusSlaveEngine(comm_type="TCP", port=5991, slave_id=1)
+    engine.write_raw_values("3x_InputRegister", 10, [1234])
+    ctx = MultiStationServerContext()
+    ctx.attach_slave(1, engine)
+
+    # 尝试使用只读功能码 FC4 执行写操作 (传入非法修改值 9999)
+    res = asyncio.run(ctx.async_setValues(device_id=1, func_code=4, address=10, values=[9999]))
+    assert res is None, "FC4 写操作应当被 no-op 拦截返回 None"
+
+    # 验证底层 3x 输入寄存器值完全未被篡改，依然保持 1234
+    vals = asyncio.run(ctx.async_getValues(device_id=1, func_code=4, address=10, count=1))
+    assert vals == [1234], f"只读输入寄存器数据被非法篡改: {vals}"
+
+
+# [REVIEW-FIX-1] 验收测试：验证消除看值 hack 后，0 值与邻居寄存器非 0 时寻址恒定不漂移
+def test_address_indexing_deterministic_without_hack():
+    """验证当寄存器为 0、前一寄存器非 0 时，读写寻址绝对稳定，不发生错位漂移"""
+    import asyncio
+    from modbusstudio.modbus_engine import MultiStationServerContext, ModbusSlaveEngine
+
+    engine = ModbusSlaveEngine(comm_type="TCP", port=5992, slave_id=1, address_base=1)
+    # 点位 9 设置为 8888，点位 10 设置为 0 (正常为 0V 或关闭状态)
+    engine.write_raw_values("4x_HoldingRegister", 9, [8888])
+    engine.write_raw_values("4x_HoldingRegister", 10, [0])
+
+    ctx = MultiStationServerContext()
+    ctx.attach_slave(1, engine)
+
+    # 读取点位 10：必须稳定读取出 0，绝不能因为 values[9]!=0 漂移到读取点位 9 的 8888
+    vals = asyncio.run(ctx.async_getValues(device_id=1, func_code=3, address=10, count=1))
+    assert vals == [0], f"点位 10 为 0 时发生数据漂移错位，读出错误值: {vals}"
+

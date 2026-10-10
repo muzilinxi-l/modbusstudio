@@ -261,6 +261,8 @@ class MultiStationServerContext(ModbusServerContext):
             self._devices.pop(slave_id, None)
             return len(self._slaves)
 
+    # [REVIEW-FIX-1] 引入显式地址基准计算，彻底废除根据运行时数值推断索引的 hack
+    # [REVIEW-FIX-2] 在 async_setValues 中严格拦截只读功能码 (FC2, FC4)，禁止外部主站篡改只读存储区
     async def async_getValues(
         self, device_id: int, func_code: int, address: int, count: int = 1
     ) -> Union[List[int], List[bool], ExcCodes]:
@@ -282,12 +284,10 @@ class MultiStationServerContext(ModbusServerContext):
             return ExcCodes.ILLEGAL_ADDRESS
 
         values_list = block.simdata[0].values
-        # 兼容处理：PDU address 与底层 0-based 数组索引自适应
-        # 例如点位地址 10 写入 values_list[9]
-        start_idx = address
-        if address >= 1 and address < len(values_list):
-            if address - 1 < len(values_list) and values_list[address] == 0 and values_list[address - 1] != 0:
-                start_idx = address - 1
+        # [REVIEW-FIX-1] 使用显式地址基准 address_base (默认为 1)，start_idx = address - address_base
+        # 彻底移除 values_list[address] == 0 的运行时看值 hack，避免波形变化和 0 值引发数据漂移与 FLOAT32 撕裂
+        base = getattr(engine, "address_base", 1)
+        start_idx = address - (1 if base == 1 else 0)
 
         is_bit = func_code in (1, 2)
         res = []
@@ -297,36 +297,39 @@ class MultiStationServerContext(ModbusServerContext):
                 v = values_list[idx]
                 res.append(bool(v) if is_bit else (int(v) & 0xFFFF))
             else:
+                # 越界安全保护：返回 0 或 False 填充，不抛出异常破坏通信连接
                 res.append(False if is_bit else 0)
         return res
 
     async def async_setValues(
         self, device_id: int, func_code: int, address: int, values: List[Any]
     ) -> Optional[ExcCodes]:
+        # [REVIEW-FIX-2] 功能码白名单校验：Modbus 协议规约中 FC2 (读离散输入) 和 FC4 (读输入寄存器) 严格只读
+        # 主站不可使用或通过映射写入 1x/3x 只读区；若是只读功能码直接 warning 并 no-op 返回 None
+        if func_code not in (5, 6, 15, 16):
+            logger.warning(
+                f"[非法写请求拦截] 拒绝向从机 {device_id} 执行非法功能码 FC:{func_code} 的写操作 (FC2/FC4 等只读区受保护)"
+            )
+            return None
+
         with self._lock:
             engine = self._slaves.get(device_id)
         if not engine:
             return ExcCodes.GATEWAY_NO_RESPONSE
 
-        area_str = "4x_HoldingRegister"
-        if func_code in (1, 5, 15):
-            area_str = "0x_Coil"
-        elif func_code == 2:
-            area_str = "1x_DiscreteInput"
-        elif func_code == 4:
-            area_str = "3x_InputRegister"
+        # 仅允许写入 0x_Coil (FC5, FC15) 或 4x_HoldingRegister (FC6, FC16)
+        area_str = "0x_Coil" if func_code in (5, 15) else "4x_HoldingRegister"
 
         block = engine._get_datablock(area_str)
         if not block or not hasattr(block, "simdata") or not block.simdata:
             return ExcCodes.ILLEGAL_ADDRESS
 
         values_list = block.simdata[0].values
-        start_idx = address
-        if address >= 1 and address < len(values_list):
-            if address - 1 < len(values_list) and values_list[address] == 0 and values_list[address - 1] != 0:
-                start_idx = address - 1
+        # [REVIEW-FIX-1] 使用显式 address_base 计算写入索引，越界安全忽略
+        base = getattr(engine, "address_base", 1)
+        start_idx = address - (1 if base == 1 else 0)
 
-        is_bit = func_code in (1, 5, 15)
+        is_bit = func_code in (5, 15)
         for i, val in enumerate(values):
             idx = start_idx + i
             if 0 <= idx < len(values_list):
@@ -403,14 +406,41 @@ class ModbusTransportServer:
                 break
             time.sleep(0.03)
 
+    # [REVIEW-FIX-3] 完善 stop() 资源彻底回收：取消 task 并在事件循环中安全 await shutdown()，避免 socket 与 loop 句柄泄漏
     def stop(self) -> None:
         self._is_running = False
-        if self._loop and self._server_task:
-            self._loop.call_soon_threadsafe(self._server_task.cancel)
-        if self._thread:
-            self._thread.join(timeout=1.0)
-            self._thread = None
+        if self._loop and self._loop.is_running():
+            async def _cleanup():
+                if self._server:
+                    try:
+                        await self._server.shutdown()
+                    except Exception as ex:
+                        logger.debug(f"ModbusTransportServer shutdown 异常: {ex}")
+                if self._server_task and not self._server_task.done():
+                    self._server_task.cancel()
+                    try:
+                        await self._server_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as ex:
+                        logger.debug(f"等待 server_task 取消异常: {ex}")
+
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_cleanup(), self._loop)
+                fut.result(timeout=2.0)
+            except Exception as e:
+                logger.debug(f"stop() 通知 loop 清理超时或异常: {e}")
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                logger.warning(f"ModbusTransportServer 后台服务线程 join 超时 ({self.endpoint_key})")
+
+        # 确保全部引用彻底重置为 None，防止残留半清理状态
+        self._thread = None
+        self._loop = None
         self._server = None
+        self._server_task = None
 
     def _run_server_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -450,7 +480,11 @@ class ModbusTransportServer:
         try:
             self._loop.run_until_complete(_serve())
         finally:
-            self._loop.close()
+            # [REVIEW-FIX-3] 确保在子线程结束时关闭事件循环，无 loop 句柄泄漏
+            try:
+                self._loop.close()
+            except Exception:
+                pass
             self._is_running = False
 
 
@@ -576,6 +610,7 @@ class ModbusSlaveEngine:
         parity: str = "N",
         stopbits: int = 1,
         slave_id: int = 1,
+        address_base: int = 1,
     ):
         self.comm_type = comm_type.upper()  # "TCP" 或 "RTU"
         self.host = host
@@ -586,6 +621,8 @@ class ModbusSlaveEngine:
         self.parity = parity
         self.stopbits = stopbits
         self.slave_id = slave_id
+        # [REVIEW-FIX-1] 显式定义地址偏移基准 (默认 1-based)，消除启发式看值推断
+        self.address_base = address_base
 
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
