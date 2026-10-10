@@ -239,7 +239,13 @@ def format_modbus_trace_packet(comm_type: str, sending: bool, data: bytes) -> Tu
 class MultiStationServerContext(ModbusServerContext):
     """支持多从机路由与实时读写的 Modbus 服务端数据上下文 (完全契合 MBAP Unit ID 路由规范)."""
 
+    # [REVIEW-FIX-6] 显式调用父类 super().__init__() 规范初始化基类状态
+    # 注意：当前实现依赖 pymodbus 的 context.old_simulator 分发机制将请求路由到 async_getValues/async_setValues。
+    # 后续若升级 pymodbus，需重点回归多从机路由行为。
     def __init__(self):
+        # 传入虚拟从机设备上下文以满足 pymodbus 3.x 基类入参非空约束
+        dummy_dev = ModbusDeviceContext(co=ModbusSequentialDataBlock(1, [False]))
+        super().__init__(devices={0: dummy_dev}, single=False)
         self.old_simulator = True
         self.simdevices = []
         self._devices = {}
@@ -249,6 +255,11 @@ class MultiStationServerContext(ModbusServerContext):
     def device_ids(self) -> List[int]:
         with self._lock:
             return list(self._slaves.keys())
+
+    # [REVIEW-FIX-4] 提供线程安全从机查询接口，使 MultiStationServerContext 成为从机挂载唯一真实源
+    def get_slave(self, slave_id: int) -> Optional[Any]:
+        with self._lock:
+            return self._slaves.get(slave_id)
 
     def attach_slave(self, slave_id: int, engine: Any) -> None:
         with self._lock:
@@ -343,13 +354,14 @@ class MultiStationServerContext(ModbusServerContext):
 class ModbusTransportServer:
     """管理单一物理网络端口或物理串口上的 Modbus 传输层监听服务 (基于 MultiStationServerContext 支持多 Unit ID 挂载与动态路由)."""
 
+    # [REVIEW-FIX-4] 方案 A (推荐)：ModbusTransportServer 不再自己重复维护 _slaves 与冗余嵌套锁
+    # 所有从机挂载与查询统一委托给 MultiStationServerContext，彻底消除双份状态漂移与锁嵌套反向获取隐患
     def __init__(self, endpoint_key: tuple):
         self.endpoint_key = endpoint_key
         self.comm_type = endpoint_key[0]  # "TCP" 或 "RTU"
-        self._slaves: Dict[int, Any] = {}  # unit_id -> ModbusSlaveEngine
         self._lock = threading.Lock()
 
-        # 核心：使用 MultiStationServerContext，支持多从机路由与实时读写
+        # 核心：使用 MultiStationServerContext 作为从机路由与挂载的唯一真理源
         self._server_context = MultiStationServerContext()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server = None
@@ -363,29 +375,27 @@ class ModbusTransportServer:
         return self._is_running
 
     def attach_slave(self, slave_id: int, engine: Any) -> None:
-        """动态挂载从机数据区至 ServerContext."""
-        with self._lock:
-            self._slaves[slave_id] = engine
-            self._server_context.attach_slave(slave_id, engine)
+        """动态挂载从机数据区至 ServerContext (直接委托 Context，无锁嵌套)."""
+        self._server_context.attach_slave(slave_id, engine)
 
     def detach_slave(self, slave_id: int) -> int:
-        """动态注销从机，返回当前端点剩余从机数."""
-        with self._lock:
-            self._slaves.pop(slave_id, None)
-            rem = self._server_context.detach_slave(slave_id)
-            return rem
+        """动态注销从机，返回当前端点剩余从机数 (直接委托 Context，无锁嵌套)."""
+        return self._server_context.detach_slave(slave_id)
+
+    def get_slave(self, slave_id: int) -> Optional[Any]:
+        """查询已挂载的从机实例."""
+        return self._server_context.get_slave(slave_id)
 
     def active_slave_count(self) -> int:
-        with self._lock:
-            return len(self._slaves)
+        """获取当前物理端点已挂载从机总数."""
+        return len(self._server_context.device_ids())
 
     def _on_trace_packet(self, sending: bool, data: bytes) -> bytes:
         if not data:
             return data
         try:
             unit_id, msg = format_modbus_trace_packet(self.comm_type, sending, data)
-            with self._lock:
-                slave = self._slaves.get(unit_id)
+            slave = self._server_context.get_slave(unit_id)
             direction = "TX" if sending else "RX"
             if slave and slave.on_packet_log:
                 slave.on_packet_log(msg, direction)
@@ -552,15 +562,16 @@ class ModbusServerHub:
                 self._servers[key] = server
                 server.start()
 
-            # 站地址冲突检查
-            with server._lock:
-                if engine.slave_id in server._slaves:
-                    return False, f"物理端点 {key} 下已存在站地址 {engine.slave_id} 的从机！"
+            # [REVIEW-FIX-4] 站地址冲突检查：直接查询 server.get_slave，无需嵌套持有 server._lock
+            if server.get_slave(engine.slave_id) is not None:
+                return False, f"物理端点 {key} 下已存在站地址 {engine.slave_id} 的从机！"
 
             server.attach_slave(engine.slave_id, engine)
             return True, "挂载成功"
 
+    # [REVIEW-FIX-5] 避免在 Hub 全局锁 (self._lock) 内执行 server.stop() (含阻塞等待)，防止跨端点读写与操作被无辜阻塞卡顿
     def unregister_and_stop_slave(self, engine: Any) -> None:
+        server_to_stop: Optional[ModbusTransportServer] = None
         with self._lock:
             key = self.make_endpoint_key(
                 comm_type=engine.comm_type,
@@ -583,14 +594,20 @@ class ModbusServerHub:
             if server:
                 remaining = server.detach_slave(engine.slave_id)
                 if remaining == 0:
-                    server.stop()
                     self._servers.pop(key, None)
+                    server_to_stop = server
+
+        # 在 Hub 全局锁外部执行耗时的底层网络/串口停止与线程 join
+        if server_to_stop:
+            server_to_stop.stop()
 
     def stop_all(self) -> None:
+        servers_to_stop = []
         with self._lock:
-            for s in list(self._servers.values()):
-                s.stop()
+            servers_to_stop = list(self._servers.values())
             self._servers.clear()
+        for s in servers_to_stop:
+            s.stop()
 
 
 # =====================================================================

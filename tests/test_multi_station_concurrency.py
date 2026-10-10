@@ -210,3 +210,41 @@ def test_address_indexing_deterministic_without_hack():
     vals = asyncio.run(ctx.async_getValues(device_id=1, func_code=3, address=10, count=1))
     assert vals == [0], f"点位 10 为 0 时发生数据漂移错位，读出错误值: {vals}"
 
+
+# [REVIEW-FIX-5] 验收测试：验证单端点停止从机期间，跨端点的从机读写不受阻塞，延迟 < 100ms
+def test_cross_endpoint_non_blocking_during_stop():
+    """验证 A 端点停止从机并释放底层 server 时，B 端点的读取请求不会因全局锁被阻塞"""
+    import asyncio
+    import threading
+    import time
+    from modbusstudio.modbus_engine import ModbusServerHub, ModbusSlaveEngine
+
+    hub = ModbusServerHub.get_instance()
+    eng_a = ModbusSlaveEngine(comm_type="TCP", port=5981, slave_id=1)
+    eng_b = ModbusSlaveEngine(comm_type="TCP", port=5982, slave_id=2)
+    eng_b.write_raw_values("4x_HoldingRegister", 1, [999])
+
+    hub.register_and_start_slave(eng_a)
+    hub.register_and_start_slave(eng_b)
+
+    try:
+        # 在独立线程中触发 eng_a 的停止注销 (含底层网络关闭)
+        stop_thread = threading.Thread(target=lambda: hub.unregister_and_stop_slave(eng_a))
+        stop_thread.start()
+
+        # 在主线程中立即并发读取 eng_b 的上下文数值
+        t0 = time.perf_counter()
+        # 获取 B 端点的 server
+        key_b = hub.make_endpoint_key("TCP", eng_b.host, eng_b.port, "", 0, 0, "", 0)
+        server_b = hub._servers.get(key_b)
+        assert server_b is not None
+        res_b = asyncio.run(server_b._server_context.async_getValues(device_id=2, func_code=3, address=1, count=1))
+        duration = time.perf_counter() - t0
+
+        assert res_b == [999]
+        assert duration < 0.1, f"跨端点读写被全局锁阻塞耗时过长: {duration:.4f}s"
+        stop_thread.join(timeout=3.0)
+    finally:
+        hub.unregister_and_stop_slave(eng_b)
+
+
