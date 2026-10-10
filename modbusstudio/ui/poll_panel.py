@@ -147,10 +147,17 @@ class PollPanel(ttk.Frame):
         self.combo_order.set("ABCD")
         self.combo_order.pack(side="left", padx=1)
 
+        # [POLL-CONFIG] 增加"间隔(ms)"输入框，默认 1000ms，范围 100~60000ms
+        ttk.Label(left1, text="间隔(ms):").pack(side="left", padx=(4, 1))
+        self.poll_interval_var = tk.IntVar(value=1000)
+        self.entry_interval = ttk.Entry(left1, textvariable=self.poll_interval_var, width=6)
+        self.entry_interval.pack(side="left", padx=1)
+
         btn_poll_once = ttk.Button(left1, text="🔍 单次读取", style="info.TButton", command=self._poll_once)
         btn_poll_once.pack(side="left", padx=(6, 2))
 
-        self.btn_poll_loop = ttk.Button(left1, text="🔁 连续轮询 (1s)", style="success.TButton", command=self._toggle_poll_loop)
+        # [POLL-CONFIG] 文案改为"连续轮询"，去除写死的 1s 标注
+        self.btn_poll_loop = ttk.Button(left1, text="🔁 连续轮询", style="success.TButton", command=self._toggle_poll_loop)
         self.btn_poll_loop.pack(side="left", padx=2)
 
         right1 = ttk.Frame(row1)
@@ -296,32 +303,83 @@ class PollPanel(ttk.Frame):
 
         self._executor.submit(do_read)
 
+    # [POLL-CONFIG] 连续轮询控制：调用 PollService.start_continuous_polling，支持用户自定义间隔
     def _toggle_poll_loop(self) -> None:
         if self._is_polling_loop:
             self._is_polling_loop = False
-            if self._poll_timer_id:
-                self.after_cancel(self._poll_timer_id)
-                self._poll_timer_id = None
-            self.btn_poll_loop.config(text="🔁 连续轮询 (1s)", style="success.TButton")
+            self.app.poll_service.stop_continuous_polling()
+            self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
         else:
-            self._is_polling_loop = True
-            self.btn_poll_loop.config(text="⏹ 停止轮询", style="danger.TButton")
-            self._run_poll_cycle()
+            cfg = self._get_connection_config()
+            try:
+                start_addr = int(self.entry_start_addr.get().strip())
+                count = int(self.entry_count.get().strip())
+                area_enum = AreaType.normalize(self.combo_area.get())
+                bo_enum = ByteOrder.normalize(self.combo_order.get())
+            except Exception as e:
+                messagebox.showerror("参数错误", f"输入格式有误: {e}")
+                return
 
-    def _run_poll_cycle(self) -> None:
-        if not self._is_polling_loop:
-            return
-        self._poll_once()
-        self._poll_timer_id = self.after(1000, self._run_poll_cycle)
+            # 读取并校验轮询间隔：限制在 100ms ~ 60000ms
+            try:
+                raw_interval = int(self.poll_interval_var.get())
+            except Exception:
+                raw_interval = 1000
+            interval_ms = max(100, min(60000, raw_interval))
+            self.poll_interval_var.set(interval_ms)
+
+            task = PollTask(
+                conn_config=cfg,
+                area=area_enum,
+                start_address=start_addr,
+                count=count,
+                byte_order=bo_enum,
+                is_loop=True,
+                interval_ms=interval_ms,
+            )
+
+            # [POLL-CONFIG] 后台 worker 线程直接回调，在 UI 侧切回 Tk 主线程渲染，杜绝跨线程 UI 操作
+            def _on_success_from_worker(fresh_dict: Dict[int, int]):
+                def _ui_update():
+                    if hasattr(self, "winfo_exists") and self.winfo_exists():
+                        self._rx_count += 1
+                        self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
+                        self._update_from_regs(fresh_dict, start_addr, count)
+                self.after(0, _ui_update)
+
+            def _on_error_from_worker(err_msg: str):
+                def _ui_error():
+                    if hasattr(self, "winfo_exists") and self.winfo_exists():
+                        self.app.logging_service.post("ERROR", cfg.unit_id, f"轮询异常: {err_msg}")
+                self.after(0, _ui_error)
+
+            ok, msg = self.app.poll_service.start_continuous_polling(
+                task=task,
+                interval_ms=interval_ms,
+                on_success=_on_success_from_worker,
+                on_error=_on_error_from_worker,
+            )
+            if ok:
+                self._is_polling_loop = True
+                self.btn_poll_loop.config(text="⏹ 停止轮询", style="danger.TButton")
+            else:
+                self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
+                messagebox.showerror("启动失败", msg)
+
+    # [POLL-CONFIG] 适配从局部有效寄存器字典渲染表格
+    def _update_from_regs(self, regs_dict: Dict[int, int], start_addr: int, count: int) -> None:
+        regs_list = [regs_dict.get(start_addr + i, 0) for i in range(count)]
+        self._render_registers_to_tree(regs_list, start_addr)
 
     def _update_result_tree(self, res: PollResult) -> None:
+        self._render_registers_to_tree(res.raw_registers, res.start_address)
+
+    def _render_registers_to_tree(self, regs: List[int], start: int) -> None:
         from ..modbus_codec import decode_value
 
         for itm in self.tree.get_children():
             self.tree.delete(itm)
 
-        regs = res.raw_registers
-        start = res.start_address
         for i, val in enumerate(regs):
             addr = start + i
             hex_str = f"0x{val:04X}"

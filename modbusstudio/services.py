@@ -581,3 +581,42 @@ class PollService:
                 error_msg=str(e),
                 elapsed_ms=(time.time() - t0) * 1000,
             )
+
+    # [POLL-CONFIG] 新增后台连续轮询控制服务接口，支持自定义轮询间隔 (interval_ms)
+    def start_continuous_polling(
+        self,
+        task: PollTask,
+        interval_ms: int = 1000,
+        on_success: Optional[Callable[[Dict[int, int]], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+    ) -> Tuple[bool, str]:
+        """启动后台连续轮询，间隔为 interval_ms (毫秒).
+
+        自动确保已建立连接，并将回调绑定至底层引擎。
+        """
+        if not self._is_connected or not self._engine:
+            ok, msg = self.connect(task.conn_config)
+            if not ok:
+                return False, f"建立连接失败: {msg}"
+
+        if self._engine.is_polling:
+            return False, "轮询已在运行中"
+
+        if on_success:
+            self._engine.on_poll_success = on_success
+        if on_error:
+            self._engine.on_poll_error = on_error
+
+        self._engine.start_polling(
+            area=task.area.value,
+            start_addr=task.start_address,
+            count=task.count,
+            interval_ms=interval_ms,
+        )
+        return True, "轮询已启动"
+
+    def stop_continuous_polling(self) -> None:
+        """停止后台连续轮询任务."""
+        if self._engine:
+            self._engine.stop_polling()
+

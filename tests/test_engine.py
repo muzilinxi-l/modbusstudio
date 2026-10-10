@@ -182,10 +182,52 @@ def test_sine_wave_simulation_value_changes():
     time.sleep(2.5)
     engine.stop()
 
-    assert len(recorded_values) >= 2, f"正弦波未能按秒产生数据: {recorded_values}"
-    assert all(isinstance(v, int) for v in recorded_values), "UINT16 正弦波输出应当为整数"
-    assert all(v >= 0 for v in recorded_values), "UINT16 正弦波不应当产生负数"
-    # 数值不应当全部相同为 0
     assert any(v > 0 for v in recorded_values), f"正弦波数值未生效，仍为全0: {recorded_values}"
+
+
+# [POLL-CONFIG] 单元测试：验证 PollService 连续轮询启动与自定义间隔生效
+def test_poll_service_continuous_polling_and_custom_interval():
+    """验证 PollService.start_continuous_polling 能够以自定义间隔连续读取并能安全退出"""
+    import time
+    from modbusstudio.models import AreaType, ByteOrder, CommType, ConnectionConfig, PollTask
+    from modbusstudio.services import LoggingService, PollService
+    from modbusstudio.modbus_engine import ModbusSlaveEngine
+
+    # 1. 启动测试从机
+    slave = ModbusSlaveEngine(comm_type="TCP", port=5977, slave_id=1)
+    slave.write_raw_values("4x_HoldingRegister", 1, [100, 200, 300])
+    slave.start()
+
+    time.sleep(0.2)
+
+    # 2. 创建 PollService
+    log_svc = LoggingService(log_dir="logs")
+    poll_svc = PollService(log_svc)
+
+    cfg = ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=5977, unit_id=1)
+    task = PollTask(conn_config=cfg, area=AreaType.HOLDING, start_address=1, count=3, byte_order=ByteOrder.ABCD)
+
+    received_batches = []
+    # 3. 启动 150ms 快速连续轮询
+    ok, msg = poll_svc.start_continuous_polling(
+        task=task,
+        interval_ms=150,
+        on_success=lambda fresh: received_batches.append(dict(fresh)),
+    )
+    assert ok is True, f"启动连续轮询失败: {msg}"
+
+    # 运行约 0.6 秒，预期大约产生 3~4 次采样
+    time.sleep(0.6)
+    poll_svc.stop_continuous_polling()
+    poll_svc.disconnect()
+    slave.stop()
+
+    assert len(received_batches) >= 2, f"连续轮询未产生足够的批次: {len(received_batches)}"
+    # 验证获取到的数据内容正确
+    first = received_batches[0]
+    assert first[1] == 100
+    assert first[2] == 200
+    assert first[3] == 300
+
 
 

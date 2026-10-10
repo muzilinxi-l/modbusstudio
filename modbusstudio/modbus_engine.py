@@ -972,6 +972,8 @@ class ModbusPollEngine:
         self._poll_thread: Optional[threading.Thread] = None
         self._is_polling = False
         self._poll_interval = 1.0  # 秒
+        # [POLL-CONFIG] 引入退出事件通知机制，避免 stop_polling 后产生双线程轮询
+        self._poll_stop_event = threading.Event()
 
         # 统计指标
         self.tx_count = 0
@@ -1211,28 +1213,43 @@ class ModbusPollEngine:
                 self.on_packet_log(f"[RX 写入响应] ID:{self.slave_id} | FC:10 | 成功写入 {len(regs)} 个寄存器", "RX")
             return True, f"成功写入 {len(regs)} 个寄存器"
 
+    # [POLL-CONFIG] 启动后台连续定时循环轮询
+    # 注意：on_poll_success / on_poll_error 回调直接在 worker 线程中触发，UI 消费者须自行调度切换到主线程
     def start_polling(self, area: str, start_addr: int, count: int, interval_ms: int = 1000) -> None:
-        """启动后台定时循环轮询."""
+        """启动后台定时循环轮询.
+
+        注意：on_poll_success / on_poll_error 由后台 worker 线程调用，UI 消费者须自行切回主线程进行渲染。
+        """
         if self._is_polling:
             return
         self._is_polling = True
+        self._poll_stop_event.clear()
         self._poll_interval = max(0.1, interval_ms / 1000.0)
 
         def _poll_worker():
-            while self._is_polling:
+            while self._is_polling and not self._poll_stop_event.is_set():
                 success, vals, err = self.read_block(area, start_addr, count)
                 if success and self.on_poll_success:
-                    self.on_poll_success(self.cached_registers)
+                    # [POLL-CONFIG] 方案 A：使用本地 fresh 字典存储本次读取到的有效地址值，避免残留历史旧地址脏数据
+                    fresh = {start_addr + i: v for i, v in enumerate(vals)}
+                    self.on_poll_success(fresh)
                 elif not success and self.on_poll_error:
                     self.on_poll_error(err)
-                time.sleep(self._poll_interval)
+
+                # 使用 Event 等待间隔时间，若收到停止事件则立即退出循环，无需干等整段 sleep
+                if self._poll_stop_event.wait(timeout=self._poll_interval):
+                    break
 
         self._poll_thread = threading.Thread(target=_poll_worker, daemon=True)
         self._poll_thread.start()
 
+    # [POLL-CONFIG] 安全停止后台连续轮询，防止遗留后台游离线程产生并发读写冲突
     def stop_polling(self) -> None:
         """停止轮询."""
         self._is_polling = False
+        self._poll_stop_event.set()
         if self._poll_thread:
-            self._poll_thread.join(timeout=1.0)
+            self._poll_thread.join(timeout=2.0)
+            if self._poll_thread.is_alive():
+                logger.warning("ModbusPollEngine 轮询后台线程在 2.0s 内未退出，等待其自动终止")
             self._poll_thread = None
