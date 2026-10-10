@@ -105,6 +105,10 @@ class SlavePanel(ttk.Frame):
         btn_stop_all = ttk.Button(right0, text="⏹ 全部停止", style="danger.Outline.TButton", command=self._stop_all_slaves)
         btn_stop_all.pack(side="left", padx=2)
 
+        # [SLAVE-RECONNECT] 追加"自动重连"按钮，用于触发底层僵死 listener 探活自愈重建
+        btn_reconnect = ttk.Button(right0, text="🔄 自动重连", style="secondary.Outline.TButton", command=self._on_auto_reconnect)
+        btn_reconnect.pack(side="left", padx=2)
+
         # --- 第 1 行：通信模式与数据库操作 ---
         row1 = ttk.Frame(top_box)
         row1.pack(fill="x", padx=4, pady=2)
@@ -609,6 +613,13 @@ class SlavePanel(ttk.Frame):
             dev = self.app.slave_service.get_device(self._current_device_id)
             if dev:
                 self._update_status_indicator(dev)
+
+    # [SLAVE-RECONNECT] 自动重连按钮回调：触发底层僵死 listener 探活自愈重建
+    def _on_auto_reconnect(self) -> None:
+        n = self.app.slave_service.auto_reconnect_if_needed()
+        self.lbl_slave_status.config(
+            text=f"已重建 {n} 个僵死 listener" if n > 0 else "未检测到僵死 listener"
+        )
 
     def _add_new_slave_instance(self) -> None:
         """手动添加并配置新的 Modbus 从机服务实例（受 100 实例容量配额限制）"""

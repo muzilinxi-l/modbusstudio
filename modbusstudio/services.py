@@ -40,6 +40,7 @@ from .modbus_codec import (
 from .modbus_engine import (
     ModbusSlaveEngine,
     ModbusPollEngine,
+    ModbusServerHub,
 )
 
 logger = logging.getLogger("ModbusStudioServices")
@@ -322,8 +323,26 @@ class SlaveService:
         if not device:
             return False, f"未找到从机配置: {device_id}"
 
+        # [SLAVE-RECONNECT] 探活放行：底层僵死则先彻底清理（清 Hub 映射 + 停旧 transport）再重跑注册路径
         if device.is_running:
-            return True, f"从机 {device.name} 已经在运行中"
+            engine = self._active_engines.get(device_id)
+            if engine and engine.is_healthy():
+                return True, f"从机 {device.name} 运行中"
+            # 僵死：先 unregister（清 Hub 映射 + 停旧 transport）再清 active，
+            # 保证下方 register 走"新建"路径，不会复用僵死实例
+            if engine:
+                hub = ModbusServerHub.get_instance()
+                try:
+                    # [SLAVE-RECONNECT] 必须走 unregister_and_stop_slave 彻底清映射，而非仅 engine.stop()
+                    hub.unregister_and_stop_slave(engine)
+                except Exception as ex:
+                    logger.warning(f"unregister 僵死 engine 失败: {ex}")
+                try:
+                    engine.stop()
+                except Exception as ex:
+                    logger.warning(f"清理僵死 engine 失败: {ex}")
+                self._active_engines.pop(device_id, None)
+            device.is_running = False   # 让下方注册 / 启动逻辑重跑
 
         # 检查通信资源冲突：标准 Modbus 规范下，仅当同一物理端点且从机站地址 (Unit ID) 完全相同时才判定为冲突
         cfg = device.conn_config
@@ -437,6 +456,15 @@ class SlaveService:
         device.runtime_info = "已停止"
         self.logging_service.post("SYS", device.conn_config.unit_id, f"从机服务 [{device.name}] 已停止并释放通信资源")
         return True, f"从机 [{device.name}] 已停止"
+
+    # [SLAVE-RECONNECT] 兜底自动重连：对所有在跑从机做一次探活，僵死的自动重建
+    def auto_reconnect_if_needed(self) -> int:
+        """对所有在跑从机做一次探活，僵死的自动重建；返回重建数."""
+        hub = ModbusServerHub.get_instance()
+        n = hub.restart_all_broken()
+        if n > 0:
+            self.logging_service.post("SYS", 0, f"[自动重连] 检测到 {n} 个僵死 listener，已重建")
+        return n
 
     def sync_point_to_runtime(self, device_id: str, point: ModbusPoint) -> None:
         """当界面或业务修改点位数值时，实时推入运行中的底层引擎"""

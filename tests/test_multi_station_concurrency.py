@@ -248,3 +248,136 @@ def test_cross_endpoint_non_blocking_during_stop():
         hub.unregister_and_stop_slave(eng_b)
 
 
+# [SLAVE-RECONNECT] 验收测试：手动 stop 后 start 可重建，从机路由保留
+def test_slave_listener_restart_after_stop_restarts():
+    """强制僵死后 restart_if_broken() 能重建底层 listener 且从机数据路由保留."""
+    from modbusstudio.modbus_engine import ModbusServerHub, ModbusSlaveEngine
+
+    hub = ModbusServerHub.get_instance()
+    test_port = 5066
+    engine = ModbusSlaveEngine(comm_type="TCP", host="127.0.0.1", port=test_port, slave_id=1)
+    engine.write_raw_values("4x_HoldingRegister", 5, [4321])
+
+    ok, _ = hub.register_and_start_slave(engine)
+    assert ok is True
+    key = hub.make_endpoint_key("TCP", "127.0.0.1", test_port)
+    server = hub._servers.get(key)
+    assert server is not None
+
+    # 确认健康
+    assert server.is_healthy() is True, "正常启动后应处于健康态"
+
+    # 模拟 EMS 断线导致 listener 僵死（stop() 只清 loop/thread/server 引用，不 detach 从机）
+    server.stop()
+
+    try:
+        assert server.is_healthy() is False, "强制僵死后应判定为不健康"
+
+        # 调 restart_if_broken() 自愈重建
+        rebuilt = server.restart_if_broken()
+        assert rebuilt is True, "僵死状态应触发重建"
+
+        assert server.is_healthy() is True, "重建后应恢复健康"
+
+        # 等待外部可连
+        time.sleep(0.3)
+        client = ModbusTcpClient("127.0.0.1", port=test_port)
+        assert client.connect() is True, "重建后外部客户端应能连上"
+        res = client.read_holding_registers(5, count=1, device_id=1)
+        assert not res.isError(), f"读取失败: {res}"
+        assert res.registers[0] == 4321, f"路由保留验证失败，读回值: {res.registers}"
+        client.close()
+    finally:
+        hub.unregister_and_stop_slave(engine)
+
+
+# [SLAVE-RECONNECT] 验收测试：上层 start_slave 探活放行，僵死 device 不会傻返回 "已在运行"
+def test_slave_service_start_slave_heals_broken_state():
+    """僵死 device 调 start_slave 应自动重建底层 listener，而非直接返回"已在运行"."""
+    from modbusstudio.modbus_engine import ModbusServerHub
+
+    log_svc = LoggingService(log_dir="logs")
+    slave_svc = SlaveService(log_svc)
+    test_port = 5067
+
+    dev = SlaveDevice(
+        id="dev_reconnect",
+        name="重连验证从机",
+        conn_config=ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=test_port, unit_id=1),
+    )
+    _, p, _ = PointService.validate_and_build_point(
+        address=7, description="重连验证", area=AreaType.HOLDING,
+        data_type=DataType.UINT16, byte_order=ByteOrder.ABCD, val_input=5555,
+    )
+    dev.add_point(p)
+    slave_svc.register_device(dev)
+
+    try:
+        ok1, _ = slave_svc.start_slave("dev_reconnect")
+        assert ok1 is True
+
+        # 强制把底层 transport 弄成僵死（stop() 清 loop/thread，但 context._slaves 仍在）
+        hub = ModbusServerHub.get_instance()
+        key = hub.make_endpoint_key("TCP", "127.0.0.1", test_port)
+        server = hub._servers.get(key)
+        assert server is not None, "start_slave 后 Hub 中应存在对应端点"
+        server.stop()
+        assert server.is_healthy() is False
+
+        # 此时 device.is_running 仍为 True（未触发正常 stop），调 start_slave 应走探活自愈路径
+        ok2, msg2 = slave_svc.start_slave("dev_reconnect")
+        assert ok2 is True, f"探活放行重建应成功，实际: {msg2}"
+
+        time.sleep(0.3)
+        client = ModbusTcpClient("127.0.0.1", port=test_port)
+        assert client.connect() is True, "start_slave 自愈后外部客户端应能连上"
+        res = client.read_holding_registers(7, count=1, device_id=1)
+        assert not res.isError()
+        assert res.registers[0] == 5555, f"自愈后数据路由验证失败: {res.registers}"
+        client.close()
+    finally:
+        slave_svc.clear_all_devices()
+        time.sleep(0.2)
+
+
+# [SLAVE-RECONNECT] 验收测试：Hub.restart_all_broken 正确统计并重建所有僵死端点
+def test_hub_restart_all_broken_counts_correctly():
+    """2 个端点，僵死 1 个，restart_all_broken 应返回 1，且健康端点不受影响."""
+    from modbusstudio.modbus_engine import ModbusServerHub, ModbusSlaveEngine
+
+    hub = ModbusServerHub.get_instance()
+    eng_a = ModbusSlaveEngine(comm_type="TCP", host="127.0.0.1", port=5068, slave_id=1)
+    eng_b = ModbusSlaveEngine(comm_type="TCP", host="127.0.0.1", port=5069, slave_id=2)
+
+    ok_a, _ = hub.register_and_start_slave(eng_a)
+    ok_b, _ = hub.register_and_start_slave(eng_b)
+    assert ok_a and ok_b
+
+    key_a = hub.make_endpoint_key("TCP", "127.0.0.1", 5068)
+    key_b = hub.make_endpoint_key("TCP", "127.0.0.1", 5069)
+    srv_a = hub._servers.get(key_a)
+    srv_b = hub._servers.get(key_b)
+    assert srv_a is not None and srv_b is not None
+
+    # 仅僵死端点 A（stop() 清 loop/thread/server 引用，context._slaves 保留）
+    srv_a.stop()
+
+    try:
+        assert srv_a.is_healthy() is False
+        assert srv_b.is_healthy() is True
+
+        n = hub.restart_all_broken()
+        assert n == 1, f"应只重建 1 个僵死端点，实际: {n}"
+
+        assert srv_a.is_healthy() is True, "僵死端点 A 应已恢复健康"
+        assert srv_b.is_healthy() is True, "健康端点 B 不受影响"
+
+        time.sleep(0.3)
+        client = ModbusTcpClient("127.0.0.1", port=5068)
+        assert client.connect() is True, "重建后端点 A 应可外部连接"
+        client.close()
+    finally:
+        hub.unregister_and_stop_slave(eng_a)
+        hub.unregister_and_stop_slave(eng_b)
+
+

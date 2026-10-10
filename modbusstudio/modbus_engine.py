@@ -369,6 +369,8 @@ class ModbusTransportServer:
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
+        # [SLAVE-RECONNECT] 记录 start() 时刻，供 is_healthy() 做 0.3s 启动宽限判断
+        self._start_ts: float = time.time()
 
     @property
     def is_running(self) -> bool:
@@ -405,10 +407,56 @@ class ModbusTransportServer:
             logger.debug(f"trace_packet 异常: {ex}")
         return data
 
+    # [SLAVE-RECONNECT] 新增健康探测方法：判断底层 listener 是否真正在监听
+    def is_healthy(self) -> bool:
+        if not self._is_running:
+            return False
+        # 事件循环线程还活着、loop 还在跑、_server 已被创建
+        if not (self._thread and self._thread.is_alive()):
+            return False
+        if not (self._loop and self._loop.is_running()):
+            return False
+        if self._server is None:
+            # 可能仍在启动过程中，给 0.3s 宽限
+            return self._is_running and (time.time() - self._start_ts) < 0.3
+        return True
+
+    # [SLAVE-RECONNECT] 新增自愈重建方法：若底层 listener 僵死，stop + start 重建
+    def restart_if_broken(self) -> bool:
+        """若底层 listener 僵死（不健康），停止并重建；返回是否执行了重建."""
+        if self.is_healthy():
+            return False
+        # 僵死：走一次 stop + start，重建 loop / server / 线程
+        self.stop()
+        # stop 后 _is_running 已清、_loop/_server/_thread 已置 None
+        self.start()
+        # start 后 5 个已注册的从机（_server_context._slaves）仍需保持挂载，
+        # 因为 _server_context 是 self 的属性，未被 stop 清除；
+        # 新起的 TCP server 仍用同一个 context，路由表保留，从机数据块保留。
+        return True
+
     def start(self) -> None:
-        if self._is_running:
+        # [SLAVE-RECONNECT] 已在健康运行 → 直接返回
+        if self.is_healthy():
             return
+        # 半死状态（_is_running=True 但底层僵死）→ 清理残留再重建
+        if self._is_running:
+            logger.warning(f"[SLAVE-RESTART] {self.endpoint_key} 检测到半死状态，强制重建 listener")
+            self._is_running = False
+            # 不 detach 从机，只清理 loop / thread / server 引用
+            if self._loop:
+                try:
+                    self._loop.close()
+                except Exception:
+                    pass
+                self._loop = None
+            if self._thread:
+                self._thread.join(timeout=0.5)
+                self._thread = None
+            self._server = None
+            self._server_task = None
         self._is_running = True
+        self._start_ts = time.time()
         self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
         self._thread.start()
         for _ in range(30):
@@ -496,6 +544,11 @@ class ModbusTransportServer:
             except Exception:
                 pass
             self._is_running = False
+            # [SLAVE-RECONNECT] 异常退出时显式提醒，便于日志排查；下次 start() 将自动重建
+            if self._server:
+                logger.warning(
+                    f"ModbusTransportServer listener 已退出 ({self.endpoint_key})，下次 start() 将自动重建"
+                )
 
 
 # =====================================================================
@@ -557,6 +610,11 @@ class ModbusServerHub:
                         key = (c, h, p)
                         break
 
+            # [SLAVE-RECONNECT-3b] 复用前探活：僵死则丢弃并新建，避免复用已死的 listener
+            if server and not server.is_healthy():
+                logger.warning(f"[SLAVE-RECONNECT-3b] {key} 已有僵死 listener，重建新实例")
+                server = None
+
             if server is None:
                 server = ModbusTransportServer(key)
                 self._servers[key] = server
@@ -608,6 +666,31 @@ class ModbusServerHub:
             self._servers.clear()
         for s in servers_to_stop:
             s.stop()
+
+    # [SLAVE-RECONNECT] 按 engine 的端点参数反查该 engine 挂载的 transport server
+    def get_server_for_engine(self, engine: Any) -> Optional[ModbusTransportServer]:
+        with self._lock:
+            key = self.make_endpoint_key(
+                comm_type=engine.comm_type, host=engine.host, port=engine.port,
+                serial_port=engine.serial_port, baudrate=engine.baudrate,
+                bytesize=engine.bytesize, parity=engine.parity, stopbits=engine.stopbits,
+            )
+            server = self._servers.get(key)
+            if server is None and key[0] == "TCP":
+                for (c, h, p), s in self._servers.items():
+                    if c == "TCP" and p == key[2] and (h == "0.0.0.0" or key[1] == "0.0.0.0" or h == key[1]):
+                        return s
+            return server
+
+    # [SLAVE-RECONNECT] 扫描所有端点，重建所有僵死 listener；返回重建数量
+    def restart_all_broken(self) -> int:
+        restarted = 0
+        with self._lock:
+            servers = list(self._servers.values())
+        for srv in servers:
+            if srv.restart_if_broken():
+                restarted += 1
+        return restarted
 
 
 # =====================================================================
@@ -674,6 +757,15 @@ class ModbusSlaveEngine:
     @property
     def is_running(self) -> bool:
         return self._is_running
+
+    # [SLAVE-RECONNECT] 新增健康探测：该从机对应的底层 transport 是否仍正常监听
+    def is_healthy(self) -> bool:
+        if not self._is_running:
+            return False
+        # 找到本从机所在的 ModbusTransportServer（通过 endpoint_key 反查 Hub）
+        hub = ModbusServerHub.get_instance()
+        server = hub.get_server_for_engine(self)
+        return server.is_healthy() if server else False
 
     def start(self) -> None:
         """启动从机服务：通过物理中枢挂载到共享物理端口并启动波形仿真."""
