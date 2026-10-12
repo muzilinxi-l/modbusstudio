@@ -1,0 +1,150 @@
+========================================================================
+Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
+========================================================================
+生成时间    : 2026-10-12T13:38:00.043624+08:00
+仓库根目录  : F:\GitHub\python
+记忆目录    : F:\GitHub\python\docs\Antigravity\recheck\D_memory
+总体结论    : FAIL (错误: 3, 警告: 0)
+重要声明    : 脚本通过 ≠ 语义正确。所有无法自动验证的语义判断均已标记为 needs_human_review。
+------------------------------------------------------------------------
+【分项检查摘要】
+  - 1_required_structure: PASS
+  - 2_unique_id: PASS
+  - 3_has_source_field: PASS
+  - 4_valid_git_sha: PASS
+  - 5_source_file_exists: PASS
+  - 6_code_drift_since_commit: PASS
+  - 7_unreviewed_formal_memory_guard: FAIL
+  - 8_conflict_and_status_check: FAIL
+  - 9_worktree_and_unmerged_changes: PASS
+  - 10_pytest_execution: SKIPPED
+  - 11_needs_human_review: INFO
+------------------------------------------------------------------------
+【错误详情 (ERRORS)】
+  [X] [Check 7] MEM-9003 (proposals/test_contradiction.md) 位于 proposals/ 候选区却被标为 verified（严禁自动/原地升格）
+  [X] [Check 7] MEM-9003 (proposals/test_contradiction.md) 状态为 verified，但 verified_by 为 'auto'（未经有效审核）
+  [X] [Check 8] 检测到同一主题 'default_tcp_port' 存在多条矛盾的 proposed 记忆 (MEM-9001, MEM-9002) -> 必须标记为 disputed 并移入 conflicts/
+------------------------------------------------------------------------
+【JSON 完整载荷】
+{
+  "timestamp": "2026-10-12T13:38:00.043624+08:00",
+  "repo_root": "F:\\GitHub\\python",
+  "memory_dir": "F:\\GitHub\\python\\docs\\Antigravity\\recheck\\D_memory",
+  "overall_status": "FAIL",
+  "error_count": 3,
+  "warning_count": 0,
+  "errors": [
+    "[Check 7] MEM-9003 (proposals/test_contradiction.md) 位于 proposals/ 候选区却被标为 verified（严禁自动/原地升格）",
+    "[Check 7] MEM-9003 (proposals/test_contradiction.md) 状态为 verified，但 verified_by 为 'auto'（未经有效审核）",
+    "[Check 8] 检测到同一主题 'default_tcp_port' 存在多条矛盾的 proposed 记忆 (MEM-9001, MEM-9002) -> 必须标记为 disputed 并移入 conflicts/"
+  ],
+  "warnings": [],
+  "checks": {
+    "1_required_structure": {
+      "status": "PASS",
+      "detail": "全部 6 个核心文件与 5 个分区目录均存在"
+    },
+    "2_unique_id": {
+      "status": "PASS",
+      "total_records": 10,
+      "duplicates": []
+    },
+    "3_has_source_field": {
+      "status": "PASS",
+      "missing_sources": []
+    },
+    "4_valid_git_sha": {
+      "status": "PASS",
+      "invalid_commits": []
+    },
+    "5_source_file_exists": {
+      "status": "PASS",
+      "missing_source_files": []
+    },
+    "6_code_drift_since_commit": {
+      "status": "PASS",
+      "drifted_sources": []
+    },
+    "7_unreviewed_formal_memory_guard": {
+      "status": "FAIL",
+      "violations": [
+        "MEM-9003 (proposals/test_contradiction.md) 位于 proposals/ 候选区却被标为 verified（严禁自动/原地升格）",
+        "MEM-9003 (proposals/test_contradiction.md) 状态为 verified，但 verified_by 为 'auto'（未经有效审核）"
+      ]
+    },
+    "8_conflict_and_status_check": {
+      "status": "FAIL",
+      "issues": [
+        "检测到同一主题 'default_tcp_port' 存在多条矛盾的 proposed 记忆 (MEM-9001, MEM-9002) -> 必须标记为 disputed 并移入 conflicts/"
+      ]
+    },
+    "9_worktree_and_unmerged_changes": {
+      "status": "PASS",
+      "worktrees": [
+        "F:/GitHub/python"
+      ],
+      "unmerged_conflicts": [],
+      "dirty_files_count": 11
+    },
+    "10_pytest_execution": {
+      "status": "SKIPPED",
+      "detail": "Skipped via --skip-pytest"
+    },
+    "11_needs_human_review": {
+      "status": "INFO",
+      "disclaimer": "脚本通过 ≠ 语义正确。静态检查仅验证文件、Git SHA 与测试通过，语义准确性须人工复核。",
+      "items": [
+        {
+          "id": "MEM-0002",
+          "file": "ARCHITECTURE.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0003",
+          "file": "ARCHITECTURE.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0005",
+          "file": "CONSTRAINTS.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0101",
+          "file": "decisions/001-memorix-shared-memory-baseline.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0004",
+          "file": "INTERFACES.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0001",
+          "file": "PROJECT.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-9001",
+          "file": "proposals/test_contradiction.md",
+          "reason": "候选记忆 (proposed) 或显式标记需人工核验语义真实性"
+        },
+        {
+          "id": "MEM-9002",
+          "file": "proposals/test_contradiction.md",
+          "reason": "候选记忆 (proposed) 或显式标记需人工核验语义真实性"
+        },
+        {
+          "id": "MEM-9003",
+          "file": "proposals/test_contradiction.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0006",
+          "file": "TASKS.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        }
+      ]
+    }
+  }
+}

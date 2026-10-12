@@ -1,0 +1,126 @@
+========================================================================
+Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
+========================================================================
+生成时间    : 2026-10-12T13:51:50.123399+08:00
+仓库根目录  : F:\GitHub\python
+记忆目录    : F:\GitHub\python\memory
+总体结论    : PASS (错误: 0, 警告: 0)
+重要声明    : 脚本通过 ≠ 语义正确。所有无法自动验证的语义判断均已标记为 needs_human_review。
+------------------------------------------------------------------------
+【分项检查摘要】
+  - 1_required_structure: PASS
+  - 2_unique_id: PASS
+  - 3_has_source_field: PASS
+  - 4_valid_git_sha: PASS
+  - 5_source_file_exists: PASS
+  - 6_code_drift_since_commit: PASS
+  - 7_unreviewed_formal_memory_guard: PASS
+  - 8_conflict_and_status_check: PASS
+  - 9_worktree_and_unmerged_changes: PASS
+  - 10_pytest_execution: PASS
+  - 11_needs_human_review: INFO
+------------------------------------------------------------------------
+【JSON 完整载荷】
+{
+  "timestamp": "2026-10-12T13:51:50.123399+08:00",
+  "repo_root": "F:\\GitHub\\python",
+  "memory_dir": "F:\\GitHub\\python\\memory",
+  "overall_status": "PASS",
+  "error_count": 0,
+  "warning_count": 0,
+  "errors": [],
+  "warnings": [],
+  "checks": {
+    "1_required_structure": {
+      "status": "PASS",
+      "detail": "全部 6 个核心文件与 5 个分区目录均存在"
+    },
+    "2_unique_id": {
+      "status": "PASS",
+      "total_records": 7,
+      "duplicates": []
+    },
+    "3_has_source_field": {
+      "status": "PASS",
+      "missing_sources": []
+    },
+    "4_valid_git_sha": {
+      "status": "PASS",
+      "invalid_commits": []
+    },
+    "5_source_file_exists": {
+      "status": "PASS",
+      "missing_source_files": []
+    },
+    "6_code_drift_since_commit": {
+      "status": "PASS",
+      "drifted_sources": []
+    },
+    "7_unreviewed_formal_memory_guard": {
+      "status": "PASS",
+      "violations": []
+    },
+    "8_conflict_and_status_check": {
+      "status": "PASS",
+      "issues": []
+    },
+    "9_worktree_and_unmerged_changes": {
+      "status": "PASS",
+      "worktrees": [
+        "F:/GitHub/python"
+      ],
+      "unmerged_conflicts": [],
+      "dirty_files_count": 12
+    },
+    "10_pytest_execution": {
+      "status": "PASS",
+      "command": "F:\\GitHub\\python\\.venv\\Scripts\\pytest.exe -q",
+      "exit_code": 0,
+      "passed": true,
+      "summary": "41 passed in 23.32s",
+      "stdout_tail": ".........................................                                [100%]\n41 passed in 23.32s",
+      "stderr_tail": ""
+    },
+    "11_needs_human_review": {
+      "status": "INFO",
+      "disclaimer": "脚本通过 ≠ 语义正确。静态检查仅验证文件、Git SHA 与测试通过，语义准确性须人工复核。",
+      "items": [
+        {
+          "id": "MEM-0002",
+          "file": "ARCHITECTURE.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0003",
+          "file": "ARCHITECTURE.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0005",
+          "file": "CONSTRAINTS.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0101",
+          "file": "decisions/001-memorix-shared-memory-baseline.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0004",
+          "file": "INTERFACES.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0001",
+          "file": "PROJECT.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0006",
+          "file": "TASKS.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "userSettings": {
+    "autoExecutionPolicy": "CASCADE_COMMANDS_AUTO_EXECUTION_PROCEED_IN_SANDBOX",
+    "customThemeSeedsDark": {
+      "background": "#282C34",
+      "foregroundOverride": "#ABB2BF",
+      "primary": "#61AFEF"
+    },
+    "globalPermissionGrants": {
+      "allow": [
+        "read_url(linkstatic.com)",
+        "read_url(proxyway.com)",
+        "command(Get-ChildItem -Path \"C:\\Users\\123\\.gemini\\antigravity\\scratch\" -ErrorAction SilentlyContinue)",
+        "command(Get-ChildItem -Path \"C:\\Users\\123\\.gemini\\antigravity\\brain\\fe1f644a-5a6c-4082-a2c4-bdb0b8288f1c\" -Recurse | Select-Object FullName)",
+        "command(Move-Item -Path \"d:\\Obsidian\\00_Inbox\", \"d:\\Obsidian\\01_Projects\", \"d:\\Obsidian\\02_Areas\", \"d:\\Obsidian\\03_Resources\", \"d:\\Obsidian\\04_Archives\", \"d:\\Obsidian\\_System\", \"d:\\Obsidian\\Dashboard.md\" -Destination \"d:\\Obsidian\\PARA\")",
+        "command(Get-ChildItem -Path \"d:\\Obsidian\")",
+        "command(Get-ChildItem -LiteralPath \"d:\\Obsidian\" | Where-Object { $_.Name -like \"*SOP*\" } | Get-ChildItem -Recurse | Select-Object FullName)",
+        "command(Copy-Item -Path \"d:\\Obsidian\\个人SOP\\.obsidian\\plugins\" -Destination \"d:\\Obsidian\\PARA\\.obsidian\\plugins\" -Recurse -Force; Copy-Item -Path \"d:\\Obsidian\\个人SOP\\.obsidian\\themes\" -Destination \"d:\\Obsidian\\PARA\\.obsidian\\themes\" -Recurse -Force; Copy-Item -Path \"d:\\Obsidian\\个人SOP\\.obsidian\\community-plugins.json\" -Destination \"d:\\Obsidian\\PARA\\.obsidian\\community-plugins.json\" -Force)",
+        "command(New-Item -ItemType Directory -Path \"d:\\Obsidian\\PARA\\02_Areas\\嵌入式开发\" -Force; Copy-Item -Path \"d:\\Obsidian\\个人SOP\\04 领域\\单片机\" -Destination \"d:\\Obsidian\\PARA\\02_Areas\\嵌入式开发\\单片机\" -Recurse -Force; Copy-Item -Path \"d:\\Obsidian\\个人SOP\\05 资源\\*\" -Destination \"d:\\Obsidian\\PARA\\03_Resources\" -Recurse -Force; Copy-Item -Path \"d:\\Obsidian\\个人SOP\\06 存档\\正念.md\" -Destination \"d:\\Obsidian\\PARA\\04_Archives\\正念.md\" -Force; New-Item -ItemType Directory -Path \"d:\\Obsidian\\PARA\\00_Inbox\\日记\" -Force; Copy-Item -Path \"d:\\Obsidian\\个人SOP\\01 日记\\2026-07-13__Monday.md\" -Destination \"d:\\Obsidian\\PARA\\00_Inbox\\日记\\2026-07-13__Monday.md\" -Force)",
+        "command(Remove-Item -Path \"d:\\Obsidian\\PARA\\sop_name.txt\", \"d:\\Obsidian\\PARA\\sop_files.txt\" -ErrorAction SilentlyContinue)",
+        "command(Get-ChildItem -Path \"d:\\Obsidian\\公司\" -Recurse | Select-Object -ExpandProperty FullName | Set-Content -Path \"d:\\Obsidian\\PARA\\company_files.txt\" -Encoding utf8)",
+        "command(\"{0:N2} MB\" -f ((Get-ChildItem -Path \"d:\\Obsidian\\公司\" -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1MB))",
+        "command(Get-PSDrive D | Select-Object Name, Used, Free, @{Name=\"FreeGB\";Expression={[math]::Round($_.Free/1GB, 2)}})",
+        "command(Get-ChildItem -Path \"D:\\\" -Force | Select-Object Name, @{Name=\"LengthMB\";Expression={[math]::Round($_.Length/1MB, 2)}})",
+        "command(Copy-Item -Path \"d:\\Obsidian\\公司\\日记\" -Destination \"d:\\Obsidian\\公司PARA\\04_Archives\\2025工作日志\" -Recurse -Force; Copy-Item -Path \"d:\\Obsidian\\公司\\attachments\\*\" -Destination \"d:\\Obsidian\\公司PARA\\_System\\Attachments\" -Recurse -Force; Copy-Item -Path \"d:\\Obsidian\\公司\\00 templates\\*\" -Destination \"d:\\Obsidian\\公司PARA\\_System\\Templates\" -Recurse -Force)",
+        "command(Remove-Item -Path \"d:\\Obsidian\\PARA\\dirs.txt\", \"d:\\Obsidian\\PARA\\company_files.txt\" -ErrorAction SilentlyContinue)",
+        "command(Get-ChildItem -Path \"d:\\Obsidian\\公司PARA\" | Select-Object Name, Mode, LastWriteTime)",
+        "command(Get-ChildItem -Path \"C:\\Users\\123\\.gemini\\antigravity\")",
+        "command($content = Get-Content \"d:\\Obsidian\\公司\\.obsidian\\plugins\\notebook-navigator\\main.js\" -Raw; $matches = [regex]::Matches($content, 'class \\w+.*?homepage', [System.Text.RegularExpressions.RegexOptions]::Singleline); if ($matches.Count -gt 0) { $matches[0].Value.Substring(0, [math]::Min(500, $matches[0].Value.Length)) } else { \"none\" })",
+        "command($content = Get-Content \"d:\\Obsidian\\公司\\.obsidian\\plugins\\notebook-navigator\\main.js\" -Raw; $idx = $content.IndexOf(\"homepageController=\"); if ($idx -ge 0) { $content.Substring([math]::Max(0, $idx - 100), 400) } else { \"not found\" })",
+        "command($content = Get-Content \"d:\\Obsidian\\公司\\.obsidian\\plugins\\notebook-navigator\\main.js\" -Raw; $idx = $content.IndexOf(\"this.homepageController=new\"); if ($idx -ge 0) { $content.Substring([math]::Max(0, $idx - 50), 400) } else { \"not found\" })",
+        "command(Get-ChildItem -Path \"D:\\Obsidian\" -Recurse -Filter \"*未命名*\" | Select-Object FullName, LastWriteTime)",
+        "command(Select-String -Path \"D:\\Obsidian\\公司PARA\\.obsidian\\*.json\" -Pattern \"未命名\")",
+        "command(node -e '\nconst fs = require(\"fs\");\nconst path = require(\"path\");\nfunction scan(dir) {\n  for (const item of fs.readdirSync(dir)) {\n    const full = path.join(dir, item);\n    if (fs.statSync(full).isDirectory()) {\n      if (item !== \".obsidian\") scan(full);\n    } else {\n      if (item.includes(\"未命名\")) console.log(\"Found:\", full);\n    }\n  }\n}\nscan(\"D:/Obsidian/PARA\");\nconsole.log(\"Scan PARA complete.\");\n')",
+        "command(pwsh -ExecutionPolicy Bypass -File 'C:\\Users\\123\\.gemini\\antigravity\\brain\\81dd645b-e6fb-4f66-a93b-f6a9abe68e16\\scratch\\install_13_skills.ps1')",
+        "command(pwsh -Command \"$content = @'\n# Agent 全局行为准则与约束规范\n\n## 1. 语言规范（强制）\n- **必须使用中文回复**：除代码、命令语法、终端输出和专有名词外，所有思考解释、交互说明及生成文档必须严格使用简体中文。\n\n## 2. 技能优先匹配原则（核心）\n- **任务前置检索与匹配**：在处理用户的任何编码、架构设计、文档整理、测试或运维任务前，**必须优先检索并匹配当前已安装的 Skills**。\n- **深度遵循技能工作流**：\n  - 一旦用户任务与某个已安装的 Skill 领域契合（如涉及 Obsidian 笔记/白板、Git 提交规范、Docker 瘦身、SQL 调优、API 设计、TDD 测试等），必须主动激活该技能，并严格遵循其规定的操作标准与最佳实践。\n  - 不得以通用笼统的思路覆盖技能中定义的专业规范。\n\n## 3. 回答风格\n- 保持专业、清晰、精炼，直奔解决问题的核心，避免无关的客套与废话。\n'@; Set-Content -Path 'C:\\Users\\123\\.gemini\\config\\AGENTS.md' -Value $content -Encoding UTF8; Test-Path 'C:\\Users\\123\\.gemini\\config\\AGENTS.md'\")",
+        "command(git status)",
+        "read_file(F:\\GitHub)",
+        "write_file(F:\\GitHub)"
+      ]
+    },
+    "nonWorkspaceFileAccessPolicy": "AGENT_SETTING_POLICY_ASK",
+    "remoteControlHostname": "desktop-efn9mt0-fading-bolt"
+  }
+}

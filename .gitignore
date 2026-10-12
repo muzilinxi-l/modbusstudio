@@ -54,3 +54,10 @@ extra/
 logs/
 *.csv
 settings.json
+
+# One-off verification screenshots / temp artifacts
+test_exe_screenshot.png
+
+# Memorix runtime state (plugin dirs installed into the project; regenerate on demand)
+.agents/
+.claude/

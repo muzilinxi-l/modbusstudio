@@ -1,0 +1,155 @@
+========================================================================
+Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
+========================================================================
+生成时间    : 2026-10-12T13:38:01.286835+08:00
+仓库根目录  : F:\GitHub\python
+记忆目录    : F:\GitHub\python\docs\Antigravity\recheck\F_bad
+总体结论    : FAIL (错误: 4, 警告: 0)
+重要声明    : 脚本通过 ≠ 语义正确。所有无法自动验证的语义判断均已标记为 needs_human_review。
+------------------------------------------------------------------------
+【分项检查摘要】
+  - 1_required_structure: PASS
+  - 2_unique_id: FAIL
+  - 3_has_source_field: FAIL
+  - 4_valid_git_sha: FAIL
+  - 5_source_file_exists: FAIL
+  - 6_code_drift_since_commit: PASS
+  - 7_unreviewed_formal_memory_guard: PASS
+  - 8_conflict_and_status_check: PASS
+  - 9_worktree_and_unmerged_changes: PASS
+  - 10_pytest_execution: SKIPPED
+  - 11_needs_human_review: INFO
+------------------------------------------------------------------------
+【错误详情 (ERRORS)】
+  [X] [Check 2] 重复编号 MEM-0001 同时出现在 PROJECT.md 与 proposals/bad_sample.md
+  [X] [Check 3] 记忆 MEM-8002 (proposals/bad_sample.md) 缺少 source 字段
+  [X] [Check 4] 记忆 MEM-0001 (proposals/bad_sample.md) 的 commit 无效: 'deadbeef99999999999999999999999999999999'
+  [X] [Check 5] 记忆 MEM-8003 (proposals/bad_sample.md) 引用的 source 文件不存在: modbusstudio/ghost_non_existent_module.py
+------------------------------------------------------------------------
+【JSON 完整载荷】
+{
+  "timestamp": "2026-10-12T13:38:01.286835+08:00",
+  "repo_root": "F:\\GitHub\\python",
+  "memory_dir": "F:\\GitHub\\python\\docs\\Antigravity\\recheck\\F_bad",
+  "overall_status": "FAIL",
+  "error_count": 4,
+  "warning_count": 0,
+  "errors": [
+    "[Check 2] 重复编号 MEM-0001 同时出现在 PROJECT.md 与 proposals/bad_sample.md",
+    "[Check 3] 记忆 MEM-8002 (proposals/bad_sample.md) 缺少 source 字段",
+    "[Check 4] 记忆 MEM-0001 (proposals/bad_sample.md) 的 commit 无效: 'deadbeef99999999999999999999999999999999'",
+    "[Check 5] 记忆 MEM-8003 (proposals/bad_sample.md) 引用的 source 文件不存在: modbusstudio/ghost_non_existent_module.py"
+  ],
+  "warnings": [],
+  "checks": {
+    "1_required_structure": {
+      "status": "PASS",
+      "detail": "全部 6 个核心文件与 5 个分区目录均存在"
+    },
+    "2_unique_id": {
+      "status": "FAIL",
+      "total_records": 10,
+      "duplicates": [
+        "重复编号 MEM-0001 同时出现在 PROJECT.md 与 proposals/bad_sample.md"
+      ]
+    },
+    "3_has_source_field": {
+      "status": "FAIL",
+      "missing_sources": [
+        "MEM-8002"
+      ]
+    },
+    "4_valid_git_sha": {
+      "status": "FAIL",
+      "invalid_commits": [
+        "MEM-0001: deadbeef99999999999999999999999999999999"
+      ]
+    },
+    "5_source_file_exists": {
+      "status": "FAIL",
+      "missing_source_files": [
+        "MEM-8003: modbusstudio/ghost_non_existent_module.py"
+      ]
+    },
+    "6_code_drift_since_commit": {
+      "status": "PASS",
+      "drifted_sources": []
+    },
+    "7_unreviewed_formal_memory_guard": {
+      "status": "PASS",
+      "violations": []
+    },
+    "8_conflict_and_status_check": {
+      "status": "PASS",
+      "issues": []
+    },
+    "9_worktree_and_unmerged_changes": {
+      "status": "PASS",
+      "worktrees": [
+        "F:/GitHub/python"
+      ],
+      "unmerged_conflicts": [],
+      "dirty_files_count": 11
+    },
+    "10_pytest_execution": {
+      "status": "SKIPPED",
+      "detail": "Skipped via --skip-pytest"
+    },
+    "11_needs_human_review": {
+      "status": "INFO",
+      "disclaimer": "脚本通过 ≠ 语义正确。静态检查仅验证文件、Git SHA 与测试通过，语义准确性须人工复核。",
+      "items": [
+        {
+          "id": "MEM-0002",
+          "file": "ARCHITECTURE.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0003",
+          "file": "ARCHITECTURE.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0005",
+          "file": "CONSTRAINTS.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0101",
+          "file": "decisions/001-memorix-shared-memory-baseline.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0004",
+          "file": "INTERFACES.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0001",
+          "file": "PROJECT.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0001",
+          "file": "proposals/bad_sample.md",
+          "reason": "候选记忆 (proposed) 或显式标记需人工核验语义真实性"
+        },
+        {
+          "id": "MEM-8002",
+          "file": "proposals/bad_sample.md",
+          "reason": "候选记忆 (proposed) 或显式标记需人工核验语义真实性"
+        },
+        {
+          "id": "MEM-8003",
+          "file": "proposals/bad_sample.md",
+          "reason": "候选记忆 (proposed) 或显式标记需人工核验语义真实性"
+        },
+        {
+          "id": "MEM-0006",
+          "file": "TASKS.md",
+          "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        }
+      ]
+    }
+  }
+}
