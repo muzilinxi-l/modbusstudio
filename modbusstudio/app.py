@@ -5,8 +5,10 @@ Modbus Studio - 核心应用装配器 (Application Coordinator)
 """
 
 from __future__ import annotations
+import logging
 import os
 import sys
+import threading
 import tkinter as tk
 from typing import Optional
 
@@ -104,11 +106,23 @@ class ModbusStudioAppCore:
     def shutdown(self) -> None:
         """优雅关闭：释放所有从机监听与客户端连接"""
         self.logging_service.post("SYS", 0, "正在关闭系统服务并释放网络/串口端口...")
-        for dev in self.slave_service.get_devices():
-            if dev.is_running:
-                self.slave_service.stop_slave(dev.id)
+        # [SLAVE-SPEED-5] 将从机逐个停止循环移入后台 daemon 线程，防止主线程阻塞卡死窗口关闭
+        done_evt = threading.Event()
+        devices = list(self.slave_service.get_devices())
+
+        def _stop_slaves_bg() -> None:
+            try:
+                for dev in devices:
+                    if dev.is_running:
+                        self.slave_service.stop_slave(dev.id)
+            finally:
+                done_evt.set()
+
+        threading.Thread(target=_stop_slaves_bg, daemon=True).start()
         if self.poll_service.is_connected:
             self.poll_service.disconnect()
+        if not done_evt.wait(timeout=2.0):
+            logging.getLogger("App").warning("shutdown: 后台停止从机超过 2.0s 上限，继续退出主窗口")
         self.logging_service.close()
 
 

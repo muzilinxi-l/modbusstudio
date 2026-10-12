@@ -9,6 +9,7 @@ Modbus Studio - 从机模拟工作台面板 (Slave Panel)
 from __future__ import annotations
 import logging
 import os
+import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -56,6 +57,8 @@ class SlavePanel(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._current_device_id: Optional[str] = None
+        # [SLAVE-SPEED-4] 防止全部启动/全部停止重复点击并发重入的守卫标志
+        self._busy: Dict[str, bool] = {"start": False, "stop": False}
 
         self._build_ui()
         self._load_initial_data()
@@ -590,29 +593,65 @@ class SlavePanel(ttk.Frame):
         self._update_status_indicator(device)
 
     def _start_all_slaves(self) -> None:
-        devices = self.app.slave_service.get_devices()
-        fail_msgs = []
-        for dev in devices:
-            if not dev.is_running:
-                ok, msg = self.app.slave_service.start_slave(dev.id)
-                if not ok:
-                    fail_msgs.append(f"[{dev.name}]: {msg}")
-        if self._current_device_id:
-            dev = self.app.slave_service.get_device(self._current_device_id)
-            if dev:
-                self._update_status_indicator(dev)
-        if fail_msgs:
-            messagebox.showwarning("部分从机启动提示", "以下从机未能成功启动：\n" + "\n".join(fail_msgs[:5]))
+        if self._busy.get("start"):
+            return
+        self._busy["start"] = True
+        devices = list(self.app.slave_service.get_devices())
+        root = self.winfo_toplevel()
+
+        def _worker() -> None:
+            fail_msgs: List[str] = []
+            try:
+                for dev in devices:
+                    if not dev.is_running:
+                        ok, msg = self.app.slave_service.start_slave(dev.id)
+                        if not ok:
+                            fail_msgs.append(f"[{dev.name}]: {msg}")
+            finally:
+                self._busy["start"] = False
+
+            def _on_done() -> None:
+                if self._current_device_id:
+                    dev = self.app.slave_service.get_device(self._current_device_id)
+                    if dev:
+                        self._update_status_indicator(dev)
+                if fail_msgs:
+                    messagebox.showwarning("部分从机启动提示", "以下从机未能成功启动：\n" + "\n".join(fail_msgs[:5]))
+
+            try:
+                root.after(0, _on_done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _stop_all_slaves(self) -> None:
-        devices = self.app.slave_service.get_devices()
-        for dev in devices:
-            if dev.is_running:
-                self.app.slave_service.stop_slave(dev.id)
-        if self._current_device_id:
-            dev = self.app.slave_service.get_device(self._current_device_id)
-            if dev:
-                self._update_status_indicator(dev)
+        if self._busy.get("stop"):
+            return
+        self._busy["stop"] = True
+        devices = list(self.app.slave_service.get_devices())
+        root = self.winfo_toplevel()
+
+        def _worker() -> None:
+            try:
+                for dev in devices:
+                    if dev.is_running:
+                        self.app.slave_service.stop_slave(dev.id)
+            finally:
+                self._busy["stop"] = False
+
+            def _on_done() -> None:
+                if self._current_device_id:
+                    dev = self.app.slave_service.get_device(self._current_device_id)
+                    if dev:
+                        self._update_status_indicator(dev)
+
+            try:
+                root.after(0, _on_done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     # [SLAVE-RECONNECT] 自动重连按钮回调：触发底层僵死 listener 探活自愈重建
     def _on_auto_reconnect(self) -> None:

@@ -371,6 +371,8 @@ class ModbusTransportServer:
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
         # [SLAVE-RECONNECT] 记录 start() 时刻，供 is_healthy() 做 0.3s 启动宽限判断
         self._start_ts: float = time.time()
+        # [SLAVE-SPEED-1] 启动就绪事件：替代 30×0.03s 固定盲等循环
+        self._ready = threading.Event()
 
     @property
     def is_running(self) -> bool:
@@ -455,16 +457,18 @@ class ModbusTransportServer:
                 self._thread = None
             self._server = None
             self._server_task = None
+        self._ready.clear()
         self._is_running = True
         self._start_ts = time.time()
         self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
         self._thread.start()
-        for _ in range(30):
-            if self._server:
-                break
-            time.sleep(0.03)
+        # [SLAVE-SPEED-1] 事件驱动等待后台 listener 就绪，取代 30×0.03s 固定盲等
+        self._ready.wait(timeout=1.0)
+        if not self._server:
+            logger.warning(f"ModbusTransportServer {self.endpoint_key} 1s 内未就绪")
 
     # [REVIEW-FIX-3] 完善 stop() 资源彻底回收：取消 task 并在事件循环中安全 await shutdown()，避免 socket 与 loop 句柄泄漏
+    # [SLAVE-SPEED-2] 将清理与线程 join 超时上限从 2.0s+3.0s 压缩至 1.0s+1.0s
     def stop(self) -> None:
         self._is_running = False
         if self._loop and self._loop.is_running():
@@ -485,12 +489,12 @@ class ModbusTransportServer:
 
             try:
                 fut = asyncio.run_coroutine_threadsafe(_cleanup(), self._loop)
-                fut.result(timeout=2.0)
+                fut.result(timeout=1.0)
             except Exception as e:
                 logger.debug(f"stop() 通知 loop 清理超时或异常: {e}")
 
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
+            self._thread.join(timeout=1.0)
             if self._thread.is_alive():
                 logger.warning(f"ModbusTransportServer 后台服务线程 join 超时 ({self.endpoint_key})")
 
@@ -499,6 +503,7 @@ class ModbusTransportServer:
         self._loop = None
         self._server = None
         self._server_task = None
+        self._ready.clear()
 
     def _run_server_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -527,10 +532,12 @@ class ModbusTransportServer:
                         trace_packet=self._on_trace_packet,
                     )
                 self._server_task = asyncio.create_task(self._server.serve_forever())
+                self._ready.set()
                 await self._server_task
             except asyncio.CancelledError:
-                pass
+                self._ready.set()
             except Exception as e:
+                self._ready.set()
                 logger.error(f"ModbusTransportServer 运行异常 ({self.endpoint_key}): {e}")
                 if self.on_packet_log:
                     self.on_packet_log(f"[服务异常崩溃] 无法监听 {self.endpoint_key}: {e}", "ERROR")
@@ -538,6 +545,7 @@ class ModbusTransportServer:
         try:
             self._loop.run_until_complete(_serve())
         finally:
+            self._ready.set()
             # [REVIEW-FIX-3] 确保在子线程结束时关闭事件循环，无 loop 句柄泄漏
             try:
                 self._loop.close()
@@ -749,6 +757,8 @@ class ModbusSlaveEngine:
         self.points: Dict[Union[int, Tuple[str, int]], Dict[str, Any]] = {}
         self._sim_thread: Optional[threading.Thread] = None
         self._sim_running = False
+        # [SLAVE-SPEED-3] 仿真线程可唤醒退出事件：取代固定 1s 睡眠盲等
+        self._sim_stop_evt = threading.Event()
         # 外部通信问询与响应报文回调: (message, level) -> None
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
         # 模拟点位数值实时变动通知回调: (area, address, new_val) -> None
@@ -780,6 +790,7 @@ class ModbusSlaveEngine:
         self._is_running = True
 
         # 启动模拟数据定时刷新线程
+        self._sim_stop_evt.clear()
         self._sim_running = True
         self._sim_thread = threading.Thread(target=self._run_simulation_loop, daemon=True)
         self._sim_thread.start()
@@ -787,13 +798,15 @@ class ModbusSlaveEngine:
     def stop(self) -> None:
         """停止从机服务并从物理传输中枢安全注销 (最后从机停止时释放端口)."""
         self._sim_running = False
+        self._sim_stop_evt.set()
         self._is_running = False
 
         hub = ModbusServerHub.get_instance()
         hub.unregister_and_stop_slave(self)
 
         if self._sim_thread:
-            self._sim_thread.join(timeout=1.0)
+            self._sim_stop_evt.set()
+            self._sim_thread.join(timeout=0.3)
             self._sim_thread = None
 
     def _on_trace_packet(self, sending: bool, data: bytes) -> bytes:
@@ -902,8 +915,11 @@ class ModbusSlaveEngine:
         import math
         import random
 
-        while self._sim_running:
-            time.sleep(1.0)
+        while self._sim_running and not self._sim_stop_evt.is_set():
+            if self._sim_stop_evt.wait(1):
+                break
+            if not self._sim_running or self._sim_stop_evt.is_set():
+                break
             step = (step + 1) % 100000
 
             # 制作字典项安全快照，防止多线程迭代期间大小并发变动
