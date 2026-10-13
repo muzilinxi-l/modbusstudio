@@ -21,5 +21,5 @@ scope: F:/GitHub/python @ 2.0.0
 - **编解码器接口（`modbusstudio/modbus_codec.py`）**：
   - 支持数据类型：`BOOL`、`INT16`、`UINT16`、`INT32`、`UINT32`、`FLOAT32`、`FLOAT64`、`STRING`、`HEX16`。
   - 支持字节序变位：`ABCD`、`CDAB`、`BADC`、`DCBA`。
-- **HEMS 业务适配接口（`modbusstudio/hems_db_loader.py` & `modbusstudio/hems_pairing.py`）**：
+- **ENERGY 业务适配接口（`modbusstudio/hems_db_loader.py` & `modbusstudio/hems_pairing.py`）**：
   - 解析 `extra/hems.cdb`（SQLite/CDB 格式）中的设备模型与点表定义，并基于 `More` 字段推导储能 PCS、BMS、光伏逆变器配对关系。

@@ -185,7 +185,7 @@ if address >= 1 and address < len(values_list):
 
 - 只改 `modbus_engine.py`、必要的 `models.py` / `services.py` 点表写入入口、以及
   `tests/test_multi_station_concurrency.py`（仅当测试隐式依赖了缺陷 1/2 的旧行为时）。
-- **不改** UI（`modbusstudio/ui/`）、`app.py` 装配、HEMS 导入逻辑。
+- **不改** UI（`modbusstudio/ui/`）、`app.py` 装配、ENERGY 导入逻辑。
 - 每处改动上方加一行注释：`# [REVIEW-FIX-1..6] 说明`，便于审查方定位。
 - 全部改完后：`.venv\Scripts\python.exe -m pytest tests -v` 必须全绿，不得新增失败。
   注：`test_exe_launch_and_window_zoomed` 属于**偶发 EXE/窗口状态 flake**（基线 34/34 全绿，

@@ -18,7 +18,7 @@
 ## 一、必修（数据 / 端口正确性，优先）
 
 ### H1 — `hems_pairing.py:83` 字节序硬编码 CDAB，丢失格式自带变位　【08 配套漏接】
-- **问题**：`PairingRule.__init__` 里 `self.byte_order = ByteOrderMode.CDAB` 一刀切。而 `map_db_format_to_data_type(target_format or src_format)` 已正确解析出 44 种 HEMS 格式各自的数据类型与字节序，`hems_db_loader.py:69` 也**已经提供**了正确工具函数 `map_db_format_to_byte_order(fmt_str, default_mode)`，单点导入路径 `hems_db_loader.py:344` 用的是它——**唯独 `hems_pairing.py` 没接**。
+- **问题**：`PairingRule.__init__` 里 `self.byte_order = ByteOrderMode.CDAB` 一刀切。而 `map_db_format_to_data_type(target_format or src_format)` 已正确解析出 44 种 ENERGY 格式各自的数据类型与字节序，`hems_db_loader.py:69` 也**已经提供**了正确工具函数 `map_db_format_to_byte_order(fmt_str, default_mode)`，单点导入路径 `hems_db_loader.py:344` 用的是它——**唯独 `hems_pairing.py` 没接**。
 - **复现证据**（子代理实测）：`target_format=32` → dtype=FLOAT32 但 byte_order=CDAB（定义里 32 应是 ABCD）；`target_format=37` → dtype=DOUBLE64 但 byte_order=CDAB（应是 BADC）。同组寄存器按 ABCD 解 3.14159，按 CDAB 解 ≈0。
 - **修复**：`self.byte_order = map_db_format_to_byte_order(target_format or src_format, default_mode=ByteOrderMode.CDAB)`；在 `hems_pairing.py` 顶部 `from modbusstudio.hems_db_loader import map_db_format_to_byte_order`（或从 codec 导，看现有 import 习惯，**保持与 344 行同款来源**避免双份实现）。
 - **回归测试**：新建/扩 `tests/test_hems_pairing.py`，构造 3 条 32/64 位 FORWARD 配对（格式 32/37/34），断言 `rule.byte_order` 分别为 ABCD/BADC/CDAB，不再是清一色 CDAB。

@@ -14,7 +14,7 @@ scope: F:/GitHub/python @ 2.0.0
 ```
 
 - **项目名称**：`modbusstudio`（Modbus Studio 2.0）
-- **项目定位**：现代多从机/主机仿真工作站与 HEMS 业务数据库联调平台（Modbus Slave 多从机模拟 + Modbus Poll 主机轮询二合一）。
+- **项目定位**：现代多从机/主机仿真工作站与 ENERGY 业务数据库联调平台（Modbus Slave 多从机模拟 + Modbus Poll 主机轮询二合一）。
 - **Python 环境**：要求 `>=3.10`，本地虚拟环境位于 `F:/GitHub/python/.venv`（实测 Python 3.14.7）。
 - **核心依赖**：`pymodbus>=3.8.0`、`pyserial>=3.5`、`pillow>=10.0.0`、`ttkbootstrap>=2.2.0`。
 - **启动入口**：`python -m modbusstudio` 或 `modbusstudio/app.py:main`。

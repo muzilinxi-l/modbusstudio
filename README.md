@@ -1,6 +1,6 @@
-# Modbus Studio 2.0 - 现代 Modbus 多从机/主机仿真工作站与 HEMS 业务数据库联调平台
+# Modbus Studio 2.0 - 现代 Modbus 多从机/主机仿真工作站与 ENERGY 业务数据库联调平台
 
-专为现代工业协议调试与 HEMS 能源微电网业务打造的 **Modbus Slave 多从机模拟 + Modbus Poll 主机轮询（二合一）** 工业工作站。
+专为现代工业协议调试与 ENERGY 能源微电网业务打造的 **Modbus Slave 多从机模拟 + Modbus Poll 主机轮询（二合一）** 工业工作站。
 
 ---
 
@@ -23,7 +23,7 @@
    - 彻底遵循工业级 Modbus 官方协议（MBAP Header Unit ID 动态寻址）：支持同一 IP:Port（如 `0.0.0.0:502`）或同一个串口总线挂载数十个不同站地址（Unit ID）的从机并发通信。
    - 物理传输层与逻辑从机解耦，各从机点表与波形模拟（正弦波等）完全物理隔离，独立启停互不影响。
    - 详见深度架构文档：[MULTI_STATION_ARCHITECTURE.md](file:///F:/GitHub/python/MULTI_STATION_ARCHITECTURE.md)。
-6. **HEMS 业务数据库深度联动**：
+6. **ENERGY 业务数据库深度联动**：
    - 适配 `extra/hems.cdb`（支持 SQLite/CDB 格式），支持一键载入 `app` 表业务设备模型并抽取真实点表。
    - 内置业务配对中心 (基于 More 字段)，支持储能 PCS、BMS、光伏逆变器变量路由映射。
 
@@ -52,13 +52,13 @@
 │   │
 │   ├── modbus_engine.py   # 通信引擎 (多从机服务、主机轮询、报文钩子)
 │   ├── modbus_codec.py    # 编解码器 (全类型与 4 种变位模式算法)
-│   ├── hems_db_loader.py  # HEMS 业务数据库 (extra/hems.cdb) 适配器
+│   ├── hems_db_loader.py  # ENERGY 业务数据库 (extra/hems.cdb) 适配器
 │   └── hems_pairing.py    # 业务配对关系推导与解析算法
 │
 ├── tests/                 # 自动化测试用例集
 │   ├── test_codec.py      # 编解码往返精度与变位单测
 │   ├── test_engine.py     # 业务服务、点位构建与端口防冲突单测
-│   └── test_hems_import.py# HEMS 数据库解析与点表抽取单测
+│   └── test_hems_import.py# ENERGY 数据库解析与点表抽取单测
 │
 ├── docs/                  # 技术设计文档与规范说明
 └── ModbusStudio.spec      # Windows PyInstaller 打包配置

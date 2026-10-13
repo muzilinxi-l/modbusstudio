@@ -1,4 +1,4 @@
-# PROMPT：数据类型编号与 HEMS 数据库 menu.value 对齐（08）
+# PROMPT：数据类型编号与 ENERGY 数据库 menu.value 对齐（08）
 
 > 用途：发给 **Antigravity** 执行。
 > 执行完成后在 `docs/Antigravity/08_DATATYPE_MENU_ALIGN_REPORT.md` 出报告，Claude 复核。
@@ -27,7 +27,7 @@ Claude 已读 `extra/hems.cdb` 的 `menu` 表（权威定义）与 `modbusstudio
 
 ## 一、权威基准：`menu` 表 `Variable Transfer Format` 完整编号（照此重写，不得擅改）
 
-Claude 已从 `extra/hems.cdb` 的 `menu` 表 dump 出全部 `menu_name = 'Variable Transfer Format'` 的记录。**这是 HEMS 数据库类型的唯一权威定义，重写 `HEMS_TYPE_DEFINITIONS` 的数字键必须与下表逐项一致**：
+Claude 已从 `extra/hems.cdb` 的 `menu` 表 dump 出全部 `menu_name = 'Variable Transfer Format'` 的记录。**这是 ENERGY 数据库类型的唯一权威定义，重写 `HEMS_TYPE_DEFINITIONS` 的数字键必须与下表逐项一致**：
 
 | menu.value | 英文名 (eng_name) | 中文名 (chn_name) | 应映射的 ModbusDataType | 占寄存器数 |
 |:---:|---|---|---|:---:|
@@ -103,8 +103,8 @@ Claude 已从 `extra/hems.cdb` 的 `menu` 表 dump 出全部 `menu_name = 'Varia
    - 照项目已有先例 `AreaType.friendly_name`（`models.py:82`）做**显示层包装**：给下拉加一个"比特"友好显示（如显示 `BOOL(比特)`），`values` 用友好名、选中后**仍映射回底层 `"BOOL"` 原值**写进 `ModbusPoint.data_type`，序列化链路完全不变。
    - 顺带修一处隐患：`slave_panel.py:74` 的 `DATA_TYPE_CHOICES` 里有 `"FLOAT64"`，但 `ModbusDataType` 枚举值是 `"DOUBLE64"`（**没有 `"FLOAT64"`**），下拉选 `"FLOAT64"` 会在 `ModbusDataType["FLOAT64"]` 反序列化时 `KeyError`。**本单一并修**：把该项改为 `"DOUBLE64"`（显示可写 `DOUBLE64(双精度)`），与枚举对齐。报告里注明此连带修复。
 
-### 2.4 回归测试（注意：`tests/test_codec.py` 目前 0 条 HEMS 用例，需从零建）
-- 在 `tests/test_codec.py` 新建（现无 HEMS 相关用例）：对第一节 menu 表的**每个数字键**（1~43）逐一断言 `parse_hems_type(n)` 的 (dtype, 寄存器数) 与表一致；重点断言 `1→BOOL`、`4→INT16`、`8→INT32`、`32→FLOAT32`、`43→DOUBLE64`、`0→None`。
+### 2.4 回归测试（注意：`tests/test_codec.py` 目前 0 条 ENERGY 用例，需从零建）
+- 在 `tests/test_codec.py` 新建（现无 ENERGY 相关用例）：对第一节 menu 表的**每个数字键**（1~43）逐一断言 `parse_hems_type(n)` 的 (dtype, 寄存器数) 与表一致；重点断言 `1→BOOL`、`4→INT16`、`8→INT32`、`32→FLOAT32`、`43→DOUBLE64`、`0→None`。
 - 补"数字 vs 名称一致"用例：`parse_hems_type("4")` 与 `parse_hems_type("Signed short 1")` 结果相同。
 - 扩 `tests/test_hems_import.py`：构造 `Variable Transfer Format = "1"`（Bit）的点位，断言导入后 `data_type == BOOL`（这是用户反馈的核心场景，此前会变成 INT16）。
 
@@ -127,6 +127,6 @@ Claude 已从 `extra/hems.cdb` 的 `menu` 表 dump 出全部 `menu_name = 'Varia
 - [ ] 字节序取值与改动前逐段一致（报告附对照）。
 - [ ] `map_db_format_to_data_type` 对 `"Bit"/"bit"/"Bool"/"bool"` 均归 BOOL。
 - [ ] UI 下拉（仅 `slave_panel.py`）能显示"比特"，选中写回底层 `"BOOL"`；`FLOAT64` 隐患项已改 `DOUBLE64`；底层枚举值未变。
-- [ ] `tests/test_codec.py` 从零建 HEMS 用例（原 0 条），逐数字键断言 + 数字/名称一致性。
+- [ ] `tests/test_codec.py` 从零建 ENERGY 用例（原 0 条），逐数字键断言 + 数字/名称一致性。
 - [ ] pytest 全量通过，无 skip 掩盖真实失败；verify.py PASS。
 - [ ] 无图片产物、无进程被杀、archive 未动。

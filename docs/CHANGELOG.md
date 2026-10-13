@@ -1,6 +1,6 @@
 # Modbus Studio 项目开发与增删改记录 (CHANGELOG)
 
-本文档系统记录了 **Modbus Studio（工业级 Modbus 仿真调试工作站与 HEMS 业务数据库联调工具）** 的完整开发演进过程、架构设计决策及代码增删改明细。
+本文档系统记录了 **Modbus Studio（工业级 Modbus 仿真调试工作站与 ENERGY 业务数据库联调工具）** 的完整开发演进过程、架构设计决策及代码增删改明细。
 
 ---
 
@@ -10,7 +10,7 @@
 | :--- | :--- | :--- |
 | **v1.0.0** | Modbus 通信基础与核心编解码 | `modbus_codec.py`, `modbus_engine.py`, 基础测试脚本 |
 | **v1.1.0** | 桌面 GUI 工作站与批量变位控制 | `modbus_studio.py` (Slave + Poll 双模式, 批量规则生成) |
-| **v1.2.0** | HEMS 业务数据库深度融合与南/北向配对 | `hems_db_loader.py`, `hems_pairing.py`, 数据库导入面板 |
+| **v1.2.0** | ENERGY 业务数据库深度融合与南/北向配对 | `hems_db_loader.py`, `hems_pairing.py`, 数据库导入面板 |
 | **v1.3.0** | 独立可执行程序打包与定制图标 | `app.ico`, `build_exe.bat`, `dist/ModbusStudio.exe` |
 | **v1.4.0** | 业务库导入严格权限控制与多实例多端口监听 | `hems_db_loader.py`, `modbus_studio.py` (Type 1 仅限 Slave, Type 2 仅限 Poll, 独立 IP:Port 监听实例) |
 | **v1.6.0** | 动态模拟强类型安全、44类工业体系、从机报文监控与CSV导出 | `modbus_codec.py`, `modbus_engine.py`, `modbus_studio.py` |
@@ -51,7 +51,7 @@
   - 从机 Tab 与主机 Tab 均增加 `以太网 (TCP)` 与 `串行端口 (Modbus RTU / 485 / 232)` 单选切换开关，自适应切换参数面板。
   - 串口号下拉框具备自动检测与一键 `🔄 刷新` 功能。
   - 支持多串口从机实例并发独立监听不同的 COM 口，支持 `⚡ 全部启动` 与 `⏹ 全部停止`。
-  - 从 HEMS 数据库导入时，自动将串口应用识别并配置为 RTU 从机或 Poll 目标，依次自动分配可用 COM 端口。
+  - 从 ENERGY 数据库导入时，自动将串口应用识别并配置为 RTU 从机或 Poll 目标，依次自动分配可用 COM 端口。
 
 ---
 
@@ -115,7 +115,7 @@
 
 ---
 
-### 4. HEMS 业务数据库深度集成 (`hems_db_loader.py` & `hems_pairing.py`)
+### 4. ENERGY 业务数据库深度集成 (`hems_db_loader.py` & `hems_pairing.py`)
 > **背景**：业务场景在 `extra/hems.cdb` SQLite 数据库的 `app` 配置层中维护了完整的物联网南向设备与北向转发关系，用户需要在测试平台中直接复用与验证这些配置。
 
 - **[新增] 数据库解析器 (`hems_db_loader.py`)**：

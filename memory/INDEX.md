@@ -7,8 +7,8 @@
 | 文件路径 | 职责说明 |
 |---|---|
 | [`memory/PROJECT.md`](file:///F:/GitHub/python/memory/PROJECT.md) | 项目定位、版本、核心技术栈、入口与运行命令 |
-| [`memory/ARCHITECTURE.md`](file:///F:/GitHub/python/memory/ARCHITECTURE.md) | 分层架构（UI / Services / Engine / Codec / HEMS）、Server Hub 多从机并发模型 |
-| [`memory/INTERFACES.md`](file:///F:/GitHub/python/memory/INTERFACES.md) | 核心服务接口、编解码接口、HEMS 数据库加载与配对接口 |
+| [`memory/ARCHITECTURE.md`](file:///F:/GitHub/python/memory/ARCHITECTURE.md) | 分层架构（UI / Services / Engine / Codec / ENERGY）、Server Hub 多从机并发模型 |
+| [`memory/INTERFACES.md`](file:///F:/GitHub/python/memory/INTERFACES.md) | 核心服务接口、编解码接口、ENERGY 数据库加载与配对接口 |
 | [`memory/CONSTRAINTS.md`](file:///F:/GitHub/python/memory/CONSTRAINTS.md) | 架构红线、多 Agent 严格分区规则、安全与提交约束 |
 | [`memory/TASKS.md`](file:///F:/GitHub/python/memory/TASKS.md) | 当前活跃任务、已完成里程碑与 Agent 分工状态 |
 | [`memory/verify.py`](file:///F:/GitHub/python/memory/verify.py) | 防失真自动验证脚本（含 Git SHA / 文件核验 / 状态检查 / 自动运行 pytest） |

@@ -59,7 +59,7 @@
 | 3 | `modbusstudio/modbus_codec.py` | 458 | 4 种字节序（ABCD/CDAB/DCBA/BADC）的 `struct` 编码/解码、int16 负数补码、uint16、float32、bool |
 | 4 | `modbusstudio/modbus_engine.py` | 1363 | **核心**：`ModbusTransportServer` 事件驱动启停（`_ready`/`_sim_stop_evt`）、`MultiStationServerContext` 按 device_id 路由、`ModbusServerHub` 单例、`ModbusSlaveEngine` 仿真线程、半死重建 `[SLAVE-RESTART]` 分支、`POLL_CONFIG` 轮询循环 |
 | 5 | `modbusstudio/services.py` | 650 | 服务层（DataService、SlaveService、PollService 等）职责与调用关系 |
-| 6 | `modbusstudio/hems_db_loader.py` | 481 | 现场 .db 数据库的读取与 HEMS 导入逻辑、字段映射、异常处理 |
+| 6 | `modbusstudio/hems_db_loader.py` | 481 | 现场 .db 数据库的读取与 ENERGY 导入逻辑、字段映射、异常处理 |
 | 7 | `modbusstudio/hems_pairing.py` | 202 | 配对规则、引擎加载 |
 | 8 | `modbusstudio/ui/main_window.py` | 414 | Tkinter 主窗口、主题切换、面板组合 |
 | 9 | `modbusstudio/ui/slave_panel.py` | 986 | 从机面板、`_busy` 防重入、`_start_all_slaves`/`_stop_all_slaves` 后台线程 + `root.after(0, ...)` 回主线程 |
