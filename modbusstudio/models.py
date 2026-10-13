@@ -15,7 +15,26 @@ from enum import Enum
 # 导入 typing 类型构造器：为点表复合键 Dict[Tuple[str, int], ModbusPoint] 等复杂结构提供精确的静态类型提示
 from typing import Any, Dict, List, Optional, Tuple, Union
 # 导入 time：用于 PollResult 默认记录轮询结果产生的精确 Unix 纪元秒数
+import logging
 import time
+
+logger = logging.getLogger("ModbusStudioModels")
+
+
+def _parse_port(val: Any, default: int = 502) -> int:
+    """将输入安全转换为合法的 TCP 端口号 (1~65535)，遇到非数字、越界或异常时记录警告并回退到 default。"""
+    if val is None:
+        return default
+    s = str(val).strip()
+    try:
+        p = int(s)
+        if 1 <= p <= 65535:
+            return p
+        logger.warning(f"端口数值越界 ({s})，回退默认端口 {default}")
+        return default
+    except (ValueError, TypeError):
+        logger.warning(f"无法解析端口 ({s})，回退默认端口 {default}")
+        return default
 
 
 # =============================================================================
@@ -401,9 +420,9 @@ class ConnectionConfig:
         return cls(
             # 解析通信介质，缺失时默认走 TCP
             comm_type=CommType.from_str(d.get("comm_type", "TCP")),
-            # 强转主机地址与端口号
+            # 强转主机地址与端口号（通过 _parse_port 防御非法输入与越界）
             host=str(d.get("host", "127.0.0.1")),
-            port=int(d.get("port", 502)),
+            port=_parse_port(d.get("port", 502), default=502),
             # 强转串口名称、波特率、数据位、校验位、停止位
             com_port=str(d.get("com_port", "COM1")),
             baudrate=int(d.get("baudrate", 9600)),

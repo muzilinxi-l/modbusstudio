@@ -3,13 +3,19 @@ Modbus Studio EXE 自动化集成与冒烟自测脚本
 通过 Windows API 控制进程生命周期、探测主窗口与最大化状态、抓取界面画面验证
 """
 
-import ctypes
 import os
 import subprocess
 import sys
 import time
+import pytest
+
+if sys.platform != "win32":
+    pytest.skip("仅在 Windows 平台执行 EXE 冒烟测试", allow_module_level=True)
+
+pytest.importorskip("PIL")
 from PIL import ImageGrab
 
+import ctypes
 user32 = ctypes.windll.user32
 
 try:

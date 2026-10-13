@@ -217,8 +217,9 @@ class PointService:
             elif dt_enum == DataType.STRING:
                 val_converted = str(val_input)
             elif dt_enum == DataType.HEX16:
-                s_hex = str(val_input).strip()
-                val_converted = int(s_hex, 16) if s_hex.startswith("0x") else int(s_hex, 16)
+                s_hex = str(val_input).strip().lower()
+                s_hex_clean = s_hex[2:] if s_hex.startswith("0x") else s_hex
+                val_converted = int(s_hex_clean, 16)
         except Exception as e:
             return False, None, f"数值格式与类型 {dt_enum.value} 不匹配: {e}"
 
@@ -348,6 +349,32 @@ class SlaveService:
         self._devices[device.id] = device
         # 从 [register_device] 返回执行结果给调用方，结束当前处理分支
         return True, "注册成功"
+
+    def get_occupied_tcp_ports(self) -> set:
+        """获取所有已注册 TCP 从机及活跃 ModbusServerHub listener 所占用的端口集合。"""
+        ports = set()
+        for d in self._devices.values():
+            if d.conn_config and d.conn_config.comm_type == CommType.TCP:
+                ports.add(d.conn_config.port)
+        hub = ModbusServerHub.get_instance()
+        with hub._lock:
+            for ep in hub._servers.keys():
+                if ep and ep[0] == "TCP" and len(ep) >= 3:
+                    try:
+                        ports.add(int(ep[2]))
+                    except Exception:
+                        pass
+        return ports
+
+    def get_next_available_tcp_port(self, start_port: int = 502, extra_occupied: Optional[set] = None) -> int:
+        """从 start_port 起逐一探测首个未被占用的 TCP 端口（自动避让已有设备及活跃监听）。"""
+        occupied = self.get_occupied_tcp_ports()
+        if extra_occupied:
+            occupied.update(extra_occupied)
+        cand = start_port
+        while cand in occupied:
+            cand += 1
+        return cand
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [remove_device]（入参: device_id）：封装该操作的输入校验、状态转换与异常兜底逻辑

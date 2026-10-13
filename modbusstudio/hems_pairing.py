@@ -15,11 +15,21 @@ from typing import Any, Dict, List, Optional, Tuple
 # 2. 当在单文件调试或部分独立脚本测试场景下直接导入时，回退到同级模块名导入；
 # 3. 这种兼容策略避免了因工作目录或启动入口不同而抛出 ImportError。
 try:
-    from .hems_db_loader import HemsAppModel, HemsDatabase, map_db_format_to_data_type
+    from .hems_db_loader import (
+        HemsAppModel,
+        HemsDatabase,
+        map_db_format_to_byte_order,
+        map_db_format_to_data_type,
+    )
     from .modbus_codec import ByteOrderMode, ModbusDataType
     from .modbus_engine import AreaType
 except ImportError:
-    from hems_db_loader import HemsAppModel, HemsDatabase, map_db_format_to_data_type
+    from hems_db_loader import (
+        HemsAppModel,
+        HemsDatabase,
+        map_db_format_to_byte_order,
+        map_db_format_to_data_type,
+    )
     from modbus_codec import ByteOrderMode, ModbusDataType
     from modbus_engine import AreaType
 
@@ -75,12 +85,18 @@ class PairingRule:
         self.target_slave_id = target_slave_id
         self.target_format = target_format
 
-        # 为什么优先使用 target_format 映射数据类型且默认采用 CDAB：
-        # 1. 北向转发点表决定了对外暴露的寄存器字长（如 16 位整型占 1 字，32 位浮点占 2 字）；
+        # 为什么优先使用 target_format 映射数据类型与字节序：
+        # 1. 北向转发点表决定了对外暴露的寄存器字长与变位规则；
         # 2. 若 target_format 为空则回退使用南向源变量的 src_format；
-        # 3. 一体机现场北向规约默认使用 CDAB（高低字交换、字内大端）传输 32 位数据。
-        self.data_type = map_db_format_to_data_type(target_format or src_format)
-        self.byte_order = ByteOrderMode.CDAB
+        # 3. 遇到 target_format 与 src_format 均未配置时记录警告，并按默认 INT16 / CDAB 兜底。
+        chosen_format = target_format or src_format
+        if not chosen_format:
+            logger.warning(
+                f"[HEMS-PAIRING] 规则 R_{target_app_id}_{target_register} (目标:{target_app_name}, 源:{src_app_name}) "
+                f"未配置数据格式(target_format与src_format均为空)，按默认 INT16/1寄存器/CDAB 兜底处理，若实际为多字数据请人工核对"
+            )
+        self.data_type = map_db_format_to_data_type(chosen_format)
+        self.byte_order = map_db_format_to_byte_order(chosen_format, default_mode=ByteOrderMode.CDAB)
 
     @property
     def rule_id(self) -> str:

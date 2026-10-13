@@ -953,10 +953,12 @@ class SlavePanel(ttk.Frame):
         # 在 [_add_new_slave_instance] 中更新局部变量 [new_id]：为后续协议编码、服务调度或界面渲染准备中间状态
         new_id = f"slave_{time.time_ns()}"
         # 在 [_add_new_slave_instance] 中更新局部变量 [cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
+        # 自动探测从 502 起步的首个未占用 TCP 端口，避免与已有从机或活跃 Hub 端点冲突
+        avail_port = self.app.slave_service.get_next_available_tcp_port(start_port=502)
         cfg = ConnectionConfig(
             comm_type=CommType.TCP,
             host="127.0.0.1",
-            port=502 + len(devices),
+            port=avail_port,
             com_port="COM1",
             baudrate=9600,
             unit_id=new_unit,

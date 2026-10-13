@@ -1321,7 +1321,9 @@ class ModbusSlaveEngine:
                 # 在 [write_raw_values] 中更新局部变量 [values_list]：为后续协议编码、服务调度或界面渲染准备中间状态
                 values_list = block.simdata[0].values
                 # 在 [write_raw_values] 中更新局部变量 [is_bit]：为后续协议编码、服务调度或界面渲染准备中间状态
-                is_bit = (AreaType.COIL in area or AreaType.DISCRETE_INPUT in area)
+                # 健壮判定：支持原始枚举值及带区名/偏移的派生串（如 "0x_Coil (线圈) @ 1"）
+                s_area = str(area).strip().upper()
+                is_bit = ("0X" in s_area or "COIL" in s_area or "1X" in s_area or "DISCRETE" in s_area)
                 # 在 [write_raw_values] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
                 for i, val in enumerate(values):
                     # 在 [write_raw_values] 中更新局部变量 [idx]：为后续协议编码、服务调度或界面渲染准备中间状态

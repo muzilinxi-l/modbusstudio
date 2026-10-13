@@ -8,7 +8,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 # 为什么用 try/except 导入 pyserial 的串口枚举工具：
 # 允许在未安装 pyserial 或无硬件串口驱动的机器上正常打开界面并回退使用预设 COM1~COM4 列表。
@@ -29,6 +29,7 @@ from ..models import (
     DataType,
     PollResult,
     PollTask,
+    _parse_port,
 )
 from ..services import PollService
 
@@ -322,7 +323,7 @@ class PollPanel(ttk.Frame):
         return ConnectionConfig(
             comm_type=CommType.from_str(self.poll_comm_type_var.get()),
             host=self.entry_ip.get().strip() or "127.0.0.1",
-            port=int(self.entry_port.get().strip() or "502"),
+            port=_parse_port(self.entry_port.get(), default=502),
             com_port=self.combo_com.get().strip() or "COM1",
             baudrate=int(self.combo_baud.get().strip() or "9600"),
             data_bits=int(self.combo_databit.get().strip() or "8") if hasattr(self, "combo_databit") else 8,

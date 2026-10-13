@@ -772,8 +772,8 @@ class DbImportDialog:
         existing_devices = slave_svc.get_devices()
         # 在 [_import_as_new_instances] 中更新局部变量 [next_unit]：为后续协议编码、服务调度或界面渲染准备中间状态
         next_unit = len(existing_devices) + 1
-        # 在 [_import_as_new_instances] 中更新局部变量 [base_port]：为后续协议编码、服务调度或界面渲染准备中间状态
-        base_port = 502 + len(existing_devices)
+        # [H2] 维护已占用的 TCP 端口集合（含已有从机与活跃 Hub 监听），从 502 起步探测避免撞车
+        used_tcp_ports = set(slave_svc.get_occupied_tcp_ports())
 
         # 为什么维护 used_endpoint_units `Set[Tuple[str, int]]`：
         # 同一 RS-485 总线（如 RS-485(A1/B1)）或同一 TCP 端口下可能挂载多台设备；
@@ -860,32 +860,48 @@ class DbImportDialog:
 
             # 在 [_import_as_new_instances] 中更新局部变量 [ip_addr]：为后续协议编码、服务调度或界面渲染准备中间状态
             ip_addr = getattr(sel_app, "ip", "127.0.0.1") or "127.0.0.1"
-            # 在 [_import_as_new_instances] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
-            try:
-                # 在 [_import_as_new_instances] 中更新局部变量 [port_num]：为后续协议编码、服务调度或界面渲染准备中间状态
-                port_num = int(getattr(sel_app, "port", base_port + idx) or (base_port + idx))
-            except Exception:
-                # 在 [_import_as_new_instances] 中更新局部变量 [port_num]：为后续协议编码、服务调度或界面渲染准备中间状态
-                port_num = base_port + idx
+            # [H2] 端口计算：对于 TCP 从机，自动探测未被占用的端口，避免与已有从机/Hub或同批导入设备冲突
+            if comm_mode == CommType.TCP:
+                app_port = getattr(sel_app, "port", None)
+                parsed_app_port = None
+                try:
+                    if app_port is not None:
+                        p_val = int(app_port)
+                        if 1 <= p_val <= 65535:
+                            parsed_app_port = p_val
+                except Exception:
+                    pass
+
+                # 若数据库显式配置了端口且当前未被占用，则优先使用该端口；否则自动寻找下一个未占用的端口
+                if parsed_app_port is not None and parsed_app_port not in used_tcp_ports:
+                    port_num = parsed_app_port
+                else:
+                    cand_port = 502
+                    while cand_port in used_tcp_ports:
+                        cand_port += 1
+                    port_num = cand_port
+                used_tcp_ports.add(port_num)
+            else:
+                port_num = 502
 
             # 在 [_import_as_new_instances] 中更新局部变量 [ep_key]：为后续协议编码、服务调度或界面渲染准备中间状态
             ep_key = com_name.upper().strip() if comm_mode == CommType.RTU else f"{ip_addr}:{port_num}"
 
             # 站号分配：优先采用数据库中配置的真实从机站地址；若冲突或未指定，顺延分配当前端点下未被占用的站号
-            # 在 [_import_as_new_instances] 中更新局部变量 [db_unit]：为后续协议编码、服务调度或界面渲染准备中间状态
             db_unit = getattr(sel_app, "slave_id", None)
-            # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if db_unit is not None and (ep_key, db_unit) not in used_endpoint_units:
-                # 在 [_import_as_new_instances] 中更新局部变量 [unit_id]：为后续协议编码、服务调度或界面渲染准备中间状态
                 unit_id = db_unit
             else:
-                # 在 [_import_as_new_instances] 中更新局部变量 [cand]：为后续协议编码、服务调度或界面渲染准备中间状态
                 cand = 1
-                # 在 [_import_as_new_instances] 中维持受控循环：配合运行标志位或事件信号量实现可持续中断的周期性处理
                 while (ep_key, cand) in used_endpoint_units:
                     cand += 1
-                # 在 [_import_as_new_instances] 中更新局部变量 [unit_id]：为后续协议编码、服务调度或界面渲染准备中间状态
                 unit_id = cand
+
+            # [H2] 检查端点与站号唯一性：(ep_key, unit_id) 完全相同才去重跳过，同端点不同 unit_id 不静默合并
+            if (ep_key, unit_id) in used_endpoint_units:
+                logger.warning(f"跳过重复端点从机: {ep_key} unit_id={unit_id}")
+                continue
+
             used_endpoint_units.add((ep_key, unit_id))
 
             # 在 [_import_as_new_instances] 中更新局部变量 [disp_name]：为后续协议编码、服务调度或界面渲染准备中间状态

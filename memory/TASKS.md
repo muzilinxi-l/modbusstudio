@@ -19,3 +19,8 @@ scope: F:/GitHub/python @ 2.0.0
   - **需求/验收方**：Claude Code（`docs/Claude code/05_MEMORIX_PROMPT.md`）
   - **执行/实施方**：Antigravity（`docs/Antigravity/05_MEMORIX_DEPLOY_REPORT.md`）
   - **状态**：已完成 Memorix v1.9.10 安装、Claude Code + Antigravity 双端接入、统一记忆协议建档、`memory/verify.py` 验证脚本开发及 A–F 验收测试。
+- [x] **09 代码审查缺陷修复任务**：
+  - **需求/验收方**：Claude Code（`docs/Claude code/09_REVIEW_FIX_PROMPT.md`）
+  - **执行/实施方**：Antigravity（`docs/Antigravity/09_REVIEW_FIX_REPORT.md`）
+  - **状态**：已完成必修（H1/H2/H3）、应修（M1/M3/T1）、可选（M2/L1/L2）全量修复，回归与全量测试全绿（58 passed, 1 skipped），`memory/verify.py` PASS。
+
