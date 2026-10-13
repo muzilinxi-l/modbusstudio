@@ -155,3 +155,121 @@ def test_datatype_and_point_service_float32():
     assert pt.byte_order == ByteOrder.CDAB
     assert pt.value == 752.4
     assert pt.register_count == 2
+
+
+def test_function_code_strict_priority_over_status_keywords():
+    """测试需求 1：只要 Function Code 非空（如 '3'/'03'/3/'0x03'），严禁被 '状态/status/告警' 关键字劫持为 3x"""
+    from modbusstudio.hems_db_loader import HemsAppModel
+    from modbusstudio.models import AreaType
+
+    for raw_fc in ("3", "03", 3, "0x03", "FC03", "6", "16"):
+        assert HemsAppModel._normalize_function_code(raw_fc) in (3, 6, 16)
+
+    for raw_fc in ("4", "04", 4, "0x04", "FC04"):
+        assert HemsAppModel._normalize_function_code(raw_fc) == 4
+
+    more = {
+        "Pollings": [{"Function Code": "03", "Start Address": "0", "Read Count": "20"}],
+        "Realtime Variables": [
+            {
+                "Register Start Address": "0",
+                "English Name": "Work status",
+                "Chinese Name": "工作状态",
+                "Function Code": "03",
+                "Variable Transfer Format": "Signed short 1",
+            },
+            {
+                "Register Start Address": "1",
+                "English Name": "System alarm",
+                "Chinese Name": "系统告警",
+                "Function Code": "",  # 点位未填，应从 Pollings 继承 03
+                "Variable Transfer Format": "Unsigned short 1",
+            },
+            {
+                "Register Start Address": "2",
+                "English Name": "Grid frequency",
+                "Chinese Name": "电网频率",
+                "Function Code": "04",
+                "Variable Transfer Format": "Float 3",
+            },
+        ],
+    }
+    model = HemsAppModel(
+        app_id=174,
+        app_type=1,
+        english_name="PCS",
+        chinese_name="储能变流器",
+        model_name="PCS",
+        controller_lib="libgeneral_modbus_master.so",
+        enable=1,
+        raw_more=more,
+        local_params={},
+    )
+    pts = model.extract_studio_points()
+    assert len(pts) == 3
+    assert pts[0]["desc"] == "工作状态"
+    assert AreaType.normalize(pts[0]["area"]) == AreaType.HOLDING
+    assert pts[1]["desc"] == "系统告警"
+    assert AreaType.normalize(pts[1]["area"]) == AreaType.HOLDING
+    assert pts[2]["desc"] == "电网频率"
+    assert AreaType.normalize(pts[2]["area"]) == AreaType.INPUT
+
+
+def test_top_level_chinese_name_backfill(tmp_path):
+    """测试需求 4：当 More.Realtime Variables 缺失 Chinese Name 时，自动从 app 表顶层 [Realtime Variables] 列回填"""
+    db_file = tmp_path / "test_chn_backfill.cdb"
+    conn = sqlite3.connect(str(db_file))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE app (
+            Id INTEGER PRIMARY KEY,
+            Type INTEGER,
+            [English Name] TEXT,
+            [Chinese Name] TEXT,
+            [Controller Library] TEXT,
+            [Referred Model] TEXT,
+            [Local Parameters] TEXT,
+            [Realtime Variables] TEXT,
+            [Referred Variables] TEXT,
+            More TEXT,
+            enable INTEGER
+        )
+        """
+    )
+    top_rt = [
+        {"English Name": "Work status", "Chinese Name": "工作状态"},
+        {"English Name": "Active power setpoint", "Chinese Name": "有功功率设置"},
+    ]
+    more_obj = {
+        "Realtime Variables": [
+            {
+                "Register Start Address": "0",
+                "English Name": "Work status",
+                "Function Code": "3",
+                "Variable Transfer Format": "Signed short 1",
+            },
+            {
+                "Register Start Address": "1",
+                "English Name": "Active power setpoint",
+                "Function Code": "3",
+                "Variable Transfer Format": "Float 3",
+            },
+        ]
+    }
+    cur.execute(
+        """
+        INSERT INTO app (Id, Type, [English Name], [Chinese Name], [Controller Library], [Realtime Variables], More, enable)
+        VALUES (174, 1, 'PCS', 'PCS', 'libgeneral_modbus_master.so', ?, ?, 1)
+        """,
+        (json.dumps(top_rt), json.dumps(more_obj)),
+    )
+    conn.commit()
+    conn.close()
+
+    db = HemsDatabase(str(db_file))
+    apps = db.load_modbus_apps()
+    assert len(apps) == 1
+    pts = apps[0].extract_studio_points()
+    assert [p["desc"] for p in pts] == ["工作状态", "有功功率设置"]
+
