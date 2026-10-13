@@ -39,9 +39,9 @@ def map_db_format_to_data_type(fmt_str: Optional[Any]) -> ModbusDataType:
     # 参数：fmt_str（数据库中的格式描述字符串或空值）。返回：匹配到的 ModbusDataType 枚举（默认 INT16）。
     # 步骤：1. 空值默认返回 INT16；2. 优先调用 parse_hems_type 查精确映射表；3. 未命中则按关键字模糊匹配兜底。
     # 为什么空值回退为 INT16：Modbus 工业现场最通用的单寄存器默认类型为有符号 16 位整型。
-    if not fmt_str:
+    if fmt_str is None or str(fmt_str).strip() == "":
         return ModbusDataType.INT16
-    # 优先委托 modbus_codec.parse_hems_type 精确匹配 44 种标准 HEMS 复合格式字符串
+    # 优先委托 modbus_codec.parse_hems_type 精确匹配 44 种标准 HEMS 复合格式（0~43 及中英文名，其中 0=Invalid 返回 None）
     parsed = parse_hems_type(fmt_str)
     if parsed:
         return parsed[0]
@@ -59,7 +59,7 @@ def map_db_format_to_data_type(fmt_str: Optional[Any]) -> ModbusDataType:
         return ModbusDataType.FLOAT32
     elif "double" in s:
         return ModbusDataType.DOUBLE64
-    elif "bool" in s or "bit" in s:
+    elif "bool" in s or "bit" in s or "比特" in s:
         return ModbusDataType.BOOL
     elif "string" in s:
         return ModbusDataType.STRING
@@ -369,7 +369,8 @@ class HemsAppModel:
                 if fc_num is None and len(self.pollings) == 1 and isinstance(self.pollings[0], dict):
                     fc_num = self._normalize_function_code(self.pollings[0].get("Function Code"))
 
-            is_explicit_numeric = bool(fmt_str and dtype != ModbusDataType.BOOL)
+            fmt_clean = str(fmt_str).strip().lower() if fmt_str is not None else ""
+            is_explicit_numeric = bool(fmt_clean not in ("", "0", "invalid", "无效") and dtype != ModbusDataType.BOOL)
             # 预判点位名称是否含状态/告警关键词，仅在点位与 Pollings 均未提供有效 Function Code 时作为兜底启发式依据
             is_alarm_or_status = any(k in desc.lower() or k in eng_name.lower() for k in ("alarm", "status", "fault", "protect", "warn", "告警", "保护", "故障", "状态"))
 

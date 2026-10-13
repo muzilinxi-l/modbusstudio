@@ -1,10 +1,10 @@
 ========================================================================
 Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 ========================================================================
-生成时间    : 2026-10-13T10:39:19.285368+08:00
+生成时间    : 2026-10-13T12:31:11.313734+08:00
 仓库根目录  : F:\GitHub\python
 记忆目录    : F:\GitHub\python\memory
-总体结论    : PASS (错误: 0, 警告: 3)
+总体结论    : PASS (错误: 0, 警告: 4)
 重要声明    : 脚本通过 ≠ 语义正确。所有无法自动验证的语义判断均已标记为 needs_human_review。
 ------------------------------------------------------------------------
 【分项检查摘要】
@@ -23,21 +23,23 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 【警告详情 (WARNINGS)】
   [!] [Check 6] 记忆 MEM-0002 引用的代码 modbusstudio/app.py 自 commit 9bb9932 后有更新，需人工复核语义一致性
   [!] [Check 6] 记忆 MEM-0005 引用的代码 AGENTS.md 自 commit 9bb9932 后有更新，需人工复核语义一致性
-  [!] [Check 7] 检测到工作区存在未提交的记忆文件改动: memory/verify-report.txt
+  [!] [Check 6] 记忆 MEM-0207 引用的代码 docs/Antigravity/07b_REQ8_RECHECK_REPORT.md 自 commit 53b7ea0 后有更新，需人工复核语义一致性
+  [!] [Check 6] 记忆 MEM-0004 引用的代码 modbusstudio/services.py 自 commit 9bb9932 后有更新，需人工复核语义一致性
 ------------------------------------------------------------------------
 【JSON 完整载荷】
 {
-  "timestamp": "2026-10-13T10:39:19.285368+08:00",
+  "timestamp": "2026-10-13T12:31:11.313734+08:00",
   "repo_root": "F:\\GitHub\\python",
   "memory_dir": "F:\\GitHub\\python\\memory",
   "overall_status": "PASS",
   "error_count": 0,
-  "warning_count": 3,
+  "warning_count": 4,
   "errors": [],
   "warnings": [
     "[Check 6] 记忆 MEM-0002 引用的代码 modbusstudio/app.py 自 commit 9bb9932 后有更新，需人工复核语义一致性",
     "[Check 6] 记忆 MEM-0005 引用的代码 AGENTS.md 自 commit 9bb9932 后有更新，需人工复核语义一致性",
-    "[Check 7] 检测到工作区存在未提交的记忆文件改动: memory/verify-report.txt"
+    "[Check 6] 记忆 MEM-0207 引用的代码 docs/Antigravity/07b_REQ8_RECHECK_REPORT.md 自 commit 53b7ea0 后有更新，需人工复核语义一致性",
+    "[Check 6] 记忆 MEM-0004 引用的代码 modbusstudio/services.py 自 commit 9bb9932 后有更新，需人工复核语义一致性"
   ],
   "checks": {
     "1_required_structure": {
@@ -46,7 +48,7 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
     },
     "2_unique_id": {
       "status": "PASS",
-      "total_records": 8,
+      "total_records": 9,
       "duplicates": []
     },
     "3_has_source_field": {
@@ -65,7 +67,9 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
       "status": "WARN",
       "drifted_sources": [
         "MEM-0002 (modbusstudio/app.py @ 9bb9932 -> HEAD)",
-        "MEM-0005 (AGENTS.md @ 9bb9932 -> HEAD)"
+        "MEM-0005 (AGENTS.md @ 9bb9932 -> HEAD)",
+        "MEM-0207 (docs/Antigravity/07b_REQ8_RECHECK_REPORT.md @ 53b7ea0 -> HEAD)",
+        "MEM-0004 (modbusstudio/services.py @ 9bb9932 -> HEAD)"
       ]
     },
     "7_unreviewed_formal_memory_guard": {
@@ -82,15 +86,15 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
         "F:/GitHub/python"
       ],
       "unmerged_conflicts": [],
-      "dirty_files_count": 27
+      "dirty_files_count": 10
     },
     "10_pytest_execution": {
       "status": "PASS",
       "command": "F:\\GitHub\\python\\.venv\\Scripts\\pytest.exe -q",
       "exit_code": 0,
       "passed": true,
-      "summary": "50 passed in 18.36s",
-      "stdout_tail": "..................................................                       [100%]\n50 passed in 18.36s",
+      "summary": "53 passed in 16.48s",
+      "stdout_tail": ".....................................................                    [100%]\n53 passed in 16.48s",
       "stderr_tail": ""
     },
     "11_needs_human_review": {
@@ -106,6 +110,16 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
           "id": "MEM-0005",
           "file": "CONSTRAINTS.md",
           "reason": "引用源码 AGENTS.md 自 9bb9932 以来发生变更"
+        },
+        {
+          "id": "MEM-0207",
+          "file": "handoffs/2026-10-13-task07-req8-ui-and-parse-fix.md",
+          "reason": "引用源码 docs/Antigravity/07b_REQ8_RECHECK_REPORT.md 自 53b7ea0 以来发生变更"
+        },
+        {
+          "id": "MEM-0004",
+          "file": "INTERFACES.md",
+          "reason": "引用源码 modbusstudio/services.py 自 9bb9932 以来发生变更"
         },
         {
           "id": "MEM-0002",
@@ -131,6 +145,11 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
           "id": "MEM-0207",
           "file": "handoffs/2026-10-13-task07-req8-ui-and-parse-fix.md",
           "reason": "静态锚点已通过，但业务语义与设计初衷需人工最终把关（脚本通过 ≠ 语义正确）"
+        },
+        {
+          "id": "MEM-0208",
+          "file": "handoffs/2026-10-13-task08-datatype-menu-align.md",
+          "reason": "候选记忆 (proposed) 或显式标记需人工核验语义真实性"
         },
         {
           "id": "MEM-0004",

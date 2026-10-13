@@ -10,19 +10,31 @@ from modbusstudio.modbus_codec import ByteOrderMode, ModbusDataType
 
 
 def test_map_db_format_to_data_type():
-    """测试 HEMS 数据库数字格式编码与 Modbus 数据类型映射"""
-    assert map_db_format_to_data_type(2) == ModbusDataType.BOOL
-    assert map_db_format_to_data_type(7) == ModbusDataType.UINT16
-    assert map_db_format_to_data_type(9) == ModbusDataType.INT32
-    assert map_db_format_to_data_type(13) == ModbusDataType.UINT32
-    assert map_db_format_to_data_type(33) == ModbusDataType.FLOAT32
-    assert map_db_format_to_data_type(35) == ModbusDataType.FLOAT32
+    """测试 HEMS 数据库数字格式编码 (0~43) 与 Modbus 数据类型映射"""
+    # 0 = Invalid -> 兜底 INT16
+    assert map_db_format_to_data_type(0) == ModbusDataType.INT16
+    assert map_db_format_to_data_type("0") == ModbusDataType.INT16
+    assert map_db_format_to_data_type("Invalid") == ModbusDataType.INT16
+    # 1 = Bit -> BOOL
+    assert map_db_format_to_data_type(1) == ModbusDataType.BOOL
+    assert map_db_format_to_data_type("1") == ModbusDataType.BOOL
+    assert map_db_format_to_data_type("Bit") == ModbusDataType.BOOL
+    assert map_db_format_to_data_type("bit") == ModbusDataType.BOOL
+    assert map_db_format_to_data_type("Bool") == ModbusDataType.BOOL
+    assert map_db_format_to_data_type("bool") == ModbusDataType.BOOL
+    assert map_db_format_to_data_type("比特") == ModbusDataType.BOOL
+    # 6 = Unsigned short 1, 8 = Signed int 1, 12 = Unsigned int 1, 32 = Float 1, 34 = Float 3 (CDAB)
+    assert map_db_format_to_data_type(6) == ModbusDataType.UINT16
+    assert map_db_format_to_data_type(8) == ModbusDataType.INT32
+    assert map_db_format_to_data_type(12) == ModbusDataType.UINT32
+    assert map_db_format_to_data_type(32) == ModbusDataType.FLOAT32
+    assert map_db_format_to_data_type(34) == ModbusDataType.FLOAT32
     # 变位测试
-    assert map_db_format_to_byte_order(35) == ByteOrderMode.CDAB
+    assert map_db_format_to_byte_order(34) == ByteOrderMode.CDAB
 
 
 def test_hems_database_loading_memory(tmp_path):
-    """测试模拟数据库的 app 表读取与设备模型生成"""
+    """测试模拟数据库的 app 表读取与设备模型生成（含 Float 3=34 与 Bit="1"）"""
     db_file = tmp_path / "test_hems.cdb"
     conn = sqlite3.connect(str(db_file))
     cursor = conn.cursor()
@@ -48,8 +60,15 @@ def test_hems_database_loading_memory(tmp_path):
                 "Chinese Name": "直流母线电压",
                 "English Name": "U_dc",
                 "Function Code": "3",
-                "Variable Transfer Format": 35,  # Float 3 (CDAB)
-            }
+                "Variable Transfer Format": 34,  # Float 3 (CDAB)
+            },
+            {
+                "Register Start Address": 12,
+                "Chinese Name": "合闸状态位",
+                "English Name": "Breaker_Bit",
+                "Function Code": "1",
+                "Variable Transfer Format": "1",  # Bit (比特) -> BOOL
+            },
         ]
     }
 
@@ -70,11 +89,14 @@ def test_hems_database_loading_memory(tmp_path):
     assert app_model.is_south_master is True
 
     points = app_model.extract_studio_points()
-    assert len(points) == 1
+    assert len(points) == 2
     assert points[0]["address"] == 10
     assert points[0]["desc"] == "直流母线电压"
     assert points[0]["data_type"] == ModbusDataType.FLOAT32
     assert points[0]["byte_order"] == ByteOrderMode.CDAB
+    assert points[1]["address"] == 12
+    assert points[1]["desc"] == "合闸状态位"
+    assert points[1]["data_type"] == ModbusDataType.BOOL
 
 
 def test_hems_pairing_engine_load_rules(tmp_path):
@@ -99,7 +121,7 @@ def test_hems_pairing_engine_load_rules(tmp_path):
     # 南向应用
     more_south = {
         "Realtime Variables": [
-            {"Register Start Address": 100, "English Name": "Active_Power", "Chinese Name": "有功功率", "Function Code": "3", "Variable Transfer Format": 35}
+            {"Register Start Address": 100, "English Name": "Active_Power", "Chinese Name": "有功功率", "Function Code": "3", "Variable Transfer Format": 34}
         ]
     }
     # 北向应用
@@ -272,4 +294,40 @@ def test_top_level_chinese_name_backfill(tmp_path):
     assert len(apps) == 1
     pts = apps[0].extract_studio_points()
     assert [p["desc"] for p in pts] == ["工作状态", "有功功率设置"]
+
+
+def test_slave_panel_data_type_choices_bool_and_double64():
+    """测试 SlavePanel.DATA_TYPE_CHOICES 含 BOOL(比特) 与 DOUBLE64，且写回点位时还原为底层枚举值"""
+    from modbusstudio.models import AreaType, ByteOrder, DataType
+    from modbusstudio.services import PointService
+    from modbusstudio.ui.slave_panel import SlavePanel
+
+    assert "BOOL(比特)" in SlavePanel.DATA_TYPE_CHOICES
+    assert "DOUBLE64" in SlavePanel.DATA_TYPE_CHOICES
+    assert SlavePanel.normalize_data_type_choice("BOOL(比特)") == ModbusDataType.BOOL.value
+    assert SlavePanel.normalize_data_type_choice("DOUBLE64") == ModbusDataType.DOUBLE64.value
+
+    ok_bool, pt_bool, _ = PointService.validate_and_build_point(
+        address=1,
+        description="比特测试点",
+        area=AreaType.COIL,
+        data_type=SlavePanel.normalize_data_type_choice("BOOL(比特)"),
+        byte_order=ByteOrder.ABCD,
+        val_input=1,
+    )
+    assert ok_bool is True and pt_bool is not None
+    assert pt_bool.data_type == DataType.BOOL
+    assert pt_bool.data_type.value == "BOOL"
+
+    ok_dbl, pt_dbl, _ = PointService.validate_and_build_point(
+        address=10,
+        description="双精度测试点",
+        area=AreaType.HOLDING,
+        data_type=SlavePanel.normalize_data_type_choice("DOUBLE64"),
+        byte_order=ByteOrder.ABCD,
+        val_input=123.456789,
+    )
+    assert ok_dbl is True and pt_dbl is not None
+    assert pt_dbl.register_count == 4
+
 

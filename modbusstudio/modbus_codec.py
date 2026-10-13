@@ -148,8 +148,9 @@ def clamp_value_to_type(val: Any, data_type: ModbusDataType) -> Any:
     if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
         return val
 
-    # 查表获取当前类型的 (最小值, 最大值, Python 构造类型 int/float)
-    limits = TYPE_RANGES.get(data_type)
+    # 查表获取当前类型的 (最小值, 最大值, Python 构造类型 int/float)，兼容上层模型传入的 "FLOAT64"
+    lookup_type = ModbusDataType.DOUBLE64 if data_type == "FLOAT64" else data_type
+    limits = TYPE_RANGES.get(lookup_type)
     if not limits:
         return val
 
@@ -171,77 +172,82 @@ def clamp_value_to_type(val: Any, data_type: ModbusDataType) -> Any:
 
 
 # =====================================================================
-# 工业标准 44 种数据类型字典 (对应图二与图三规范)
+# 工业标准 44 种数据类型字典 (严格对齐 extra/hems.cdb menu 表 Variable Transfer Format 0~43)
 # 格式: ID -> (英文名称, 中文名称, ModbusDataType, ByteOrderMode, 寄存器数)
-# 为什么现场一体机（extra/hems.cdb）要把数据类型编号为 1~44：
-#   一体机底层 C++ 驱动把“基础数据类型 + 字节序变位模式”合并编码成了单个整数 ID（如 33=Float 1=FLOAT32+ABCD，
-#   35=Float 3=FLOAT32+CDAB）。通过这张字典，导入 .cdb 数据库时即可一键还原出精确的数据类型与字节序。
+# 为什么现场一体机（extra/hems.cdb）要把数据类型编号为 0~43：
+#   一体机底层 C++ 驱动把“基础数据类型 + 字节序变位模式”合并编码成了单个整数 ID（如 0=Invalid，1=Bit，
+#   32=Float 1=FLOAT32+ABCD，34=Float 3=FLOAT32+CDAB）。通过这张字典，导入 .cdb 数据库时即可一键还原出精确的数据类型与字节序。
 #   尾号规律速记：1=ABCD（标准大端），2=BADC（字内字节交换），3=CDAB（大端字交换），4=DCBA（纯小端）。
 # =====================================================================
 HEMS_TYPE_DEFINITIONS: Dict[int, Tuple[str, str, ModbusDataType, ByteOrderMode, int]] = {
-    # 1~4：基础单字节/比特类型（在 Modbus 中仍至少占用 1 个寄存器地址）
-    1: ("Invalid", "无效", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
-    2: ("Bit", "比特", ModbusDataType.BOOL, ByteOrderMode.ABCD, 1),
-    3: ("Signed char", "有符号字节", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
-    4: ("Unsigned char", "无符号字节", ModbusDataType.UINT16, ByteOrderMode.ABCD, 1),
-    # 5~8：16 位短整型（1=标准大端 ABCD，2=字内高低字节交换 BADC）
-    5: ("Signed short 1", "有符号短整型1", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
-    6: ("Signed short 2", "有符号短整型2", ModbusDataType.INT16, ByteOrderMode.BADC, 1),
-    7: ("Unsigned short 1", "无符号短整型1", ModbusDataType.UINT16, ByteOrderMode.ABCD, 1),
-    8: ("Unsigned short 2", "无符号短整型2", ModbusDataType.UINT16, ByteOrderMode.BADC, 1),
-    # 9~12：32 位有符号整型（后缀 1=ABCD, 2=BADC, 3=CDAB, 4=DCBA，占 2 个寄存器）
-    9: ("Signed int 1", "有符号整形1", ModbusDataType.INT32, ByteOrderMode.ABCD, 2),
-    10: ("Signed int 2", "有符号整形2", ModbusDataType.INT32, ByteOrderMode.BADC, 2),
-    11: ("Signed int 3", "有符号整形3", ModbusDataType.INT32, ByteOrderMode.CDAB, 2),
-    12: ("Signed int 4", "有符号整形4", ModbusDataType.INT32, ByteOrderMode.DCBA, 2),
-    # 13~16：32 位无符号整型（后缀 1=ABCD, 2=BADC, 3=CDAB, 4=DCBA，占 2 个寄存器）
-    13: ("Unsigned int 1", "无符号整形1", ModbusDataType.UINT32, ByteOrderMode.ABCD, 2),
-    14: ("Unsigned int 2", "无符号整形2", ModbusDataType.UINT32, ByteOrderMode.BADC, 2),
-    15: ("Unsigned int 3", "无符号整形3", ModbusDataType.UINT32, ByteOrderMode.CDAB, 2),
-    16: ("Unsigned int 4", "无符号整形4", ModbusDataType.UINT32, ByteOrderMode.DCBA, 2),
-    # 17~24：64 位有符号长整型（1~4 与 5~8 均映射为四模式，占 4 个连续寄存器）
-    17: ("Signed int64 1", "有符号长整形1", ModbusDataType.INT64, ByteOrderMode.ABCD, 4),
-    18: ("Signed int64 2", "有符号长整形2", ModbusDataType.INT64, ByteOrderMode.BADC, 4),
-    19: ("Signed int64 3", "有符号长整形3", ModbusDataType.INT64, ByteOrderMode.CDAB, 4),
-    20: ("Signed int64 4", "有符号长整形4", ModbusDataType.INT64, ByteOrderMode.DCBA, 4),
-    21: ("Signed int64 5", "有符号长整形5", ModbusDataType.INT64, ByteOrderMode.ABCD, 4),
-    22: ("Signed int64 6", "有符号长整形6", ModbusDataType.INT64, ByteOrderMode.BADC, 4),
-    23: ("Signed int64 7", "有符号长整形7", ModbusDataType.INT64, ByteOrderMode.CDAB, 4),
-    24: ("Signed int64 8", "有符号长整形8", ModbusDataType.INT64, ByteOrderMode.DCBA, 4),
-    # 25~32：64 位无符号长整型（占 4 个连续寄存器）
-    25: ("Unsigned int64 1", "无符号长整形1", ModbusDataType.UINT64, ByteOrderMode.ABCD, 4),
-    26: ("Unsigned int64 2", "无符号长整形2", ModbusDataType.UINT64, ByteOrderMode.BADC, 4),
-    27: ("Unsigned int64 3", "无符号长整形3", ModbusDataType.UINT64, ByteOrderMode.CDAB, 4),
-    28: ("Unsigned int64 4", "无符号长整形4", ModbusDataType.UINT64, ByteOrderMode.DCBA, 4),
-    29: ("Unsigned int64 5", "无符号长整形5", ModbusDataType.UINT64, ByteOrderMode.ABCD, 4),
-    30: ("Unsigned int64 6", "无符号长整形6", ModbusDataType.UINT64, ByteOrderMode.BADC, 4),
-    31: ("Unsigned int64 7", "无符号长整形7", ModbusDataType.UINT64, ByteOrderMode.CDAB, 4),
-    32: ("Unsigned int64 8", "无符号长整形8", ModbusDataType.UINT64, ByteOrderMode.DCBA, 4),
-    # 33~36：32 位 IEEE 754 单精度浮点数（1=ABCD, 2=BADC, 3=CDAB, 4=DCBA，储能现场最常用 33 与 35）
-    33: ("Float 1", "浮点数1", ModbusDataType.FLOAT32, ByteOrderMode.ABCD, 2),
-    34: ("Float 2", "浮点数2", ModbusDataType.FLOAT32, ByteOrderMode.BADC, 2),
-    35: ("Float 3", "浮点数3", ModbusDataType.FLOAT32, ByteOrderMode.CDAB, 2),
-    36: ("Float 4", "浮点数4", ModbusDataType.FLOAT32, ByteOrderMode.DCBA, 2),
-    # 37~44：64 位 IEEE 754 双精度浮点数（占 4 个连续寄存器）
-    37: ("Double 1", "双精度浮点数1", ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 4),
-    38: ("Double 2", "双精度浮点型2", ModbusDataType.DOUBLE64, ByteOrderMode.BADC, 4),
-    39: ("Double 3", "双精度浮点型3", ModbusDataType.DOUBLE64, ByteOrderMode.CDAB, 4),
-    40: ("Double 4", "双精度浮点型4", ModbusDataType.DOUBLE64, ByteOrderMode.DCBA, 4),
-    41: ("Double 5", "双精度浮点型5", ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 4),
-    42: ("Double 6", "双精度浮点型6", ModbusDataType.DOUBLE64, ByteOrderMode.BADC, 4),
-    43: ("Double 7", "双精度浮点型7", ModbusDataType.DOUBLE64, ByteOrderMode.CDAB, 4),
-    44: ("Double 8", "双精度浮点型8", ModbusDataType.DOUBLE64, ByteOrderMode.DCBA, 4),
+    # 0~3：无效占位与基础单字节/比特类型（在 Modbus 中仍至少占用 1 个寄存器/位地址）
+    0: ("Invalid", "无效", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
+    1: ("Bit", "比特", ModbusDataType.BOOL, ByteOrderMode.ABCD, 1),
+    2: ("Signed char", "有符号字节", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
+    3: ("Unsigned char", "无符号字节", ModbusDataType.UINT16, ByteOrderMode.ABCD, 1),
+    # 4~7：16 位短整型（1=标准大端 ABCD，2=字内高低字节交换 BADC）
+    4: ("Signed short 1", "有符号短整型1", ModbusDataType.INT16, ByteOrderMode.ABCD, 1),
+    5: ("Signed short 2", "有符号短整型2", ModbusDataType.INT16, ByteOrderMode.BADC, 1),
+    6: ("Unsigned short 1", "无符号短整型1", ModbusDataType.UINT16, ByteOrderMode.ABCD, 1),
+    7: ("Unsigned short 2", "无符号短整型2", ModbusDataType.UINT16, ByteOrderMode.BADC, 1),
+    # 8~11：32 位有符号整型（后缀 1=ABCD, 2=BADC, 3=CDAB, 4=DCBA，占 2 个寄存器）
+    8: ("Signed int 1", "有符号整形1", ModbusDataType.INT32, ByteOrderMode.ABCD, 2),
+    9: ("Signed int 2", "有符号整形2", ModbusDataType.INT32, ByteOrderMode.BADC, 2),
+    10: ("Signed int 3", "有符号整形3", ModbusDataType.INT32, ByteOrderMode.CDAB, 2),
+    11: ("Signed int 4", "有符号整形4", ModbusDataType.INT32, ByteOrderMode.DCBA, 2),
+    # 12~15：32 位无符号整型（后缀 1=ABCD, 2=BADC, 3=CDAB, 4=DCBA，占 2 个寄存器）
+    12: ("Unsigned int 1", "无符号整形1", ModbusDataType.UINT32, ByteOrderMode.ABCD, 2),
+    13: ("Unsigned int 2", "无符号整形2", ModbusDataType.UINT32, ByteOrderMode.BADC, 2),
+    14: ("Unsigned int 3", "无符号整形3", ModbusDataType.UINT32, ByteOrderMode.CDAB, 2),
+    15: ("Unsigned int 4", "无符号整形4", ModbusDataType.UINT32, ByteOrderMode.DCBA, 2),
+    # 16~23：64 位有符号长整型（1~4 与 5~8 均映射为四模式，占 4 个连续寄存器）
+    16: ("Signed int64 1", "有符号长整形1", ModbusDataType.INT64, ByteOrderMode.ABCD, 4),
+    17: ("Signed int64 2", "有符号长整形2", ModbusDataType.INT64, ByteOrderMode.BADC, 4),
+    18: ("Signed int64 3", "有符号长整形3", ModbusDataType.INT64, ByteOrderMode.CDAB, 4),
+    19: ("Signed int64 4", "有符号长整形4", ModbusDataType.INT64, ByteOrderMode.DCBA, 4),
+    20: ("Signed int64 5", "有符号长整形5", ModbusDataType.INT64, ByteOrderMode.ABCD, 4),
+    21: ("Signed int64 6", "有符号长整形6", ModbusDataType.INT64, ByteOrderMode.BADC, 4),
+    22: ("Signed int64 7", "有符号长整形7", ModbusDataType.INT64, ByteOrderMode.CDAB, 4),
+    23: ("Signed int64 8", "有符号长整形8", ModbusDataType.INT64, ByteOrderMode.DCBA, 4),
+    # 24~31：64 位无符号长整型（占 4 个连续寄存器）
+    24: ("Unsigned int64 1", "无符号长整形1", ModbusDataType.UINT64, ByteOrderMode.ABCD, 4),
+    25: ("Unsigned int64 2", "无符号长整形2", ModbusDataType.UINT64, ByteOrderMode.BADC, 4),
+    26: ("Unsigned int64 3", "无符号长整形3", ModbusDataType.UINT64, ByteOrderMode.CDAB, 4),
+    27: ("Unsigned int64 4", "无符号长整形4", ModbusDataType.UINT64, ByteOrderMode.DCBA, 4),
+    28: ("Unsigned int64 5", "无符号长整形5", ModbusDataType.UINT64, ByteOrderMode.ABCD, 4),
+    29: ("Unsigned int64 6", "无符号长整形6", ModbusDataType.UINT64, ByteOrderMode.BADC, 4),
+    30: ("Unsigned int64 7", "无符号长整形7", ModbusDataType.UINT64, ByteOrderMode.CDAB, 4),
+    31: ("Unsigned int64 8", "无符号长整形8", ModbusDataType.UINT64, ByteOrderMode.DCBA, 4),
+    # 32~35：32 位 IEEE 754 单精度浮点数（1=ABCD, 2=BADC, 3=CDAB, 4=DCBA，储能现场最常用 32 与 34）
+    32: ("Float 1", "浮点数1", ModbusDataType.FLOAT32, ByteOrderMode.ABCD, 2),
+    33: ("Float 2", "浮点数2", ModbusDataType.FLOAT32, ByteOrderMode.BADC, 2),
+    34: ("Float 3", "浮点数3", ModbusDataType.FLOAT32, ByteOrderMode.CDAB, 2),
+    35: ("Float 4", "浮点数4", ModbusDataType.FLOAT32, ByteOrderMode.DCBA, 2),
+    # 36~43：64 位 IEEE 754 双精度浮点数（注意 Double 1 为"双精度浮点数1"，Double 2~8 为"双精度浮点型2~8"，严格照 menu 表保留）
+    36: ("Double 1", "双精度浮点数1", ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 4),
+    37: ("Double 2", "双精度浮点型2", ModbusDataType.DOUBLE64, ByteOrderMode.BADC, 4),
+    38: ("Double 3", "双精度浮点型3", ModbusDataType.DOUBLE64, ByteOrderMode.CDAB, 4),
+    39: ("Double 4", "双精度浮点型4", ModbusDataType.DOUBLE64, ByteOrderMode.DCBA, 4),
+    40: ("Double 5", "双精度浮点型5", ModbusDataType.DOUBLE64, ByteOrderMode.ABCD, 4),
+    41: ("Double 6", "双精度浮点型6", ModbusDataType.DOUBLE64, ByteOrderMode.BADC, 4),
+    42: ("Double 7", "双精度浮点型7", ModbusDataType.DOUBLE64, ByteOrderMode.CDAB, 4),
+    43: ("Double 8", "双精度浮点型8", ModbusDataType.DOUBLE64, ByteOrderMode.DCBA, 4),
 }
 
 
 def parse_hems_type(indicator: Union[str, int]) -> Optional[Tuple[ModbusDataType, ByteOrderMode, int]]:
-    """根据一体机数据库的序号 ID（1~44）、英文名或中文名，解析出（数据类型, 字节序, 寄存器数）三元组。
-    参数：indicator（类型编号 int 或名称 str）。返回：匹配成功返回三元组，失败返回 None。
-    步骤：1.若为数字直接按字典主键 O(1) 查表；2.否则转小写遍历比对中英文名称；3.未命中返回 None。副作用：无。
+    """根据一体机数据库的序号 ID（0~43）、英文名或中文名，解析出（数据类型, 字节序, 寄存器数）三元组。
+    参数：indicator（类型编号 int 或名称 str）。返回：匹配成功返回三元组，0(Invalid) 或失败返回 None。
+    步骤：1.若为数字直接按字典主键 O(1) 查表（0=Invalid 返回 None）；2.否则转小写遍历比对中英文名称；3.未命中返回 None。副作用：无。
     """
-    # 分支 1：当传入数字 ID（如数据库字段中的 7 或 "7"）时，直接用字典键查找，速度最快
-    if isinstance(indicator, int) or (isinstance(indicator, str) and str(indicator).strip().isdigit()):
-        type_id = int(indicator)
+    # 分支 1：当传入数字 ID（如数据库字段中的 6 或 "6"）时，直接用字典键查找，速度最快
+    if (isinstance(indicator, int) and not isinstance(indicator, bool)) or (
+        isinstance(indicator, str) and str(indicator).strip().isdigit()
+    ):
+        type_id = int(str(indicator).strip())
+        # 0=Invalid（无效）：返回 None 交给上层 map_db_format_to_data_type 走默认兜底逻辑，不映射为有效类型
+        if type_id == 0:
+            return None
         if type_id in HEMS_TYPE_DEFINITIONS:
             # 忽略前两项中英文展示名称，只提取核心的 (ModbusDataType, ByteOrderMode, 占用寄存器数)
             _, _, dtype, mode, cnt = HEMS_TYPE_DEFINITIONS[type_id]
@@ -249,7 +255,11 @@ def parse_hems_type(indicator: Union[str, int]) -> Optional[Tuple[ModbusDataType
 
     # 分支 2：当传入英文名（如 "Unsigned short 1"）或中文名（如 "无符号短整型1"）时，忽略大小写遍历匹配
     key = str(indicator).strip().lower()
-    for _, (eng, chn, dtype, mode, cnt) in HEMS_TYPE_DEFINITIONS.items():
+    if not key or key in ("invalid", "无效"):
+        return None
+    for type_id, (eng, chn, dtype, mode, cnt) in HEMS_TYPE_DEFINITIONS.items():
+        if type_id == 0:
+            continue
         if key == eng.lower() or key == chn.lower():
             return dtype, mode, cnt
     # 若既不是合法编号也不是已知名称，返回 None 交由上层使用默认类型兜底
@@ -477,7 +487,7 @@ def decode_value(
         return struct.unpack(">Q", adjusted)[0]
 
     # DOUBLE64（IEEE 754 双精度浮点数，占 8 字节）：使用 `>d`（double）解包并保留 8 位小数
-    elif data_type == ModbusDataType.DOUBLE64:
+    elif data_type in (ModbusDataType.DOUBLE64, "FLOAT64"):
         if len(raw_bytes) < 8:
             raw_bytes = raw_bytes.ljust(8, b"\x00")
         adjusted = transform_bytes(raw_bytes[:8], mode)
@@ -610,7 +620,7 @@ def encode_value(
 
     # DOUBLE64 编码：
     # `>d` 打包为 8 字节 IEEE 754 双精度浮点数，拆分为 4 个 16 位寄存器
-    elif data_type == ModbusDataType.DOUBLE64:
+    elif data_type in (ModbusDataType.DOUBLE64, "FLOAT64"):
         val = float(value)
         raw = struct.pack(">d", val)
         adjusted = transform_bytes(raw, mode)

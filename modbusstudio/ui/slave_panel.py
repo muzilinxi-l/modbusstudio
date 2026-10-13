@@ -70,11 +70,21 @@ class SlavePanel(ttk.Frame):
         AreaType.HOLDING.friendly_name,
     ]
 
-    # 支持的数据类型、字节序与动态模拟规则下拉选项列表
-    DATA_TYPE_CHOICES = ["INT16", "UINT16", "INT32", "UINT32", "FLOAT32", "FLOAT64", "BOOL", "STRING", "HEX16"]
+    # 支持的数据类型、字节序与动态模拟规则下拉选项列表（BOOL(比特) 展示名写回时还原为 "BOOL"，FLOAT64 对齐为 "DOUBLE64"）
+    DATA_TYPE_CHOICES = ["INT16", "UINT16", "INT32", "UINT32", "FLOAT32", "DOUBLE64", "BOOL(比特)", "STRING", "HEX16"]
     BYTE_ORDER_CHOICES = ["ABCD", "CDAB", "BADC", "DCBA"]
     SIM_RULE_CHOICES = ["固定", "随机波动", "步进递增", "正弦波", "方波"]
     BAUDRATE_CHOICES = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400"]
+
+    @staticmethod
+    def normalize_data_type_choice(choice: str) -> str:
+        """将界面下拉框中的展示名称（如 'BOOL(比特)'、'DOUBLE64(双精度)'）还原为底层标准枚举值字符串。"""
+        s = str(choice).strip()
+        if s.startswith("BOOL") or "比特" in s:
+            return "BOOL"
+        if s.startswith("DOUBLE64"):
+            return "DOUBLE64"
+        return s
 
     def __init__(self, parent: ttk.Notebook, app: ModbusStudioAppCore):
         """初始化从机模拟工作台面板，构建控件树、加载初始设备数据并启动 1s 周期的动态数值 UI 同步定时器。"""
@@ -696,7 +706,7 @@ class SlavePanel(ttk.Frame):
         # 在 [_on_click_add_point] 中更新局部变量 [area_str]：为后续协议编码、服务调度或界面渲染准备中间状态
         area_str = self.combo_pt_area.get()
         # 在 [_on_click_add_point] 中更新局部变量 [dt_str]：为后续协议编码、服务调度或界面渲染准备中间状态
-        dt_str = self.combo_pt_type.get()
+        dt_str = self.normalize_data_type_choice(self.combo_pt_type.get())
         # 在 [_on_click_add_point] 中更新局部变量 [bo_str]：为后续协议编码、服务调度或界面渲染准备中间状态
         bo_str = self.combo_pt_order.get()
         # 在 [_on_click_add_point] 中更新局部变量 [val_str]：为后续协议编码、服务调度或界面渲染准备中间状态
@@ -1065,7 +1075,7 @@ class SlavePanel(ttk.Frame):
     def _apply_batch_type(self) -> None:
         """将下拉框选中的数据类型批量应用到目标范围内的点位并重新校验编码。"""
         # 在 [_apply_batch_type] 中更新局部变量 [dt]：为后续协议编码、服务调度或界面渲染准备中间状态
-        dt = self.combo_batch_type.get()
+        dt = self.normalize_data_type_choice(self.combo_batch_type.get())
         self._apply_batch_point_property("data_type", dt)
 
     # ──────────────────────────────────────────────────────────────────
@@ -1329,7 +1339,7 @@ class SlavePanel(ttk.Frame):
                 # 在 [_open_batch_generate_dialog] 中更新局部变量 [area]：为后续协议编码、服务调度或界面渲染准备中间状态
                 area = c_area.get()
                 # 在 [_open_batch_generate_dialog] 中更新局部变量 [dt]：为后续协议编码、服务调度或界面渲染准备中间状态
-                dt = c_type.get()
+                dt = self.normalize_data_type_choice(c_type.get())
                 # 在 [_open_batch_generate_dialog] 中更新局部变量 [bo]：为后续协议编码、服务调度或界面渲染准备中间状态
                 bo = c_order.get()
                 # 在 [_open_batch_generate_dialog] 中更新局部变量 [sim]：为后续协议编码、服务调度或界面渲染准备中间状态

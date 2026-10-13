@@ -272,8 +272,8 @@ class DataType(str, Enum):
         # 匹配 16 位有符号短整数（C 语言 signed short / short）
         if "INT16" in s or "SHORT" in s or "SIGNED SHORT" in s:
             return cls.INT16
-        # 匹配布尔/单比特位类型
-        if "BOOL" in s or "BIT" in s:
+        # 匹配布尔/单比特位类型（兼容 UI 展示名 "BOOL(比特)" / "比特" / "Bit"）
+        if "BOOL" in s or "BIT" in s or "比特" in s:
             return cls.BOOL
         # 匹配 ASCII 文本字符串类型
         if "STRING" in s or "STR" in s:
