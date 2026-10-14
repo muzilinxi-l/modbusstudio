@@ -35,6 +35,7 @@
 # 需要在独立后台线程中创建专属 EventLoop 来运行异步监听任务
 import asyncio
 import logging
+import socket
 # 为什么导入 threading：Tkinter GUI 主线程是单线程事件循环，耗时的网络/串口监听、波形仿真与定时轮询
 # 必须放在后台守护线程中运行，并通过 Lock 与 Event 实现跨线程安全同步
 import threading
@@ -561,6 +562,11 @@ class ModbusTransportServer:
         self._server_task: Optional[asyncio.Task] = None
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
+        # [SLAVE-RECONNECT-10] 单端点重建互斥锁：`restart_if_broken()`（"自动重连"按钮）与
+        # `start()` 内部的"半死态强制重建"分支都可能对同一端点执行 stop+start，若两个线程
+        # （UI 线程 + 服务线程）同时进入会产生重复 stop/start 竞态，用一把细粒度锁串行化
+        # 同端点重建操作（该锁仅保护本实例的重建过程，不阻塞 Hub 全局字典，避免锁嵌套）。
+        self._rebuild_lock = threading.Lock()
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
         # [SLAVE-RECONNECT] 记录 start() 时刻，供 is_healthy() 做 0.3s 启动宽限判断
         self._start_ts: float = time.time()
@@ -617,13 +623,15 @@ class ModbusTransportServer:
 
     # [SLAVE-RECONNECT] 新增健康探测方法：判断底层 listener 是否真正在监听
     def is_healthy(self) -> bool:
-        """探测底层网络/串口监听服务是否真正处于健康存活状态（三重探活检查）。"""
+        """探测底层网络/串口监听服务是否真正处于健康存活状态（三重探活 + [SLAVE-RECONNECT-10] 底层监听端口探活）。"""
         # 返回：
-        # bool: 若运行标志为真、后台线程存活、asyncio 事件循环正在运行且 `_server` 实例已就绪，则返回 `True`。
-        # 设计说明（为什么不能只看 `self._is_running`）：
-        # 在现场复杂网络或串口拔插场景下，后台监听协程可能因底层未捕获的 I/O 异常提前退出，
-        # 此时容易出现 `_is_running` 仍为 True 但实际线程或事件循环已死的“半死（僵死）状态”。
-        # 通过同时校验 `_is_running`、`_thread.is_alive()`、`_loop.is_running()` 与 `_server`，才能精准识别僵死端口。
+        # bool: 若运行标志为真、后台线程存活、asyncio 事件循环正在运行、`_server` 实例就绪且底层监听端口处于激活状态，则返回 `True`。
+        # 设计说明（为什么不能只看 `self._is_running`、线程与事件循环）：
+        # 在现场网络中断（如物理网线拔出、路由切换或客户端连接重置）场景下，底层 TCP listen socket 可能已被 OS 关闭，
+        # 但后台线程与事件循环因仍阻塞在 run_until_complete(_serve()) 的 `await self._server.serving` 上保持"存活"表象，
+        # _server 对象也仍在（退化为 Server sockets=() 空套接字实例）。
+        # 若只看前三项，is_healthy() 恒返回 True 产生探活漏判，导致“自动重连”误判为未检测到僵死。
+        # 故追加第四项判据 self._server.is_active() 校验实际 listen socket 是否存活，并对 0.3s 启动竞态窗口做宽限豁免。
         if not self._is_running:
             return False
         # 事件循环线程还活着、loop 还在跑、_server 已被创建
@@ -634,6 +642,19 @@ class ModbusTransportServer:
         if self._server is None:
             # 可能仍在启动过程中，给 0.3s 宽限
             return self._is_running and (time.time() - self._start_ts) < 0.3
+        # [SLAVE-RECONNECT-10] 底层监听端口探活：TCP listener 的 `transport` 在正常绑定时为
+        # 非空 `asyncio.Server` 且 `is_active()==True`；listen socket 被关闭（网络中断）后
+        # `transport` 退化为 `Server sockets=()`（无实际 socket）且 `is_active()==False`，
+        # 而线程/事件循环因仍阻塞在 `await self.serving` 上保持"存活"表象，必须靠这一项才能识破。
+        # 启动竞态处理：`start()` 中 `_ready.set()` 发生在 `create_task(serve_forever)` 之后、
+        # 但 `await listen()` 真正绑定 socket 之前，故 start() 返回瞬间 `is_active()` 常为 False
+        # （实测 100% 复现），0.3s 宽限窗口内同样豁免该项判据，与 `_server is None` 的分支口径一致。
+        try:
+            if not self._server.is_active():
+                return (time.time() - self._start_ts) < 0.3
+        except Exception:
+            # `is_active()` 是 pymodbus 稳定 API，正常不会抛错；兜底防止底层对象被破坏时探活本身崩溃
+            pass
         return True
 
     # [SLAVE-RECONNECT] 新增自愈重建方法：若底层 listener 僵死，stop + start 重建
@@ -647,14 +668,57 @@ class ModbusTransportServer:
         # 绑定同一个 `_server_context` 后，原先挂载的所有从机立即无缝恢复通信。
         if self.is_healthy():
             return False
-        # 僵死：走一次 stop + start，重建 loop / server / 线程
-        self.stop()
-        # stop 后 _is_running 已清、_loop/_server/_thread 已置 None
-        self.start()
+        # [SLAVE-RECONNECT-10] 细粒度互斥：串行化同一端点的 stop+start，避免与 start() 内
+        # 半死重建分支并发竞态（两个线程同时 stop/start 同一 listener 会导致端口绑定失败）。
+        with self._rebuild_lock:
+            # 双重检查：拿到锁后再探一次，可能已被另一路径恢复
+            if self.is_healthy():
+                return False
+            # 僵死：走一次 stop + start，重建 loop / server / 线程
+            self.stop()
+            # stop 后 _is_running 已清、_loop/_server/_thread 已置 None
+            self.start()
+        # 锁外做重建后自检与日志回传，避免长时间持锁阻塞 UI
         # start 后 5 个已注册的从机（_server_context._slaves）仍需保持挂载，
         # 因为 _server_context 是 self 的属性，未被 stop 清除；
         # 新起的 TCP server 仍用同一个 context，路由表保留，从机数据块保留。
+        # [SLAVE-RECONNECT-10] 重建后主动验证一次"是否真的能收报文"（TCP 走回环真实往返；RTU 串口
+        # 无网络回环，跳过），并向 UI 日志面板回传结果，使"自动重连"按钮能明确告知用户
+        # "已重建且监听已恢复 / 已重建但端口仍不可用（请检查端口占用或网络）"，避免重建失败时静默假恢复。
+        self._log_rebuild_outcome()
         return True
+
+    def _log_rebuild_outcome(self) -> bool:
+        """[SLAVE-RECONNECT-10] 重建后做一次轻量"真实可达"自检并回传结果日志。
+
+        为什么必须做：`restart_if_broken()` 的 `start()` 内部在 1s 内未就绪时**只 `logger.warning`
+        不抛错**（`_ready.wait(timeout=1.0)` 超时即返回），若端口恰好被占用（`Address already in use`），
+        重建会**静默失败**——此时 UI 侧"自动重连"按钮仍显示"已重建 N 个"，但实际收不到报文，
+        正是本次现场"自动重连无效"问题的另一半根因。故重建后对 TCP 端点做一次回环 socket 往返自检，
+        把真实结果（成功/失败）显式回传到 `on_packet_log`，让操作者能在日志面板直接看到监听是否真的恢复。
+        """
+        if self.comm_type != "TCP":
+            # RTU 串口端点无法跨进程建立 TCP 回环自检，维持原有行为，不额外自检
+            return True
+        _, host, port = self.endpoint_key
+        # 回环自检：连接目标端点（非 127.0.0.1 时连 127.0.0.1，保证本地可测通）
+        probe_host = "127.0.0.1"
+        try:
+            with socket.create_connection((probe_host, port), timeout=1.0):
+                reachable = True
+        except Exception:
+            reachable = False
+        if self.on_packet_log:
+            if reachable:
+                self.on_packet_log(
+                    f"[自动重连] 端点 {self.endpoint_key} 重建成功，监听已恢复（回环自检通过）", "SYS"
+                )
+            else:
+                self.on_packet_log(
+                    f"[自动重连] 端点 {self.endpoint_key} 重建后监听仍未就绪（回环自检失败，"
+                    f"请检查端口 {port} 是否被占用或网络异常）", "ERROR"
+                )
+        return reachable
 
     def start(self) -> None:
         """启动底层物理端点监听线程，并使用事件驱动机制等待 `self._server` 就绪。"""
