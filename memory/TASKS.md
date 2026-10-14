@@ -23,8 +23,8 @@ scope: F:/GitHub/python @ 2.0.0
   - **需求/验收方**：Claude Code（`docs/Claude code/09_REVIEW_FIX_PROMPT.md`）
   - **执行/实施方**：Antigravity（`docs/Antigravity/09_REVIEW_FIX_REPORT.md`）
   - **状态**：已完成必修（H1/H2/H3）、应修（M1/M3/T1）、可选（M2/L1/L2）全量修复，回归与全量测试全绿（58 passed, 1 skipped），`memory/verify.py` PASS。
-- [ ] **10 "自动重连"探活漏判修复任务（SLAVE-RECONNECT-10）**：
-  - **需求/指令**：Claude Code（`docs/Claude code/10_SLAVE_RECONNECT_PROBE_FIX_PROMPT.md`，已重写为正式交给 Antigravity 的分步实施指令）
-  - **执行/实施方**：Antigravity（Claude 曾直接提交一版修复 `019048b`，后经用户要求撤回，代码已还原到任务 10 修改前基线，`dist/ModbusStudio.exe` 已重新打包为旧行为版本供过渡使用）
-  - **状态**：`modbus_engine.py` 当前为改动前状态；待 Antigravity 按 PROMPT 重新实施并出 `docs/Antigravity/10_SLAVE_RECONNECT_PROBE_FIX_REPORT.md`、复核验证通过后推进 handoff 为 `verified`。
+- [x] **10 "自动重连"探活漏判修复任务（SLAVE-RECONNECT-10）**：
+  - **需求/指令**：Claude Code（`docs/Claude code/10_SLAVE_RECONNECT_PROBE_FIX_PROMPT.md`）
+  - **执行/实施方**：Antigravity（`docs/Antigravity/10_SLAVE_RECONNECT_PROBE_FIX_REPORT.md`）
+  - **状态**：已按 PROMPT 重新实施并提交，Claude 代码层核对通过，Antigravity 已出 REPORT 并完成复跑验证。
 
