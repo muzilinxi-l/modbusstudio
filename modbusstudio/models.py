@@ -591,6 +591,54 @@ class SlaveDevice:
         """
         self.points.clear()
 
+    def to_dict(self) -> Dict[str, Any]:
+        """将从机配置与点表集合序列化为字典，供会话状态持久化。
+        参数：self（SlaveDevice 实例）。返回：Dict[str, Any]，从机属性与点表序列化字典。
+        步骤：1.序列化基础属性与 conn_config；2.将 (area_str, address) 复合键格式化为 'area_str|address'；3.返回字典。副作用：无。
+        """
+        # 将 points 字典的 (area_str, address) 二元组键转为标准 'area|address' 字符串以适配 JSON 规范
+        serialized_points: Dict[str, Any] = {}
+        for (area_str, address), pt in self.points.items():
+            serialized_points[f"{area_str}|{address}"] = pt.to_dict()
+        return {
+            "id": self.id,
+            "name": self.name,
+            "conn_config": self.conn_config.to_dict(),
+            "db_file": self.db_file,
+            "db_device_id": self.db_device_id,
+            "db_device_name": self.db_device_name,
+            "points": serialized_points,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> SlaveDevice:
+        """从字典反序列化恢复 SlaveDevice 实例及其点表。
+        参数：cls（SlaveDevice 类）、d（从机配置字典）。返回：SlaveDevice 实例。
+        步骤：1.反序列化 conn_config；2.构造 SlaveDevice 实例；3.遍历 points 并按 '|' 解析复合键，构造 ModbusPoint；4.返回实例。副作用：无。
+        """
+        conn_dict = d.get("conn_config", {})
+        conn_config = ConnectionConfig.from_dict(conn_dict) if conn_dict else ConnectionConfig()
+        dev = cls(
+            id=str(d.get("id", "")),
+            name=str(d.get("name", "")),
+            conn_config=conn_config,
+            db_file=d.get("db_file"),
+            db_device_id=d.get("db_device_id"),
+            db_device_name=d.get("db_device_name"),
+        )
+        points_data = d.get("points", {})
+        for key_str, pt_dict in points_data.items():
+            if "|" in key_str:
+                area_raw, addr_raw = key_str.split("|", 1)
+                try:
+                    area_str = AreaType.normalize(area_raw).value
+                    addr = int(addr_raw)
+                    pt = ModbusPoint.from_dict(pt_dict)
+                    dev.points[(area_str, addr)] = pt
+                except Exception:
+                    continue
+        return dev
+
 
 # =============================================================================
 # 9. 主机轮询任务、轮询结果与日志条目模型（PollTask / PollResult / LogEntry）

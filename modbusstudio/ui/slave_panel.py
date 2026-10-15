@@ -52,6 +52,18 @@ from ..models import (
 from ..services import PointService, SlaveService
 
 
+def save_session_state(app: Any) -> bool:
+    """包装调用 app.py 中的 save_session_state，持久化当前会话状态。
+    参数：app（ModbusStudioAppCore 实例）。返回：bool。
+    """
+    try:
+        from ..app import save_session_state as _save
+        return _save(app)
+    except Exception as e:
+        logger.warning(f"保存会话状态异常: {e}")
+        return False
+
+
 class SlavePanel(ttk.Frame):
     """职责：从机仿真配置与监控工作台面板（继承自 `ttk.Frame`）。"""
     # 成员变量：
@@ -739,6 +751,7 @@ class SlavePanel(ttk.Frame):
         # 5. 界面展示结果
         self._refresh_tree(device)
         self.app.logging_service.post("SYS", device.conn_config.unit_id, f"成功配置点位: 地址:{point.address} ({point.description}) 原始值:{point.raw_hex}")
+        save_session_state(self.app)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_toggle_current_slave_server]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -974,6 +987,7 @@ class SlavePanel(ttk.Frame):
         # 在 [_add_new_slave_instance] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._current_device_id = new_id
         self._update_instance_combobox()
+        save_session_state(self.app)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_delete_current_slave_instance]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -1003,6 +1017,7 @@ class SlavePanel(ttk.Frame):
             # 在 [_delete_current_slave_instance] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._current_device_id = None
             self._update_instance_combobox()
+            save_session_state(self.app)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_select_all_points]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -1179,6 +1194,7 @@ class SlavePanel(ttk.Frame):
             # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if dev:
                 self._refresh_tree(dev)
+        save_session_state(self.app)
         messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性")
 
     # ──────────────────────────────────────────────────────────────────
@@ -1383,11 +1399,17 @@ class SlavePanel(ttk.Frame):
     # ──────────────────────────────────────────────────────────────────
     def _select_database_file(self) -> None:
         """关联或切换业务数据库文件，并自动停止清空所有历史从机实例"""
+        # 若 self.app.db_path 有值且物理存在，以其所在目录作为 initialdir，否则回退 extra/ 默认目录
+        if self.app.db_path and os.path.exists(self.app.db_path):
+            init_dir = os.path.dirname(self.app.db_path)
+        else:
+            init_dir = os.path.abspath("extra")
+
         # 在 [_select_database_file] 中更新局部变量 [db_path]：为后续协议编码、服务调度或界面渲染准备中间状态
         db_path = filedialog.askopenfilename(
             title="选择业务数据库文件 (切换将自动清空当前从机实例)",
             filetypes=[("HEMS 数据库", "*.cdb;*.sqlite;*.db"), ("所有文件", "*.*")],
-            initialdir=os.path.abspath("extra"),
+            initialdir=init_dir,
         )
         # 在 [_select_database_file] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if db_path and os.path.exists(db_path):
@@ -1398,6 +1420,7 @@ class SlavePanel(ttk.Frame):
 
             # 切换数据库时：停止并清空当前已添加的所有从机实例与点表
             self._clear_all_slaves_and_reset_ui()
+            save_session_state(self.app)
             self.app.logging_service.post(
                 "SYS",
                 0,
@@ -1433,6 +1456,7 @@ class SlavePanel(ttk.Frame):
             self._update_instance_combobox()
             self._load_device_to_ui(target_dev.id)
             self._refresh_tree(target_dev)
+            save_session_state(self.app)
 
         DbImportDialog(
             parent=self,

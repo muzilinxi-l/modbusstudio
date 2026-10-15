@@ -27,4 +27,8 @@ scope: F:/GitHub/python @ 2.0.0
   - **需求/指令**：Claude Code（`docs/Claude code/10_SLAVE_RECONNECT_PROBE_FIX_PROMPT.md`）
   - **执行/实施方**：Antigravity（`docs/Antigravity/10_SLAVE_RECONNECT_PROBE_FIX_REPORT.md`）
   - **状态**：已按 PROMPT 重新实施并提交，Claude 代码层核对通过，Antigravity 已出 REPORT 并完成复跑验证。
+- [x] **11 会话状态持久化任务（SESSION-STATE-11）**：
+  - **需求/指令**：Claude Code（`docs/Claude code/11_SESSION_STATE_PERSISTENCE_PROMPT.md`）
+  - **执行/实施方**：Antigravity（`docs/Antigravity/11_SESSION_STATE_PERSISTENCE_REPORT.md`）
+  - **状态**：已完成 SlaveDevice 序列化、SlaveService.restore_devices 批量恢复、AppCore 状态存取与启动接入、UI 5 处触发点自动保存与 initialdir 跟随；全量回归通过（61 passed, 1 skipped），`memory/verify.py` PASS。
 

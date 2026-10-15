@@ -4,12 +4,15 @@
 """
 
 from __future__ import annotations
+from datetime import datetime
+import json
 import logging
 import os
+import shutil
 import sys
 import threading
 import tkinter as tk
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # 导入领域模型层枚举与实体：用于构建软件启动时的默认储能变流器（PCS）从机与示范点表
 # 为什么放在顶层显式导入而非使用通配符 *：
@@ -37,6 +40,63 @@ from .ui import MainWindow
 
 
 # =============================================================================
+# 会话状态持久化配置与工具函数（Session State Persistence）
+# 为什么将持久化逻辑置于 app.py：
+#   与 main() 里的 settings.json 主题读取风格保持一致，统一由顶层装配器协调，
+#   使自动化测试可直接无头调用 save_session_state / load_session_state。
+# =============================================================================
+SAVE_FILENAME = "session_state.json"
+SCHEMA_VERSION = 1
+
+
+def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> bool:
+    """将应用当前会话状态（业务数据库路径、所有从机配置及点表动态模拟状态）持久化至 JSON 文件。
+    参数：app（ModbusStudioAppCore 实例）、path（可选文件路径，默认为 session_state.json）。
+    返回：bool（保存是否成功）。
+    步骤：1.解析绝对路径；2.若文件已存在则备份为 .bak；3.提取 app.db_path 绝对值与所有从机 to_dict()；4.写入 JSON 文件。
+    副作用：在磁盘上写入或覆盖 session_state.json 及 session_state.json.bak。
+    """
+    target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
+    try:
+        if os.path.exists(target_path):
+            shutil.copy2(target_path, target_path + ".bak")
+
+        last_db = os.path.abspath(app.db_path) if app.db_path else None
+        slaves = [d.to_dict() for d in app.slave_service.get_devices()]
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "last_db_path": last_db,
+            "slaves": slaves,
+            "saved_at": datetime.now().astimezone().isoformat(),
+        }
+        with open(target_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logging.getLogger("App").warning(f"保存会话状态异常: {e}")
+        return False
+
+
+def load_session_state(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """从磁盘读取并解析会话状态 JSON 文件。
+    参数：path（可选文件路径，默认为 session_state.json）。
+    返回：Optional[Dict[str, Any]]，成功读取且 schema_version 匹配时返回字典，否则返回 None。
+    副作用：无。
+    """
+    target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
+    if not os.path.exists(target_path):
+        return None
+    try:
+        with open(target_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("schema_version") == SCHEMA_VERSION:
+            return data
+        return None
+    except Exception:
+        return None
+
+
+# =============================================================================
 # 核心应用协调器（Application Coordinator）
 # 为什么需要这个类：
 #   避免让 UI 窗口直接全局变量式地创建底层服务，集中管理 LoggingService、SlaveService、
@@ -48,11 +108,12 @@ class ModbusStudioAppCore:
     使用场景：在 main() 启动 GUI 前或自动化测试中实例化，作为上下文注入 MainWindow 及各子面板。
     """
 
-    def __init__(self):
-        """初始化应用核心协调器，按依赖顺序创建基础服务并装载默认从机。
-        参数：self（ModbusStudioAppCore 实例）。返回：None。
-        步骤：1.初始化日志服务；2.注入构建从机与轮询服务；3.探测默认 .cdb 数据库；4.注册默认 PCS 从机。
-        副作用：创建 logs/ 目录及 CSV 日志文件，并在内存中注册默认从机 slave_1。
+    def __init__(self, restore_session: bool = True, session_path: Optional[str] = None):
+        """初始化应用核心协调器，按依赖顺序创建基础服务并装载或恢复从机。
+        参数：self（ModbusStudioAppCore 实例）、restore_session（是否自动尝试恢复会话状态，默认 True）、session_path（可选自定义状态文件路径）。
+        返回：None。
+        步骤：1.初始化日志服务；2.注入构建从机与轮询服务；3.尝试恢复会话状态；4.若无存档或恢复失败，则探测默认库并装配默认 PCS 从机。
+        副作用：创建 logs/ 目录及 CSV 日志文件，并在内存中装载从机。
         """
         # 1. 业务与通信基础设施初始化
         # 为什么必须最先创建 LoggingService：
@@ -63,15 +124,58 @@ class ModbusStudioAppCore:
         # 将日志服务注入主机轮询服务，确保主站与从站的 TX/RX 报文能在同一视图按时间序对照分析
         self.poll_service = PollService(self.logging_service)
 
-        # 2. 默认数据库路径探测
-        # 为什么在启动时自动探测：
-        #   一体机与 EMS 联调高频使用 extra/hems.cdb，启动预探测可省去用户每次进弹窗手动寻址的繁琐操作
-        self.db_path = self._probe_default_db()
+        # 2. 尝试从会话状态存档恢复（记住上次库路径、从机配置与点表变位模拟规则）
+        restored = False
+        if restore_session:
+            restored = self.restore_session(session_path)
 
-        # 3. 装配默认从机服务实例
-        # 为什么预置一台默认从机：
-        #   让编程学习者或现场工程师首次打开软件即可看到完整的点表结构（含 16 位整型与 32 位浮点变位）
-        self._init_default_slaves()
+        # 3. 若无可用存档或未启用恢复，则回落到默认探测与默认 PCS 从机
+        if not restored:
+            self.db_path = self._probe_default_db()
+            self._init_default_slaves()
+
+    def restore_session(self, path: Optional[str] = None) -> bool:
+        """从 session_state.json 恢复会话状态（业务数据库路径与从机点表）。
+        参数：self（ModbusStudioAppCore 实例）、path（可选文件路径）。
+        返回：bool，命中并成功恢复返回 True，无存档或解析失败返回 False。
+        步骤：1.调用 load_session_state；2.恢复有效库路径或回落 _probe_default_db；3.恢复从机或装载默认从机。
+        副作用：更新 self.db_path，向 self.slave_service 注册从机，投递系统审计日志。
+        """
+        data = load_session_state(path)
+        if not data:
+            return False
+
+        # 1. 恢复业务数据库路径（库文件存在则直接采用并跳过 _probe_default_db，失效则回落）
+        saved_db = data.get("last_db_path")
+        if saved_db and os.path.exists(saved_db):
+            self.db_path = os.path.abspath(saved_db)
+            self.logging_service.post("SYS", 0, f"发现并预载业务数据库: {self.db_path}")
+        else:
+            if saved_db:
+                self.logging_service.post("SYS", 0, f"存档中记录的库文件 [{saved_db}] 已失效，本次按默认库恢复")
+            self.db_path = self._probe_default_db()
+
+        # 2. 恢复从机与点表（独立恢复，不依赖库文件是否存在）
+        slaves_data = data.get("slaves", [])
+        if slaves_data:
+            count, warnings = self.slave_service.restore_devices(slaves_data)
+            for w in warnings:
+                self.logging_service.post("SYS", 0, f"会话恢复告警: {w}")
+            if count > 0:
+                self.logging_service.post("SYS", 0, f"已恢复会话从机服务实例 (共 {count} 台)")
+            else:
+                self._init_default_slaves()
+        else:
+            self._init_default_slaves()
+
+        return True
+
+    def save_session_state(self, path: Optional[str] = None) -> bool:
+        """将当前应用会话状态保存至磁盘。
+        参数：self（ModbusStudioAppCore 实例）、path（可选文件路径）。
+        返回：bool（保存是否成功）。
+        """
+        return save_session_state(self, path)
 
     def _probe_default_db(self) -> Optional[str]:
         """按优先级探测项目 extra/ 目录下是否存在可用的现场业务数据库文件。

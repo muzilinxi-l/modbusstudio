@@ -350,6 +350,49 @@ class SlaveService:
         # 从 [register_device] 返回执行结果给调用方，结束当前处理分支
         return True, "注册成功"
 
+    def restore_devices(self, devices_list: List[dict]) -> Tuple[int, List[str]]:
+        """从字典列表批量反序列化恢复从机设备实例模型与点表（用于会话状态恢复）。
+        参数：devices_list（从机配置字典列表）。
+        返回：Tuple[int, List[str]]（成功恢复的从机数量, 告警与跳过原因文本列表）。
+        约束：仅在内存注册模型，绝不自动调用 start_slave 启动网络监听；自动执行配额与 TCP 端口冲突检查。
+        """
+        success_count = 0
+        warnings: List[str] = []
+
+        for item in devices_list:
+            if not isinstance(item, dict):
+                warnings.append("遇到无效的从机配置项 (非字典对象)，已跳过")
+                continue
+            try:
+                device = SlaveDevice.from_dict(item)
+            except Exception as e:
+                warnings.append(f"反序列化从机配置失败 [{item.get('name', '未知')}]: {e}")
+                continue
+
+            # TCP 端口占用冲突预检
+            if device.conn_config and device.conn_config.comm_type == CommType.TCP:
+                occupied = self.get_occupied_tcp_ports()
+                if device.conn_config.port in occupied:
+                    warnings.append(
+                        f"从机 '{device.name}' (ID: {device.id}) 的 TCP 端口 {device.conn_config.port} 已被占用，跳过恢复"
+                    )
+                    continue
+
+            # 配额检查（复用现有 can_register_device）
+            can_ok, can_err = self.can_register_device(device.conn_config.comm_type)
+            if not can_ok:
+                warnings.append(f"从机 '{device.name}' (ID: {device.id}) 恢复失败: {can_err}")
+                continue
+
+            # 注册到内存字典（不启动监听）
+            ok, msg = self.register_device(device, check_quota=True)
+            if ok:
+                success_count += 1
+            else:
+                warnings.append(f"从机 '{device.name}' 注册失败: {msg}")
+
+        return success_count, warnings
+
     def get_occupied_tcp_ports(self) -> set:
         """获取所有已注册 TCP 从机及活跃 ModbusServerHub listener 所占用的端口集合。"""
         ports = set()
