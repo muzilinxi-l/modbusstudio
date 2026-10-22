@@ -183,15 +183,25 @@ def _slave_payload(name="s1", port=15502, points=None):
 
 
 def _run_cli(tmp_path, *args):
-    """在临时目录跑 CLI 子进程，避免污染工作区日志目录。"""
+    """在临时目录跑 CLI 子进程，避免污染工作区日志目录。
+
+    为什么手动按 UTF-8 解码：reconcile.main 会把 stdout/stderr 重配置为
+    UTF-8（防 Windows GBK 控制台乱码），父进程若用默认 GBK 读管道会
+    UnicodeDecodeError，故捕获字节流后统一 utf-8 解码（errors 容错）。
+    """
     code = textwrap.dedent(
         f"from modbusstudio.tools.reconcile import main; raise SystemExit(main({list(args)!r}))"
     )
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
-    return subprocess.run(
+    proc = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=str(tmp_path), env=env, capture_output=True, text=True,
+        cwd=str(tmp_path), env=env, capture_output=True,
     )
+    return type("R", (), {
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.decode("utf-8", errors="replace"),
+        "stderr": proc.stderr.decode("utf-8", errors="replace"),
+    })()
 
 
 def test_cli_local_table_and_exit_zero(tmp_path):
@@ -247,3 +257,22 @@ def test_cli_json_output(tmp_path):
     assert any(row["point_key"] == "4x_HoldingRegister|0" for row in data)
     row = next(row for row in data if row["point_key"] == "4x_HoldingRegister|0")
     assert row["scaled"] == 250.0
+
+
+def test_compute_local_rows_broken_scale_fallback():
+    """坏点位兜底：scale=None 的数值型点位走 except 分支，不抛 TypeError。
+
+    覆盖审查发现的 reconcile.py 兜底行缺陷（旧代码 pt.value * pt.scale
+    在 scale=None 时会二次炸掉），修复后用 scale_value 收口。
+    """
+    from modbusstudio.tools.reconcile import compute_local_rows
+    pt = _make_point(DataType.UINT16, scale=1.0, value=100)
+    slave = SlaveDevice(id="s", name="s", conn_config=ConnectionConfig())
+    slave.add_point(pt)
+    slave.points[("4x_HoldingRegister", 0)].scale = None  # 模拟坏配置
+    rows = compute_local_rows(slave)
+    assert len(rows) == 1
+    key, raw, scaled = rows[0]
+    assert key == "4x_HoldingRegister|0"
+    assert raw == 100
+    assert scaled == 100  # 兜底原样返回，不因坏 scale 抛错

@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..modbus_codec import ByteOrderMode, ModbusDataType, decode_value, encode_value
 from ..models import ModbusPoint, SlaveDevice
 from ..services import SlaveService
-from .point_value import is_scalable, point_key
+from .point_value import is_scalable, point_key, scale_value
 
 
 def load_slaves(session_path: str) -> Tuple[List[SlaveDevice], List[str]]:
@@ -85,9 +85,11 @@ def compute_local_rows(slave: SlaveDevice) -> List[Tuple[str, Any, Any]]:
             raw_value = decode_value(regs, data_type, byte_order, pt.string_length)
             scaled_value = raw_value * pt.scale
         except Exception:
-            # 值与类型不匹配的坏点位：退回"存的就是换算值"的兜底口径
+            # 值与类型不匹配的坏点位：退回"存的就是换算值"的兜底口径。
+            # 用 point_value.scale_value 而非裸乘：scale 损坏（None/字符串）
+            # 或值非数值时不会抛 TypeError，安全原样返回。
             raw_value = pt.value
-            scaled_value = pt.value * pt.scale
+            scaled_value = scale_value(pt.value, pt)
         rows.append((key, raw_value, scaled_value))
     return rows
 
