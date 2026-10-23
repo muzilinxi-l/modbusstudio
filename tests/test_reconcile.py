@@ -276,3 +276,83 @@ def test_compute_local_rows_broken_scale_fallback():
     assert key == "4x_HoldingRegister|0"
     assert raw == 100
     assert scaled == 100  # 兜底原样返回，不因坏 scale 抛错
+
+
+def test_compute_point_value_float64_roundtrip():
+    """P0-① 回归：业务层 DataType.FLOAT64 集中映射底层 DOUBLE64，走通 64-bit 编解码与换算。"""
+    from modbusstudio.modbus_codec import ModbusDataType, encode_value
+    pt = _make_point(DataType.FLOAT64, scale=2.0, value=4.25, byte_order=ByteOrder.ABCD)
+    # 4.25 双精度 IEEE 754 对应 8 字节 4 个 16 位寄存器
+    regs = encode_value(4.25, ModbusDataType.DOUBLE64, ByteOrder.ABCD, 0)
+    assert len(regs) == 4
+    raw, scaled = compute_point_value(regs, pt)
+    assert abs(raw - 4.25) < 1e-9
+    assert abs(scaled - 8.5) < 1e-9
+
+
+def test_compute_local_rows_float64():
+    """P0-① 回归：compute_local_rows 正确识别 FLOAT64 并调用 DOUBLE64 编解码主路径。"""
+    from modbusstudio.tools.reconcile import compute_local_rows
+    pt = _make_point(DataType.FLOAT64, scale=2.0, value=4.25)
+    slave = SlaveDevice(id="s_f64", name="s_f64", conn_config=ConnectionConfig())
+    slave.add_point(pt)
+    rows = compute_local_rows(slave)
+    assert len(rows) == 1
+    key, raw, scaled = rows[0]
+    assert abs(raw - 4.25) < 1e-9
+    assert abs(scaled - 8.5) < 1e-9
+
+
+def test_load_slaves_multi_unit_same_port(tmp_path):
+    """P0-② 回归：同端口多 Unit ID 从机不被端口预检误杀，全量正常恢复。"""
+    from modbusstudio.tools.reconcile import load_slaves
+    slaves_payload = [
+        _slave_payload(name=f"s{i}", port=15502) for i in range(1, 4)
+    ]
+    for i, s in enumerate(slaves_payload, start=1):
+        s["id"] = f"slave_test_{i}"
+        s["conn_config"]["unit_id"] = i
+    session = _make_session(tmp_path, slaves_payload)
+    slaves, warnings = load_slaves(str(session))
+    assert len(slaves) == 3
+    assert warnings == []
+    assert [s.conn_config.unit_id for s in slaves] == [1, 2, 3]
+
+
+def test_bad_scale_string_all_three_paths():
+    """P0-③ 回归：scale='bad' 字符串在三条路径均安全原样返回，不产生重复垃圾串。"""
+    from modbusstudio.tools.reconcile import compute_local_rows
+    # 路径 1：直接调 scale_value
+    pt1 = _make_point(DataType.UINT16, scale="bad", value=100)
+    assert scale_value(100, pt1) == 100
+
+    # 路径 2：compute_local_rows 主路径（value=100 符合 UINT16，但 scale='bad'）
+    slave_main = SlaveDevice(id="sm", name="sm", conn_config=ConnectionConfig())
+    slave_main.add_point(pt1)
+    rows_main = compute_local_rows(slave_main)
+    assert len(rows_main) == 1
+    assert rows_main[0][1] == 100
+    assert rows_main[0][2] == 100  # 主路径使用 scale_value 保护，原样返回 100，而非 300 字符 'bad...'
+
+    # 路径 3：compute_local_rows 兜底路径（字节序异常触发 encode 流程 except 兜底）
+    pt_bad_order = _make_point(DataType.UINT16, scale="bad", value=100)
+    pt_bad_order.byte_order = type("BO", (), {"value": "BAD_BYTE_ORDER"})()
+    slave_fallback = SlaveDevice(id="sf", name="sf", conn_config=ConnectionConfig())
+    slave_fallback.add_point(pt_bad_order)
+    rows_fallback = compute_local_rows(slave_fallback)
+    assert len(rows_fallback) == 1
+    assert rows_fallback[0][1] == 100
+    assert rows_fallback[0][2] == 100  # 兜底通过 scale_value 保护，原样返回 100
+
+
+def test_diff_with_cloud_bool_strict_equality():
+    """P1-⑤ 回归：布尔点位严格比对，防止 float(True)=1.0 把云端 1/1.0/1.0005 误吸收。"""
+    local = [("0x_Coil|0", True, True)]
+    # 云端是数值 1、1.0、1.0005 时，必须判定为 FAIL
+    assert diff_with_cloud(local, {"0x_Coil|0": 1}, tol=0.01)[0][3] == "FAIL"
+    assert diff_with_cloud(local, {"0x_Coil|0": 1.0}, tol=0.01)[0][3] == "FAIL"
+    assert diff_with_cloud(local, {"0x_Coil|0": 1.0005}, tol=0.01)[0][3] == "FAIL"
+    # 云端是 bool True 时判定为 OK
+    assert diff_with_cloud(local, {"0x_Coil|0": True}, tol=0.01)[0][3] == "OK"
+    # 云端是 bool False 时判定为 FAIL
+    assert diff_with_cloud(local, {"0x_Coil|0": False}, tol=0.01)[0][3] == "FAIL"

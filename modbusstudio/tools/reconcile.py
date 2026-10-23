@@ -29,18 +29,20 @@ import json
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..modbus_codec import ByteOrderMode, ModbusDataType, decode_value, encode_value
+from ..modbus_codec import ByteOrderMode, decode_value, encode_value
 from ..models import ModbusPoint, SlaveDevice
-from ..services import SlaveService
-from .point_value import is_scalable, point_key, scale_value
+from .point_value import is_scalable, point_key, scale_value, to_codec_type
 
 
 def load_slaves(session_path: str) -> Tuple[List[SlaveDevice], List[str]]:
     """从 session_state.json 恢复全部从机（仅内存模型，不启动任何监听）。
 
     参数：session_path（存档路径）。返回：(slaves, 恢复告警列表)。
-    步骤：走 SlaveService.restore_devices 既有通道（自带配额与端口预检，
-          但只注册模型、绝不 start）。副作用：无（不碰网络）。
+    设计原则：对账是只读静态还原，不走服务层（SlaveService），
+    避免触发 get_occupied_tcp_ports 对同端口多从机（Server Hub，
+    不同 unit_id）的端口占用拦截与 100 台配额截断；逐台调用纯领域模型
+    SlaveDevice.from_dict(item)，坏条目收集进 warnings 不中断。
+    副作用：无（不碰网络）。
     """
     try:
         with open(session_path, "r", encoding="utf-8") as f:
@@ -48,14 +50,19 @@ def load_slaves(session_path: str) -> Tuple[List[SlaveDevice], List[str]]:
     except (OSError, json.JSONDecodeError) as e:
         return [], [f"读取存档失败 ({session_path}): {e}"]
 
-    slave_svc = SlaveService.__new__(SlaveService)
-    # 为什么用 __new__：跳过 __init__ 的 LoggingService 依赖（日志写盘），
-    # restore_devices 本身不需要日志通道；只补齐它真正用到的内部字典。
-    slave_svc._devices = {}
-    slave_svc._active_engines = {}
-    slave_svc.logging_service = None
-    _, warnings = slave_svc.restore_devices(payload.get("slaves", []))
-    return slave_svc.get_devices(), warnings
+    slaves: List[SlaveDevice] = []
+    warnings: List[str] = []
+    for item in payload.get("slaves", []):
+        if not isinstance(item, dict):
+            warnings.append("无效的从机项 (非字典)，跳过")
+            continue
+        try:
+            device = SlaveDevice.from_dict(item)
+            slaves.append(device)
+        except Exception as e:
+            name = item.get("name", "未知") if isinstance(item, dict) else "未知"
+            warnings.append(f"反序列化从机失败 [{name}]: {e}")
+    return slaves, warnings
 
 
 def compute_local_rows(slave: SlaveDevice) -> List[Tuple[str, Any, Any]]:
@@ -69,7 +76,7 @@ def compute_local_rows(slave: SlaveDevice) -> List[Tuple[str, Any, Any]]:
     这条关系的唯一事实源（引擎内部也是调它）。直接调用可避开引擎的
     1-based 地址基准、端口参数与 pymodbus 废弃告警，纯 CPU 计算。
     步骤：数值型把 .value 编码成寄存器再解算回（等价"现场读寄存器"），
-          乘 scale 得工程值；非数值型（STRING/BOOL/HEX16）直接取 .value。
+          用 scale_value 统一乘 scale 得工程值；非数值型直接取 .value。
     副作用：无（纯函数，不碰网络/文件）。
     """
     rows: List[Tuple[str, Any, Any]] = []
@@ -79,11 +86,11 @@ def compute_local_rows(slave: SlaveDevice) -> List[Tuple[str, Any, Any]]:
             rows.append((key, pt.value, pt.value))
             continue
         try:
-            data_type = ModbusDataType(pt.data_type.value)
+            data_type = to_codec_type(pt.data_type)
             byte_order = ByteOrderMode(pt.byte_order.value)
             regs = encode_value(pt.value, data_type, byte_order, pt.string_length)
             raw_value = decode_value(regs, data_type, byte_order, pt.string_length)
-            scaled_value = raw_value * pt.scale
+            scaled_value = scale_value(raw_value, pt)
         except Exception:
             # 值与类型不匹配的坏点位：退回"存的就是换算值"的兜底口径。
             # 用 point_value.scale_value 而非裸乘：scale 损坏（None/字符串）
@@ -103,6 +110,13 @@ def diff_with_cloud(
           tol（绝对容差）。返回：(key, 本地, 云端, 状态) 列表。
     状态含义：OK（差值在容差内或相等）/ FAIL / 缺失（本地有云端没有）/
              云端多（云端有本地没有，本地列填 None）。
+
+    比对规则：
+    1. 布尔点位（isinstance(scaled, bool)）：严格要求云端也是布尔且值相等，
+       严禁进 float 容差（防止 float(True)=1.0 把云端 0/1/1.0005 等数值吸收为 OK）；
+    2. 字符串/十六进制（isinstance(scaled, str)）：严格全等比对；
+    3. 数值型点位：在云端非 bool 时进入 float 绝对容差比对 abs(float(a)-float(b))<=tol，
+       异常时退回严格相等。
     """
     results: List[Tuple[str, Any, Any, str]] = []
     seen = set()
@@ -112,11 +126,18 @@ def diff_with_cloud(
             results.append((key, scaled, None, "缺失"))
             continue
         cloud_val = cloud[key]
-        try:
-            ok = abs(float(scaled) - float(cloud_val)) <= tol
-        except (TypeError, ValueError):
-            # 非数值型（字符串/布尔）退回严格相等比较
+        if isinstance(scaled, bool):
+            ok = isinstance(cloud_val, bool) and scaled == cloud_val
+        elif isinstance(scaled, str):
             ok = scaled == cloud_val
+        elif isinstance(cloud_val, bool):
+            # 本地是数值但云端是 bool，类型不符直接判定 FAIL
+            ok = False
+        else:
+            try:
+                ok = abs(float(scaled) - float(cloud_val)) <= tol
+            except (TypeError, ValueError):
+                ok = scaled == cloud_val
         results.append((key, scaled, cloud_val, "OK" if ok else "FAIL"))
     for key, val in cloud.items():
         if key not in seen:
@@ -184,8 +205,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         diff = diff_with_cloud(
             [(r[1], r[2], r[3]) for r in rows_all], cloud, args.tolerance)
         if args.json:
+            # P2 优化：预建 point_key -> slave_name 字典，避免逐行线性搜索导致 O(N*M)
+            key_to_slave = {r[1]: r[0] for r in rows_all}
             payload = [
-                {"slave": next((r[0] for r in rows_all if r[1] == k), ""),
+                {"slave": key_to_slave.get(k, ""),
                  "point_key": k, "local": loc, "cloud": cl, "status": st}
                 for k, loc, cl, st in diff
             ]

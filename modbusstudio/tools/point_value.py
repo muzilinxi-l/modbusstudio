@@ -15,7 +15,27 @@ from typing import Any, List, Tuple
 # 底层编解码器（只 import 它现成的 decode_value，不改它内部）
 from ..modbus_codec import decode_value, ModbusDataType, ByteOrderMode
 # 业务层点位模型（data_type/byte_order 是业务层枚举，值与底层同名）
-from ..models import ModbusPoint
+from ..models import DataType, ModbusPoint
+
+
+# 业务层 DataType 到底层 ModbusDataType 的集中转换映射表。
+# 为什么需要转换：业务层定义为 FLOAT64，而底层编解码器命名为 DOUBLE64（modbus_codec.py:76）；
+# 其余 8 种类型（INT16/UINT16/INT32/UINT32/FLOAT32/BOOL/STRING/HEX16）名称完全相同。
+_CODEC_TYPE_MAP = {
+    DataType.FLOAT64.value: ModbusDataType.DOUBLE64,
+}
+
+
+def to_codec_type(data_type: Any) -> ModbusDataType:
+    """把业务层 DataType 映射为底层 ModbusDataType。
+
+    为什么集中收口：业务层 FLOAT64 在底层对应 DOUBLE64，集中收口保证
+    point_value.py 与 reconcile.py 复用同一逻辑，防止两处各自内联导致修一处漏一处。
+    参数：data_type（DataType 实例或类型字符串）。返回：ModbusDataType 底层枚举。
+    """
+    val = data_type.value if hasattr(data_type, "value") else str(data_type)
+    target = _CODEC_TYPE_MAP.get(val, val)
+    return ModbusDataType(target)
 
 
 # 参与 scale 换算的数据类型集合（数值型才乘系数有意义）。
@@ -45,7 +65,7 @@ def decode_point(registers: List[int], point: ModbusPoint) -> Any:
     返回：decode_value 解算后的原始工程值（int/float/bool/str）。
     步骤：桥接业务层枚举到底层枚举，再委托 decode_value。副作用：无。
     """
-    data_type = ModbusDataType(point.data_type.value)
+    data_type = to_codec_type(point.data_type)
     byte_order = ByteOrderMode(point.byte_order.value)
     return decode_value(registers, data_type, byte_order, point.string_length)
 
@@ -53,17 +73,24 @@ def decode_point(registers: List[int], point: ModbusPoint) -> Any:
 def scale_value(value: Any, point: ModbusPoint) -> Any:
     """对解算值应用点位的 scale 系数，得到最终工程值。
 
-    为什么 try/except 兜底：个别点位 scale 可能被配成异常值，
-    换算层不应让单个坏点位把整条对账链拖崩，乘不出就原样返回。
+    为什么显式类型检查 + try/except 兜底：
+    1. Python 中 int * str（如 100 * "bad"）会执行字符串序列乘法产生垃圾串，
+       且不会抛 TypeError/ValueError。因此入口显式校验 scale 为 int/float；
+    2. Python 中 bool 是 int 的子类（isinstance(True, int) 为 True），
+       但布尔值作为系数在工业点表中无实际意义，显式排除 bool；
+    3. 个别点位计算异常时退回未换算值，不阻断整条链路。
     参数：value（decode_point 的解算结果）；point（点位定义）。
-    返回：数值型返回 value*scale；非数值型（is_scalable=False）原样返回。
+    返回：数值型且 scale 合法时返回 value*scale；否则原样返回。
     """
     if not is_scalable(point):
+        return value
+    # 显式校验 scale 为合法数值类型（int 或 float，排除 bool）
+    if not isinstance(point.scale, (int, float)) or isinstance(point.scale, bool):
         return value
     try:
         return value * point.scale
     except (TypeError, ValueError):
-        # 兜底：系数或值无法相乘时退回未换算值，避免整批失败
+        # 兜底：计算无法完成时退回未换算值，避免整批失败
         return value
 
 
