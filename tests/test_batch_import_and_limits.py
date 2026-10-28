@@ -191,32 +191,88 @@ def test_batch_device_merge_and_replace():
     assert target_dev.get_point("4x_HoldingRegister", 20) is not None
 
 
-def test_db_import_dialog_default_selection_policy():
+def test_db_import_dialog_default_selection_policy(tmp_path):
     """测试导入弹窗分类策略：Type=1 或 Type=2 时默认全选已使能设备，全部业务模块不全选"""
+    import json
+    import sqlite3
+    pytest.importorskip("tkinter")
     import tkinter as tk
     from modbusstudio.app import ModbusStudioAppCore
     from modbusstudio.ui.dialogs import DbImportDialog
 
+    # 1. 注入合成 cdb fixture，解耦现场数据库与开发者机器 session_state.json 绝对路径依赖
+    # 构造规格：3 台 Type=1 使能 + 1 台 Type=1 禁用 + 2 台 Type=2 使能 + 1 台 Type=3 模块
+    db_file = tmp_path / "synthetic_hems.cdb"
+    conn = sqlite3.connect(str(db_file))
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE app (
+            Id INTEGER PRIMARY KEY,
+            Type INTEGER,
+            [English Name] TEXT,
+            [Chinese Name] TEXT,
+            [Controller Library] TEXT,
+            [Referred Model] TEXT,
+            [Local Parameters] TEXT,
+            More TEXT,
+            enable INTEGER
+        )
+    """)
+    apps_data = [
+        (1, 1, "PCS_1", "英博PCS", "MbMaster", "PCS_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 1),
+        (2, 1, "BMS_1", "高压电池箱", "MbMaster", "BMS_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 1),
+        (3, 1, "METER_1", "双向电表", "MbMaster", "Meter_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 1),
+        (4, 1, "PCS_DISABLED", "备用PCS(停用)", "MbMaster", "PCS_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 0),
+        (5, 2, "FORWARD_NORTH", "北向数据转发", "MbMaster", "Fwd_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 1),
+        (6, 2, "CLOUD_SYNC", "云端协同服务", "MbMaster", "Cloud_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 1),
+        (7, 3, "LOCAL_ENERGY", "本地能量管理策略", "MbMaster", "Strategy_Model", "[]", json.dumps({"Pollings": [], "Realtime Variables": []}), 1),
+    ]
+    cur.executemany("""
+        INSERT INTO app (Id, Type, [English Name], [Chinese Name], [Controller Library], [Referred Model], [Local Parameters], More, enable)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, apps_data)
+    conn.commit()
+    conn.close()
+
     root = tk.Tk()
     root.withdraw()
     try:
-        app = ModbusStudioAppCore()
+        # 显式禁止恢复会话存档，强制注入已知合成数据库路径
+        app = ModbusStudioAppCore(restore_session=False)
+        app.db_path = str(db_file)
         dlg = DbImportDialog(root, app, lambda d: None)
 
-        # 1. 验证默认 "all" 模式下：不进行全部选中（仅选中 1 项或首项）
+        # 2. 验证默认 "all" 模式下：不进行全部选中（仅选中 1 项或首项）
         dlg.type_var.set("all")
         all_sel = dlg.tree.selection()
         assert len(all_sel) <= 1, f"'all' 模式下不应当全选，当前选中: {len(all_sel)}"
 
-        # 2. 验证切换至 "1" (南向采集设备) 模式：必须默认全选当前所有已使能设备！
+        # 3. 验证切换至 "1" (南向采集设备) 模式：必须默认全选当前所有已使能设备 (共 3 台已使能)！
         dlg.type_var.set("1")
         sel_type1 = dlg.tree.selection()
-        assert len(sel_type1) > 1, f"Type=1 模式下应当自动全选所有已使能设备，当前选中数: {len(sel_type1)}"
+        expected_enabled_type1_ids = {1, 2, 3}
+        assert len(sel_type1) == len(expected_enabled_type1_ids), (
+            f"Type=1 模式下应当自动全选所有已使能设备 (预期: {len(expected_enabled_type1_ids)})，当前选中数: {len(sel_type1)}"
+        )
+        selected_ids = {int(item_id) for item_id in sel_type1}
+        assert selected_ids == expected_enabled_type1_ids, f"选中的设备 ID 与预期使能集合不匹配: {selected_ids} vs {expected_enabled_type1_ids}"
         for item_id in sel_type1:
             a = dlg.app_item_map[int(item_id)][0]
             assert a.enable == 1, f"未使能设备不应被默认全选: App ID {a.app_id}"
+            assert a.app_type == 1, f"非 Type=1 设备不应被选中: App ID {a.app_id}"
 
-        # 3. 验证切换回 "all" 模式：恢复为单选首项
+        # 4. 验证切换至 "2" (北向业务模块) 模式：必须默认全选当前所有已使能设备 (共 2 台已使能)！
+        dlg.type_var.set("2")
+        sel_type2 = dlg.tree.selection()
+        expected_enabled_type2_ids = {5, 6}
+        assert len(sel_type2) == len(expected_enabled_type2_ids), (
+            f"Type=2 模式下应当自动全选所有已使能设备 (预期: {len(expected_enabled_type2_ids)})，当前选中数: {len(sel_type2)}"
+        )
+        for item_id in sel_type2:
+            a = dlg.app_item_map[int(item_id)][0]
+            assert a.enable == 1 and a.app_type == 2
+
+        # 5. 验证切换回 "all" 模式：恢复为单选首项
         dlg.type_var.set("all")
         assert len(dlg.tree.selection()) <= 1
 

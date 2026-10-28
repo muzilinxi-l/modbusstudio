@@ -38,11 +38,13 @@ def run_full_ui_import_self_test():
         pytest.skip(f"当前环境无法初始化 Tk 顶层窗口: {e}")
 
     try:
-        app = ModbusStudioAppCore()
+        app = ModbusStudioAppCore(restore_session=False)
 
-        # 关联 extra/hems.cdb 业务数据库
-        db_path = os.path.abspath("extra/hems.cdb")
-        assert os.path.exists(db_path), f"数据库不存在: {db_path}"
+        # 关联业务数据库（支持 HEMS_TEST_CDB 环境变量注入，默认 extra/hems.cdb）
+        cdb_env = os.environ.get("HEMS_TEST_CDB")
+        db_path = os.path.abspath(cdb_env if cdb_env else "extra/hems.cdb")
+        if not os.path.exists(db_path):
+            pytest.skip(f"Hems cdb not available: {db_path}")
         app.db_path = db_path
         print(f"[Step 1] 成功关联数据库: {db_path}")
 
@@ -58,12 +60,14 @@ def run_full_ui_import_self_test():
         print(f"[Step 3] 成功从数据库解析出 {len(apps)} 个 Modbus 业务模块")
         assert len(apps) > 0, "数据库中无 Modbus 应用！"
 
-        # 查找典型测试设备：南向物理采集设备 (Type=1)
+        # 查找典型测试设备：首台带点表的南向物理采集设备 (Type=1)
         target_app = next((a for a in apps if a.app_type == 1 and len(a.extract_studio_points()) > 0), None)
         if not target_app:
-            target_app = apps[0]
+            pytest.skip("数据库中未找到包含有效点表的 Type=1 (南向采集) 设备")
         
         pts = target_app.extract_studio_points()
+        if len(pts) < 2:
+            pytest.skip(f"目标设备 (ID={target_app.app_id}) 点表行数不足 2 行 (当前: {len(pts)})，跳过 E2E 导入测试")
         print(f"      选用目标测试设备: App ID={target_app.app_id}, 名称='{target_app.chinese_name or target_app.english_name}', 点位数={len(pts)}")
 
         # 4. 模拟在 UI 中执行新建从机并导入该设备点表

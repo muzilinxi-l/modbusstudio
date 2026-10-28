@@ -12,6 +12,10 @@ import pytest
 if sys.platform != "win32":
     pytest.skip("仅在 Windows 平台执行 EXE 冒烟测试", allow_module_level=True)
 
+EXE_PATH = os.path.abspath("dist/ModbusStudio.exe")
+if not os.path.exists(EXE_PATH):
+    pytest.skip("EXE 构建产物缺失，请先执行 PyInstaller 构建", allow_module_level=True)
+
 pytest.importorskip("PIL")
 from PIL import ImageGrab
 
@@ -28,11 +32,10 @@ except Exception:
 
 
 def test_exe_launch_and_window_zoomed():
-    exe_path = os.path.abspath("dist/ModbusStudio.exe")
-    assert os.path.exists(exe_path), f"EXE 文件不存在: {exe_path}"
+    assert os.path.exists(EXE_PATH), f"EXE 文件不存在: {EXE_PATH}"
 
-    print(f"[1/4] 启动目标可执行程序: {exe_path}")
-    proc = subprocess.Popen([exe_path])
+    print(f"[1/4] 启动目标可执行程序: {EXE_PATH}")
+    proc = subprocess.Popen([EXE_PATH])
     assert proc.pid is not None, "进程未能成功创建"
     print(f"      PID = {proc.pid}")
 
