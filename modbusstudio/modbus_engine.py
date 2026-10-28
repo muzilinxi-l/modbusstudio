@@ -953,11 +953,12 @@ class ModbusServerHub:
             server = self._servers.get(key)
             # 若未精确命中但属于 TCP 模式，检查是否存在同端口且包含 0.0.0.0 通配绑定的可复用服务
             if server is None and key[0] == "TCP":
-                for (c, h, p), s in self._servers.items():
-                    if c == "TCP" and p == key[2] and (h == "0.0.0.0" or key[1] == "0.0.0.0" or h == key[1]):
-                        server = s
-                        key = (c, h, p)
-                        break
+                for s_key, s in self._servers.items():
+                    if len(s_key) == 3 and s_key[0] == "TCP":
+                        if s_key[2] == key[2] and (s_key[1] == "0.0.0.0" or key[1] == "0.0.0.0" or s_key[1] == key[1]):
+                            server = s
+                            key = s_key
+                            break
 
             # [SLAVE-RECONNECT-3b] 复用前探活：僵死则丢弃并新建，避免复用已死的 listener
             if server and not server.is_healthy():
@@ -1000,11 +1001,12 @@ class ModbusServerHub:
             )
             server = self._servers.get(key)
             if server is None and key[0] == "TCP":
-                for (c, h, p), s in self._servers.items():
-                    if c == "TCP" and p == key[2] and (h == "0.0.0.0" or key[1] == "0.0.0.0" or h == key[1]):
-                        server = s
-                        key = (c, h, p)
-                        break
+                for s_key, s in self._servers.items():
+                    if len(s_key) == 3 and s_key[0] == "TCP":
+                        if s_key[2] == key[2] and (s_key[1] == "0.0.0.0" or key[1] == "0.0.0.0" or s_key[1] == key[1]):
+                            server = s
+                            key = s_key
+                            break
 
             if server:
                 remaining = server.detach_slave(engine.slave_id)
@@ -1044,9 +1046,12 @@ class ModbusServerHub:
             )
             server = self._servers.get(key)
             if server is None and key[0] == "TCP":
-                for (c, h, p), s in self._servers.items():
-                    if c == "TCP" and p == key[2] and (h == "0.0.0.0" or key[1] == "0.0.0.0" or h == key[1]):
-                        return s
+                for s_key, s in self._servers.items():
+                    if len(s_key) == 3 and s_key[0] == "TCP":
+                        if s_key[2] == key[2] and (s_key[1] == "0.0.0.0" or key[1] == "0.0.0.0" or s_key[1] == key[1]):
+                            server = s
+                            key = s_key
+                            break
             return server
 
     # [SLAVE-RECONNECT] 扫描所有端点，重建所有僵死 listener；返回重建数量
