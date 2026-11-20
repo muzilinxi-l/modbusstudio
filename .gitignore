@@ -42,6 +42,7 @@ htmlcov/
 !.vscode/settings.json
 !.vscode/launch.json
 !.vscode/extensions.json
+.idea/
 
 # Business database files & extra folder (Never commit)
 extra/
@@ -54,10 +55,15 @@ extra/
 logs/
 *.csv
 settings.json
+session_state.json
+session_state.json.bak
+*.bak
+*.tmp
 
 # One-off verification screenshots / temp artifacts
 test_exe_screenshot.png
 
-# Memorix runtime state (plugin dirs installed into the project; regenerate on demand)
+# AI assistant & tool runtime states
 .agents/
 .claude/
+.codex/

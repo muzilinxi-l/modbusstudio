@@ -85,10 +85,10 @@ When a session finishes, call `memorix_session_end` with a short structured summ
 
 ---
 
-## 统一记忆协议与多 Agent 协作规范（Claude Code + Antigravity）
+## 统一记忆协议与多 Agent 协作规范（Codex + Antigravity）
 
 > **适用范围**：仅限 `F:/GitHub/python`（Modbus Studio 2.0 项目），不外延到外层 `F:/GitHub` 资料区。
-> **参与 Agent**：仅 **Claude Code** 与 **Antigravity**（无 Codex）。
+> **参与 Agent**：仅 **Codex** 与 **Antigravity**。
 
 ### 1. 标准工作流与任务启动强制检索
 1. **读本地索引**：任务开始前，先阅读 `memory/INDEX.md` 及相关核心记忆文件（`PROJECT.md`、`ARCHITECTURE.md`、`INTERFACES.md`、`CONSTRAINTS.md`、`TASKS.md`）。
@@ -97,7 +97,7 @@ When a session finishes, call `memorix_session_end` with a short structured summ
 4. **个人开发工作流**：严格遵循 **“明确需求 → 计划 → 实施 → 验证 → 人工决定发布”**。
 
 ### 2. 严格分区与并发隔离策略
-1. **Worktree 隔离**：Claude Code 与 Antigravity 在各自独立 Git Worktree 工作，**禁止两 Agent 无约束同时修改同一文件**。
+1. **Worktree 隔离**：Codex 与 Antigravity 在各自独立 Git Worktree 工作，**禁止两 Agent 无约束同时修改同一文件**。
 2. **文件锁机制（File Lock）**：写入共享 `memory/` 或公共模块前，必须通过 `memorix orchestrate` 获取文件锁，写完释放。
 3. **任务交接（Handoffs）**：任务结束或跨 Agent 交接时，必须在 `memory/handoffs/` 记录“哪个 Agent 负责哪段、已完成内容、待办项”并调用 `memorix_session_end`。
 4. **合并门禁**：合并前必须运行 `.venv\Scripts\pytest.exe` 且全量通过 + 人工审查；Git 冲突必须保留标记并报告，**严禁自动覆盖或静默解决**。
@@ -109,8 +109,8 @@ id: MEM-XXXX
 status: proposed | verified | disputed | outdated
 source: <项目相对文件路径>
 commit: <有效 git sha>
-author: <claude | antigravity | human>
-verified_by: <claude | antigravity | human | pending>
+author: <codex | antigravity | human>
+verified_by: <codex | antigravity | human | pending>
 updated: <ISO-8601 时间>
 scope: F:/GitHub/python @ 2.0.0
 ```
