@@ -411,6 +411,19 @@ class SlavePanel(ttk.Frame):
         btn_apply_offset = ttk.Button(b_row2, text="批量修改偏移", style="secondary.TButton", command=self._apply_batch_offset)
         btn_apply_offset.pack(side="left", padx=2)
 
+        ttk.Separator(b_row2, orient="vertical").pack(side="left", fill="y", padx=6)
+
+        ttk.Label(b_row2, text="波动范围:").pack(side="left", padx=(2, 1))
+        self.entry_batch_sim_min = ttk.Entry(b_row2, width=6)
+        self.entry_batch_sim_min.insert(0, "-1000")
+        self.entry_batch_sim_min.pack(side="left", padx=1)
+        ttk.Label(b_row2, text="~").pack(side="left")
+        self.entry_batch_sim_max = ttk.Entry(b_row2, width=6)
+        self.entry_batch_sim_max.insert(0, "1000")
+        self.entry_batch_sim_max.pack(side="left", padx=1)
+        btn_apply_sim_range = ttk.Button(b_row2, text="批量修改范围", style="secondary.TButton", command=self._apply_batch_sim_range)
+        btn_apply_sim_range.pack(side="left", padx=2)
+
         # 4. 点表表格区域
         table_frame = ttk.Frame(self)
         table_frame.pack(fill="both", expand=True, padx=2, pady=2)
@@ -1029,6 +1042,21 @@ class SlavePanel(ttk.Frame):
             return
         self._apply_batch_point_property("offset", o_val)
 
+    def _apply_batch_sim_range(self) -> None:
+        """将输入框中的动态波动下限与上限批量应用到目标范围内的数值型点位并同步运行时引擎。"""
+        import math
+        try:
+            min_v = float(self.entry_batch_sim_min.get().strip())
+            max_v = float(self.entry_batch_sim_max.get().strip())
+            if not (math.isfinite(min_v) and math.isfinite(max_v)):
+                raise ValueError("上下限必须为有限数字")
+            if min_v > max_v:
+                raise ValueError(f"波动下限 ({min_v:g}) 不能大于上限 ({max_v:g})")
+        except Exception as ex:
+            messagebox.showerror("参数错误", f"无效的波动范围输入: {ex}")
+            return
+        self._apply_batch_point_property("sim_range", (min_v, max_v))
+
     def _apply_batch_point_property(self, prop_name: str, prop_val: Any) -> None:
         """通用批量属性修改器：支持“仅当前从机（若选中行则仅限选中行）”或“全部从机服务”两级作用范围。"""
         # 参数：
@@ -1147,6 +1175,14 @@ class SlavePanel(ttk.Frame):
                     else:
                         skipped += 1
                         continue
+                elif prop_name == "sim_range":
+                    from ..modbus_codec import is_numeric_codec_type
+                    if not is_numeric_codec_type(point.data_type.value):
+                        skipped += 1
+                        continue
+                    min_v, max_v = prop_val
+                    point.sim_min = float(min_v)
+                    point.sim_max = float(max_v)
 
                 self.app.slave_service.sync_point_to_runtime(dev.id, point)
                 count += 1
@@ -1303,7 +1339,7 @@ class SlavePanel(ttk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title("批量输入规则生成点表")
-        dlg.geometry("450x450")
+        dlg.geometry("450x510")
         dlg.transient(self.winfo_toplevel())
         dlg.grab_set()
 
@@ -1351,8 +1387,18 @@ class SlavePanel(ttk.Frame):
         e_offset.insert(0, "0")
         e_offset.grid(row=7, column=1, sticky="w", pady=4)
 
+        ttk.Label(f, text="波动下限:").grid(row=8, column=0, sticky="w", pady=4)
+        e_sim_min = ttk.Entry(f, width=12)
+        e_sim_min.insert(0, "-1000")
+        e_sim_min.grid(row=8, column=1, sticky="w", pady=4)
+
+        ttk.Label(f, text="波动上限:").grid(row=9, column=0, sticky="w", pady=4)
+        e_sim_max = ttk.Entry(f, width=12)
+        e_sim_max.insert(0, "1000")
+        e_sim_max.grid(row=9, column=1, sticky="w", pady=4)
+
         def do_generate():
-            """根据向导输入的起始地址、数量、系数与偏移量，批量构建点位并同步到当前从机。"""
+            """根据向导输入的起始地址、数量、系数、偏移量与波动范围，批量构建点位并同步到当前从机。"""
             if not self._current_device_id:
                 return
             device = self.app.slave_service.get_device(self._current_device_id)
@@ -1372,6 +1418,12 @@ class SlavePanel(ttk.Frame):
                 offset_v = float(e_offset.get().strip() or "0")
                 if not math.isfinite(offset_v):
                     raise ValueError("偏移量必须为有限数字")
+                sim_min_v = float(e_sim_min.get().strip() or "-1000")
+                sim_max_v = float(e_sim_max.get().strip() or "1000")
+                if not (math.isfinite(sim_min_v) and math.isfinite(sim_max_v)):
+                    raise ValueError("波动上下限必须为有限数字")
+                if sim_min_v > sim_max_v:
+                    raise ValueError("波动下限不能大于上限")
             except Exception as ex:
                 messagebox.showerror("错误", f"输入格式有误: {ex}", parent=dlg)
                 return
@@ -1394,7 +1446,8 @@ class SlavePanel(ttk.Frame):
             for i in range(count):
                 desc = f"AutoPoint_{cur_a}"
                 ok, pt, _ = PointService.validate_and_build_point(
-                    cur_a, desc, area, dt, bo, i + 1, sim, scale=scale_v, offset=offset_v
+                    cur_a, desc, area, dt, bo, i + 1, sim,
+                    scale=scale_v, offset=offset_v, sim_min=sim_min_v, sim_max=sim_max_v,
                 )
                 if ok and pt:
                     device.add_point(pt)

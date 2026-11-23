@@ -1597,61 +1597,113 @@ class ModbusSlaveEngine:
 
                     from .modbus_codec import eng_to_raw, normalize_scale_offset, raw_to_eng
                     pt_scale, pt_offset = normalize_scale_offset(point.get("scale", 1.0), point.get("offset", 0.0))
+                    # 将用户期望的工程波动区间 [sim_min, sim_max]（默认 [-1000, +1000]）折算到原始寄存器空间，
+                    # 并与当前数据类型的硬件上下限求交集（无符号类型自动截断负下限，防溢出与下溢）。
+                    try:
+                        eng_min = float(point.get("sim_min", -1000.0))
+                        if not math.isfinite(eng_min):
+                            eng_min = -1000.0
+                    except Exception:
+                        eng_min = -1000.0
+                    try:
+                        eng_max = float(point.get("sim_max", 1000.0))
+                        if not math.isfinite(eng_max):
+                            eng_max = 1000.0
+                    except Exception:
+                        eng_max = 1000.0
+                    if eng_min > eng_max:
+                        eng_min, eng_max = eng_max, eng_min
+
+                    limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
+                    hw_min, hw_max, v_type = limits
+
+                    r_a = (eng_min - pt_offset) / pt_scale
+                    r_b = (eng_max - pt_offset) / pt_scale
+                    raw_target_lo, raw_target_hi = (r_a, r_b) if r_a <= r_b else (r_b, r_a)
+                    if v_type is int:
+                        cand_lo = int(math.ceil(raw_target_lo)) if math.isfinite(raw_target_lo) else hw_min
+                        cand_hi = int(math.floor(raw_target_hi)) if math.isfinite(raw_target_hi) else hw_max
+                        raw_lo = max(hw_min, min(hw_max, cand_lo))
+                        raw_hi = max(hw_min, min(hw_max, cand_hi))
+                        if raw_lo > raw_hi:
+                            mid = max(hw_min, min(hw_max, int(round((raw_target_lo + raw_target_hi) / 2.0))))
+                            raw_lo = raw_hi = mid
+                    else:
+                        cand_lo = raw_target_lo if math.isfinite(raw_target_lo) else hw_min
+                        cand_hi = raw_target_hi if math.isfinite(raw_target_hi) else hw_max
+                        raw_lo = max(hw_min, min(hw_max, cand_lo))
+                        raw_hi = max(hw_min, min(hw_max, cand_hi))
+                        if raw_lo > raw_hi:
+                            raw_lo = raw_hi = max(hw_min, min(hw_max, (raw_target_lo + raw_target_hi) / 2.0))
+
                     # 在底层原始寄存器数值空间演算波动：
-                    # 1) 无论 scale 多大或多小（如 0.01/10/100），每拍步进/波动都有效且绝不卡死或越界；
+                    # 1) 无论 scale 多大或多小（如 0.01/0.1/1/10），每拍步进/波动都有效且绝不卡死或越界；
                     # 2) 写出寄存器 new_raw 后，用同一公式 new_eng = new_raw * scale + offset 回算给界面，
                     #    保证 ModbusStudio 展示数据与外部/一体机程序解析后的工程数据逐拍 100% 一致。
                     if "raw_val" in point and point["raw_val"] is not None:
                         curr = clamp_value_to_type(point["raw_val"], data_type)
                     else:
                         curr = eng_to_raw(curr, data_type, pt_scale, pt_offset)
+                    span = raw_hi - raw_lo
 
-                    limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
-                    min_v, max_v, v_type = limits
-
-                    if sim_mode in ("累加递增", "步进递增"):
+                    if span <= 0:
+                        new_raw = raw_lo
+                    elif sim_mode in ("累加递增", "步进递增"):
                         if v_type is int:
-                            wrap_limit = min(max_v, 10000)
-                            # 回绕至 0（而非有符号最小负数 -9e18），保持正常工程步进循环
-                            new_raw = (curr + 1) if curr < wrap_limit else 0
+                            inc_step = max(1, int(round(span * 0.01)))
+                            if curr < raw_lo or curr >= raw_hi:
+                                new_raw = raw_lo
+                            else:
+                                new_raw = min(raw_hi, curr + inc_step)
                         else:
-                            new_raw = round((curr + 0.5) % 1000.0, 2)
+                            inc_step = max(0.5, round(span * 0.01, 2))
+                            if curr < raw_lo or curr >= raw_hi:
+                                new_raw = round(raw_lo, 2)
+                            else:
+                                new_raw = round(min(raw_hi, curr + inc_step), 2)
 
                     elif sim_mode == "随机波动":
+                        # 平滑大步幅随机游走：每拍在当前值附近按总跨度约 5% 波动，触及边界自动折返反弹
+                        base_curr = max(raw_lo, min(raw_hi, curr))
                         if v_type is int:
-                            delta = random.choice([-2, -1, 0, 1, 2])
-                            if min_v == 0 and curr <= 1:
-                                delta = random.choice([0, 1, 2, 3])
-                            new_raw = int(max(min_v, min(max_v, curr + delta)))
+                            max_step = max(1, int(round(span * 0.05)))
+                            delta = random.randint(-max_step, max_step)
+                            if delta == 0:
+                                delta = random.choice([-1, 1])
+                            cand = base_curr + delta
+                            if cand > raw_hi:
+                                cand = raw_hi - (cand - raw_hi)
+                            elif cand < raw_lo:
+                                cand = raw_lo + (raw_lo - cand)
+                            new_raw = int(max(raw_lo, min(raw_hi, cand)))
                         else:
-                            delta = random.uniform(-0.5, 0.5)
-                            new_raw = round(max(min_v, min(max_v, curr + delta)), 2)
+                            max_step = max(0.01, span * 0.05)
+                            delta = random.uniform(-max_step, max_step)
+                            cand = base_curr + delta
+                            if cand > raw_hi:
+                                cand = raw_hi - (cand - raw_hi)
+                            elif cand < raw_lo:
+                                cand = raw_lo + (raw_lo - cand)
+                            new_raw = round(max(raw_lo, min(raw_hi, cand)), 2)
 
                     elif sim_mode == "正弦波":
+                        # 以 [raw_lo, raw_hi] 中点为中心、半跨度为振幅周期振荡，彻底消除历史累积漂移
                         phase = (step * 0.25) + ((addr % 100) * 0.15)
-                        sin_factor = math.sin(phase)
-                        if min_v == 0:
-                            base = 50.0 if (curr == 0) else max(25.0, float(curr))
-                            amp = min(25.0, base * 0.5)
-                            calc_val = base + amp * sin_factor
-                        else:
-                            base = 0.0 if (curr == 0) else float(curr)
-                            calc_val = base + 30.0 * sin_factor
-
+                        center = (raw_lo + raw_hi) / 2.0
+                        amp = span / 2.0
+                        calc_val = center + amp * math.sin(phase)
                         if v_type is int:
-                            new_raw = int(max(min_v, min(max_v, round(calc_val))))
+                            new_raw = int(max(raw_lo, min(raw_hi, round(calc_val))))
                         else:
-                            new_raw = round(max(min_v, min(max_v, calc_val)), 2)
+                            new_raw = round(max(raw_lo, min(raw_hi, calc_val)), 2)
 
                     elif sim_mode == "方波":
                         phase = (step + (addr % 10)) % 10
-                        high_val = 100 if min_v == 0 else 50
-                        low_val = 0 if min_v == 0 else -50
-                        val_out = high_val if phase >= 5 else low_val
+                        val_out = raw_hi if phase >= 5 else raw_lo
                         if v_type is int:
-                            new_raw = int(max(min_v, min(max_v, val_out)))
+                            new_raw = int(max(raw_lo, min(raw_hi, val_out)))
                         else:
-                            new_raw = float(max(min_v, min(max_v, val_out)))
+                            new_raw = round(float(max(raw_lo, min(raw_hi, val_out))), 2)
 
                     else:
                         new_raw = curr

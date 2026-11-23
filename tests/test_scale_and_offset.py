@@ -341,3 +341,96 @@ def test_slave_panel_ui_scale_offset_add_batch_and_double_click(tmp_path):
     finally:
         app.shutdown()
         root.destroy()
+
+
+def test_sim_range_plan_b_mode_2_smooth_walk_bounds_and_ui_persistence(tmp_path):
+    """验证方案 B + 效果 2：默认 ±1000(无符号 0~1000)、自定义范围热生效、平滑 5% 游走、硬件钳位与会话持久化。"""
+    # 1. 模型持久化 sim_min / sim_max（含反向自动互换兜底）
+    ok, pt, _ = PointService.validate_and_build_point(
+        address=10, description="功率因数", area=AreaType.HOLDING,
+        data_type=DataType.INT16, byte_order=ByteOrder.ABCD,
+        val_input="0.5", sim_rule="随机波动", scale=0.01, offset=0.0,
+        sim_min=1.0, sim_max=-1.0,  # 故意反传验证自动校正
+    )
+    assert ok and pt is not None
+    assert pt.sim_min == -1.0 and pt.sim_max == 1.0
+    restored = ModbusPoint.from_dict(pt.to_dict())
+    assert restored.sim_min == -1.0 and restored.sim_max == 1.0
+
+    # 2. 真实从机验证：默认 [-1000, +1000] 平滑游走（UINT32 scale=0.1 -> 0~1000，单拍步幅 <= 50.0）
+    #    以及自定义范围 [-1.0, 1.0]（INT16 scale=0.01 -> 严格落在 [-1.0, 1.0]）
+    port = _pick_free_port()
+    log_svc = LoggingService(log_dir=str(tmp_path / "logs"))
+    slave_svc = SlaveService(log_svc)
+    dev = SlaveDevice(
+        id="dev_sim_range",
+        name="大范围平滑波动从机",
+        conn_config=ConnectionConfig(comm_type=CommType.TCP, host="127.0.0.1", port=port, unit_id=1),
+    )
+    ok_u, pt_u, _ = PointService.validate_and_build_point(
+        address=1, description="充电量", area=AreaType.INPUT,
+        data_type=DataType.UINT32, byte_order=ByteOrder.ABCD,
+        val_input="0.0", sim_rule="随机波动", scale=0.1, offset=0.0,
+    )
+    ok_pf, pt_pf, _ = PointService.validate_and_build_point(
+        address=3, description="功率因数", area=AreaType.HOLDING,
+        data_type=DataType.INT16, byte_order=ByteOrder.ABCD,
+        val_input="0.0", sim_rule="随机波动", scale=0.01, offset=0.0,
+        sim_min=-1.0, sim_max=1.0,
+    )
+    assert ok_u and pt_u is not None and ok_pf and pt_pf is not None
+    dev.add_point(pt_u)
+    dev.add_point(pt_pf)
+    slave_svc.register_device(dev)
+
+    try:
+        ok_s, msg_s = slave_svc.start_slave(dev.id)
+        assert ok_s, msg_s
+
+        # 采样 2~3 拍，验证大范围平滑游走明显离开 0 且不越界，自定义 [-1, 1] 绝不越界
+        u_samples = []
+        pf_samples = []
+        deadline = time.time() + 3.5
+        while time.time() < deadline and len(u_samples) < 2:
+            if pt_u.value != 0.0 and (not u_samples or u_samples[-1] != pt_u.value):
+                u_samples.append(pt_u.value)
+            if pt_pf.value != 0.0 and (not pf_samples or pf_samples[-1] != pt_pf.value):
+                pf_samples.append(pt_pf.value)
+            time.sleep(0.1)
+
+        assert u_samples, "UINT32 随机波动未产生变化"
+        assert all(0.0 <= v <= 1000.0 for v in u_samples), f"UINT32 超出 [0, 1000]: {u_samples}"
+        assert max(u_samples) <= 150.0, f"首 2~3 拍平滑游走步幅过大: {u_samples}"
+        assert all(-1.0 <= v <= 1.0 for v in pf_samples), f"自定义范围 [-1, 1] 越界: {pf_samples}"
+    finally:
+        slave_svc.stop_slave(dev.id)
+        log_svc.close()
+
+    # 3. SlavePanel 批量修改波动范围 UI + 会话持久化验证
+    root = _make_hidden_root()
+    state_file = str(tmp_path / "range_state.json")
+    app = ModbusStudioAppCore(restore_session=False, session_path=state_file)
+    try:
+        win = MainWindow(root, app)
+        panel = win.slave_panel
+        d = app.slave_service.get_device(panel._current_device_id)
+        assert d is not None
+        panel.tree.selection_set(())
+        panel.entry_batch_sim_min.delete(0, "end")
+        panel.entry_batch_sim_min.insert(0, "-500")
+        panel.entry_batch_sim_max.delete(0, "end")
+        panel.entry_batch_sim_max.insert(0, "2500")
+        with patch("modbusstudio.ui.slave_panel.messagebox.showinfo"):
+            panel._apply_batch_sim_range()
+
+        for p in d.points.values():
+            assert p.sim_min == -500.0 and p.sim_max == 2500.0
+    finally:
+        app.shutdown()
+        root.destroy()
+
+    reloaded = load_session_state(state_file)
+    assert reloaded is not None
+    reloaded_dev = SlaveDevice.from_dict(reloaded["slaves"][0])
+    for p in reloaded_dev.points.values():
+        assert p.sim_min == -500.0 and p.sim_max == 2500.0

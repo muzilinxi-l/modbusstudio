@@ -502,6 +502,8 @@ class ModbusPoint:
     field_name: str = ""       # 业务数据库绑定的英文标识符
     scale: float = 1.0         # 缩放比例 (Scale Factor)
     offset: float = 0.0        # 偏移量 (Offset)，正向公式 eng = raw * scale + offset
+    sim_min: float = -1000.0   # 动态模拟工程值下限（默认 -1000，无符号类型运行期自动截断至硬件下限）
+    sim_max: float = 1000.0    # 动态模拟工程值上限（默认 +1000）
     unit: str = ""             # 工程单位
 
     @property
@@ -535,10 +537,12 @@ class ModbusPoint:
             "sim_rule": self.sim_rule,
             "raw_hex": self.raw_hex,
             "string_length": self.string_length,
-            # 现场 HEMS 数据库关联元数据（变量名、缩放倍率、偏移量、单位）
+            # 现场 HEMS 数据库关联元数据（变量名、缩放倍率、偏移量、波动上下限、单位）
             "field_name": self.field_name,
             "scale": self.scale,
             "offset": self.offset,
+            "sim_min": self.sim_min,
+            "sim_max": self.sim_max,
             "unit": self.unit,
         }
 
@@ -551,6 +555,10 @@ class ModbusPoint:
         parsed_scale = _parse_float(d.get("scale", 1.0), default=1.0)
         if parsed_scale == 0.0:
             parsed_scale = 1.0
+        parsed_sim_min = _parse_float(d.get("sim_min", -1000.0), default=-1000.0)
+        parsed_sim_max = _parse_float(d.get("sim_max", 1000.0), default=1000.0)
+        if parsed_sim_min > parsed_sim_max:
+            parsed_sim_min, parsed_sim_max = parsed_sim_max, parsed_sim_min
         # 使用各枚举类的 normalize 方法，兼容不同版本导出的 JSON 点表文件格式
         return cls(
             # 强转起始地址与描述文案（对脏字段做安全回退，避免单个坏字段导致整点位被丢弃）
@@ -569,6 +577,8 @@ class ModbusPoint:
             field_name=str(d.get("field_name") or ""),
             scale=parsed_scale,
             offset=_parse_float(d.get("offset", 0.0), default=0.0),
+            sim_min=parsed_sim_min,
+            sim_max=parsed_sim_max,
             unit=str(d.get("unit") or ""),
         )
 

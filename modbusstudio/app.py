@@ -78,7 +78,8 @@ def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> 
     步骤：1.解析绝对路径；2.先写入同目录临时文件并 fsync；3.若原文件存在则归档备份至 logs/<stem>.backup.json；4.原子 os.replace 替换目标文件。
     副作用：在磁盘上原子写入 session_state.json 及 logs/session_state.backup.json（不产生 .bak 文件）。
     """
-    target_path = os.path.abspath(path) if path else resolve_runtime_path(SAVE_FILENAME)
+    effective_path = path if path is not None else getattr(app, "_session_path", None)
+    target_path = os.path.abspath(effective_path) if effective_path else resolve_runtime_path(SAVE_FILENAME)
     tmp_path = target_path + ".tmp"
     try:
         parent_dir = os.path.dirname(target_path)

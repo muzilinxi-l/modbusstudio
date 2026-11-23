@@ -190,6 +190,8 @@ class PointService:
         scale: float = 1.0,
         unit: str = "",
         offset: float = 0.0,
+        sim_min: float = -1000.0,
+        sim_max: float = 1000.0,
     ) -> Tuple[bool, Optional[ModbusPoint], str]:
         """校验用户输入参数有效性、执行存储区与类型双向对齐，并按系数/偏移量反算原始寄存器构建 ModbusPoint 实体。"""
         try:
@@ -282,6 +284,22 @@ class PointService:
             except Exception as e:
                 logger.warning(f"点位初始值编码转换警告: {e}")
 
+        import math
+        try:
+            sim_min_clean = float(sim_min)
+            if not math.isfinite(sim_min_clean):
+                sim_min_clean = -1000.0
+        except Exception:
+            sim_min_clean = -1000.0
+        try:
+            sim_max_clean = float(sim_max)
+            if not math.isfinite(sim_max_clean):
+                sim_max_clean = 1000.0
+        except Exception:
+            sim_max_clean = 1000.0
+        if sim_min_clean > sim_max_clean:
+            sim_min_clean, sim_max_clean = sim_max_clean, sim_min_clean
+
         point = ModbusPoint(
             address=addr_int,
             description=str(description).strip(),
@@ -295,6 +313,8 @@ class PointService:
             field_name=field_name,
             scale=scale_clean,
             offset=offset_clean,
+            sim_min=sim_min_clean,
+            sim_max=sim_max_clean,
             unit=unit,
         )
         return True, point, ""
@@ -657,6 +677,8 @@ class SlaveService:
                         "raw_val": eng_to_raw(point.value, point.data_type.value, pt_scale, pt_offset),
                         "scale": pt_scale,
                         "offset": pt_offset,
+                        "sim_min": getattr(point, "sim_min", -1000.0),
+                        "sim_max": getattr(point, "sim_max", 1000.0),
                         "string_length": point.string_length,
                     }
                     engine.points[(point.area.value, point.address)] = pt_dict
@@ -749,6 +771,8 @@ class SlaveService:
                     "raw_val": eng_to_raw(point.value, point.data_type.value, pt_scale, pt_offset),
                     "scale": pt_scale,
                     "offset": pt_offset,
+                    "sim_min": getattr(point, "sim_min", -1000.0),
+                    "sim_max": getattr(point, "sim_max", 1000.0),
                     "string_length": point.string_length,
                 }
                 pts_lock = getattr(engine, "_points_lock", None)
