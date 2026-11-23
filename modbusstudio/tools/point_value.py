@@ -42,7 +42,7 @@ def to_codec_type(data_type: Any) -> ModbusDataType:
 # 设计取舍：STRING 返回 str、HEX16 返回 "0x..." 展示串、BOOL 返回 bool，
 # 这些乘一个 float 系数只会得到无意义的结果，所以排除在外。
 _SCALABLE_TYPES = frozenset({
-    "INT16", "UINT16", "INT32", "UINT32", "FLOAT32", "FLOAT64",
+    "INT16", "UINT16", "INT32", "UINT32", "INT64", "UINT64", "FLOAT32", "FLOAT64",
 })
 
 

@@ -97,6 +97,20 @@ class AreaType:
     HOLDING_REGISTER = "4x_HoldingRegister (保持寄存器)"
 
 
+def _classify_area(area: Any) -> str:
+    """将领域层或引擎层的存储区域枚举/字符串统一归类为 COIL / DISCRETE / INPUT / HOLDING。"""
+    raw = area.value if hasattr(area, "value") else str(area)
+    s = str(raw).strip().upper()
+    # 必须先判断 1x 离散输入与 0x 线圈，防止 1x_DiscreteInput / 离散输入 被 "INPUT"/"输入" 误截胡
+    if "1X" in s or "DISCRETE" in s or "离散" in str(raw):
+        return "DISCRETE"
+    if "0X" in s or "COIL" in s or "线圈" in str(raw):
+        return "COIL"
+    if "3X" in s or "INPUT" in s or "输入" in str(raw):
+        return "INPUT"
+    return "HOLDING"
+
+
 def crc16_modbus(data: bytes) -> bytes:
     """计算工业标准 Modbus RTU 报文的 CRC-16 校验码（低字节在前，高字节在后）。"""
     # 参数：
@@ -560,13 +574,12 @@ class ModbusTransportServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server = None
         self._server_task: Optional[asyncio.Task] = None
+        self._serve_task: Optional[asyncio.Task] = None
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
-        # [SLAVE-RECONNECT-10] 单端点重建互斥锁：`restart_if_broken()`（"自动重连"按钮）与
-        # `start()` 内部的"半死态强制重建"分支都可能对同一端点执行 stop+start，若两个线程
-        # （UI 线程 + 服务线程）同时进入会产生重复 stop/start 竞态，用一把细粒度锁串行化
-        # 同端点重建操作（该锁仅保护本实例的重建过程，不阻塞 Hub 全局字典，避免锁嵌套）。
-        self._rebuild_lock = threading.Lock()
+        # [SLAVE-RECONNECT-10] 单端点重建可重入互斥锁：`restart_if_broken()` 与 `start()`
+        # 均可能对同一端点执行 stop+start，使用 RLock 既可串行化并发线程，又允许 restart_if_broken 内部调用 start()。
+        self._rebuild_lock = threading.RLock()
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
         # [SLAVE-RECONNECT] 记录 start() 时刻，供 is_healthy() 做 0.3s 启动宽限判断
         self._start_ts: float = time.time()
@@ -730,32 +743,23 @@ class ModbusTransportServer:
         # [SLAVE-RECONNECT] 已在健康运行 → 直接返回
         if self.is_healthy():
             return
-        # 半死状态（_is_running=True 但底层僵死）→ 清理残留再重建
-        if self._is_running:
-            logger.warning(f"[SLAVE-RESTART] {self.endpoint_key} 检测到半死状态，强制重建 listener")
-            self._is_running = False
-            # 不 detach 从机，只清理 loop / thread / server 引用
-            if self._loop:
-                try:
-                    self._loop.close()
-                except Exception:
-                    pass
-                self._loop = None
-            if self._thread:
-                self._thread.join(timeout=0.5)
-                self._thread = None
-            self._server = None
-            self._server_task = None
-        # 启动前先复位就绪信号量
-        self._ready.clear()
-        self._is_running = True
-        self._start_ts = time.time()
-        self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
-        self._thread.start()
-        # [SLAVE-SPEED-1] 事件驱动等待后台 listener 就绪，取代 30×0.03s 固定盲等
-        self._ready.wait(timeout=1.0)
-        if not self._server:
-            logger.warning(f"ModbusTransportServer {self.endpoint_key} 1s 内未就绪")
+        with self._rebuild_lock:
+            if self.is_healthy():
+                return
+            # 半死状态（_is_running=True 但底层僵死）→ 走标准 stop() 在事件循环线程内安全回收后再重建
+            if self._is_running:
+                logger.warning(f"[SLAVE-RESTART] {self.endpoint_key} 检测到半死状态，强制重建 listener")
+                self.stop()
+            # 启动前先复位就绪信号量
+            self._ready.clear()
+            self._is_running = True
+            self._start_ts = time.time()
+            self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
+            self._thread.start()
+            # [SLAVE-SPEED-1] 事件驱动等待后台 listener 绑定就绪，取代 30×0.03s 固定盲等
+            self._ready.wait(timeout=1.0)
+            if not self._server:
+                logger.warning(f"ModbusTransportServer {self.endpoint_key} 1s 内未就绪")
 
     # [REVIEW-FIX-3] 完善 stop() 资源彻底回收：取消 task 并在事件循环中安全 await shutdown()，避免 socket 与 loop 句柄泄漏
     # [SLAVE-SPEED-2] 将清理与线程 join 超时上限从 2.0s+3.0s 压缩至 1.0s+1.0s
@@ -783,6 +787,8 @@ class ModbusTransportServer:
                         pass
                     except Exception as ex:
                         logger.debug(f"等待 server_task 取消异常: {ex}")
+                if self._serve_task and not self._serve_task.done() and self._serve_task is not self._server_task:
+                    self._serve_task.cancel()
 
             try:
                 # 跨线程向子线程事件循环投递清理协程，最多等待 1.0 秒
@@ -802,6 +808,7 @@ class ModbusTransportServer:
         self._loop = None
         self._server = None
         self._server_task = None
+        self._serve_task = None
         self._ready.clear()
 
     def _run_server_loop(self) -> None:
@@ -816,7 +823,8 @@ class ModbusTransportServer:
         asyncio.set_event_loop(self._loop)
 
         async def _serve():
-            """实例化 pymodbus 服务端并启动无限监听协程任务。"""
+            """实例化 pymodbus 服务端并完成真实端口绑定后再唤醒 start()，避免紧接 stop() 触发启停竞态。"""
+            self._serve_task = asyncio.current_task()
             try:
                 if self.comm_type == "RTU":
                     # ("RTU", serial_port, baudrate, bytesize, parity, stopbits)
@@ -838,8 +846,14 @@ class ModbusTransportServer:
                         address=(host, port),
                         trace_packet=self._on_trace_packet,
                     )
-                # 启动后台监听 Task，并立即置位 _ready 唤醒 start() 调用方
-                self._server_task = asyncio.create_task(self._server.serve_forever())
+                # 先完成底层 listen() 绑定再置位 _ready，避免 start() 刚返回就调用 stop() 时
+                # shutdown() 早于 listen() 执行导致 serving 永久悬挂与 2s join 超时
+                await self._server.serve_forever(background=True)
+
+                async def _wait_serving():
+                    await self._server.serving
+
+                self._server_task = asyncio.create_task(_wait_serving())
                 self._ready.set()
                 await self._server_task
             except asyncio.CancelledError:
@@ -1427,7 +1441,7 @@ class ModbusSlaveEngine:
         actual_mode = byte_order if byte_order is not None else mode
         # 若目标区域为 0x 线圈或 1x 离散输入，按布尔量解析并写入单比特
         # 在 [write_typed_value] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-        if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area or "0X" in str(area).upper() or "1X" in str(area).upper():
+        if _classify_area(area) in ("COIL", "DISCRETE"):
             # 在 [write_typed_value] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
                 # 在 [write_typed_value] 中更新局部变量 [b_val]：为后续协议编码、服务调度或界面渲染准备中间状态
@@ -1465,7 +1479,7 @@ class ModbusSlaveEngine:
         # 在 [read_typed_value] 中更新局部变量 [raw]：为后续协议编码、服务调度或界面渲染准备中间状态
         raw = self.read_raw_values(area, address, count)
         # 在 [read_typed_value] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-        if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area:
+        if _classify_area(area) in ("COIL", "DISCRETE"):
             # 从 [read_typed_value] 返回执行结果给调用方，结束当前处理分支
             return bool(raw[0])
         # 从 [read_typed_value] 返回执行结果给调用方，结束当前处理分支
@@ -1531,12 +1545,16 @@ class ModbusSlaveEngine:
 
                 # 在 [_run_simulation_loop] 中更新局部变量 [dt_raw]：为后续协议编码、服务调度或界面渲染准备中间状态
                 dt_raw = point.get("data_type") or point.get("type") or ModbusDataType.INT16
-                # 在 [_run_simulation_loop] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
+                # 兼容领域层 FLOAT64 与编解码层 DOUBLE64 的命名差异，防止被静默降级为 INT16
                 try:
-                    # 在 [_run_simulation_loop] 中更新局部变量 [data_type]：为后续协议编码、服务调度或界面渲染准备中间状态
-                    data_type = dt_raw if isinstance(dt_raw, ModbusDataType) else ModbusDataType(str(dt_raw))
+                    if isinstance(dt_raw, ModbusDataType):
+                        data_type = dt_raw
+                    else:
+                        dt_str = str(dt_raw.value if hasattr(dt_raw, "value") else dt_raw).strip().upper()
+                        if dt_str == "FLOAT64":
+                            dt_str = "DOUBLE64"
+                        data_type = ModbusDataType(dt_str)
                 except Exception:
-                    # 在 [_run_simulation_loop] 中更新局部变量 [data_type]：为后续协议编码、服务调度或界面渲染准备中间状态
                     data_type = ModbusDataType.INT16
 
                 # 在 [_run_simulation_loop] 中更新局部变量 [bo_raw]：为后续协议编码、服务调度或界面渲染准备中间状态
@@ -1939,90 +1957,59 @@ class ModbusPollEngine:
         # 在 [read_block] 中更新局部变量 [res]：为后续协议编码、服务调度或界面渲染准备中间状态
         res = None
 
-        # 3. 映射功能码并构造标准十六进制请求报文供日志输出
-        # 在 [read_block] 中更新局部变量 [fc]：为后续协议编码、服务调度或界面渲染准备中间状态
+        # 3. 映射功能码并构造标准十六进制请求报文供日志输出（兼容领域层与引擎层所有区域名称格式）
+        area_kind = _classify_area(area)
         fc = 3
-        # 在 [read_block] 中更新局部变量 [fc_desc]：为后续协议编码、服务调度或界面渲染准备中间状态
         fc_desc = "读保持寄存器"
-        # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-        if AreaType.COIL in area:
-            # 在 [read_block] 中更新局部变量 [fc]：为后续协议编码、服务调度或界面渲染准备中间状态
+        if area_kind == "COIL":
             fc = 1
-            # 在 [read_block] 中更新局部变量 [fc_desc]：为后续协议编码、服务调度或界面渲染准备中间状态
             fc_desc = "读线圈"
-        # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-        elif AreaType.DISCRETE_INPUT in area:
-            # 在 [read_block] 中更新局部变量 [fc]：为后续协议编码、服务调度或界面渲染准备中间状态
+        elif area_kind == "DISCRETE":
             fc = 2
-            # 在 [read_block] 中更新局部变量 [fc_desc]：为后续协议编码、服务调度或界面渲染准备中间状态
             fc_desc = "读离散输入"
-        # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-        elif AreaType.INPUT_REGISTER in area:
-            # 在 [read_block] 中更新局部变量 [fc]：为后续协议编码、服务调度或界面渲染准备中间状态
+        elif area_kind == "INPUT":
             fc = 4
-            # 在 [read_block] 中更新局部变量 [fc_desc]：为后续协议编码、服务调度或界面渲染准备中间状态
             fc_desc = "读输入寄存器"
 
-        # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self.comm_type == "RTU":
-            # 在 [read_block] 中更新局部变量 [req_hex]：为后续协议编码、服务调度或界面渲染准备中间状态
             req_hex = build_modbus_rtu_req_hex(self.slave_id, fc, start_addr, count)
         else:
-            # 在 [read_block] 中更新局部变量 [req_hex]：为后续协议编码、服务调度或界面渲染准备中间状态
             req_hex = build_modbus_tcp_req_hex(self.slave_id, fc, start_addr, count, self.tx_count)
 
-        # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self.on_packet_log:
             self.on_packet_log(
                 f"[TX 问询报文] ID:{self.slave_id} | FC:{fc:02X}({fc_desc}) | 起始地址:{start_addr} | 数量:{count} | 帧:[{req_hex}]",
                 "TX",
             )
 
-        # 在 [read_block] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
             # 4. 调用 pymodbus 客户端发起同步读取请求
-            # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-            if AreaType.COIL in area:
-                # 在 [read_block] 中更新局部变量 [res]：为后续协议编码、服务调度或界面渲染准备中间状态
+            if area_kind == "COIL":
                 res = self.client.read_coils(start_addr, count=count, device_id=self.slave_id)
-            # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-            elif AreaType.DISCRETE_INPUT in area:
-                # 在 [read_block] 中更新局部变量 [res]：为后续协议编码、服务调度或界面渲染准备中间状态
+            elif area_kind == "DISCRETE":
                 res = self.client.read_discrete_inputs(start_addr, count=count, device_id=self.slave_id)
-            # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-            elif AreaType.INPUT_REGISTER in area:
-                # 在 [read_block] 中更新局部变量 [res]：为后续协议编码、服务调度或界面渲染准备中间状态
+            elif area_kind == "INPUT":
                 res = self.client.read_input_registers(start_addr, count=count, device_id=self.slave_id)
-            else:  # HOLDING_REGISTER
-                # 在 [read_block] 中更新局部变量 [res]：为后续协议编码、服务调度或界面渲染准备中间状态
+            else:  # HOLDING
                 res = self.client.read_holding_registers(start_addr, count=count, device_id=self.slave_id)
 
             # 5. 计算往返耗时 RTT（毫秒，保留两位小数）
-            # 在 [read_block] 中更新局部变量 [t1]：为后续协议编码、服务调度或界面渲染准备中间状态
             t1 = time.perf_counter()
-            # 在 [read_block] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self.last_rtt_ms = round((t1 - t0) * 1000, 2)
 
             # 6. 检查 Modbus 协议级异常响应（如非法地址、从机忙等）
-            # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if res.isError():
                 self.err_count += 1
-                # 在 [read_block] 中更新局部变量 [err_msg]：为后续协议编码、服务调度或界面渲染准备中间状态
                 err_msg = str(res)
-                # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if self.on_packet_log:
                     self.on_packet_log(f"[ERR 问询异常] ID:{self.slave_id} | FC:{fc:02X} | 错误: {err_msg}", "ERROR")
-                # 从 [read_block] 返回执行结果给调用方，结束当前处理分支
                 return False, [], err_msg
 
             # 7. 提取有效结果并更新缓存字典与接收计数器
             self.rx_count += 1
-            # 在 [read_block] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-            if AreaType.COIL in area or AreaType.DISCRETE_INPUT in area:
-                # 在 [read_block] 中更新局部变量 [vals]：为后续协议编码、服务调度或界面渲染准备中间状态
+            if area_kind in ("COIL", "DISCRETE"):
                 vals = [1 if b else 0 for b in res.bits[:count]]
             else:
-                # 在 [read_block] 中更新局部变量 [vals]：为后续协议编码、服务调度或界面渲染准备中间状态
                 vals = list(res.registers[:count])
 
             # 在 [read_block] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
@@ -2164,11 +2151,8 @@ class ModbusPollEngine:
             # 从 [write_typed] 返回执行结果给调用方，结束当前处理分支
             return False, "未连接"
 
-        # 在 [write_typed] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-        if AreaType.COIL in area:
-            # 在 [write_typed] 中更新局部变量 [b_val]：为后续协议编码、服务调度或界面渲染准备中间状态
+        if _classify_area(area) == "COIL":
             b_val = bool(int(value)) if str(value).isdigit() else bool(value)
-            # 从 [write_typed] 返回执行结果给调用方，结束当前处理分支
             return self.write_single_coil(address, b_val)
 
         # 将工程值编码为 16 位寄存器数组：单字走 FC06，多字（如 FLOAT32/INT32/FLOAT64）走 FC16 (0x10)

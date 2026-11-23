@@ -220,6 +220,10 @@ class DataType(str, Enum):
     INT32 = "INT32"
     # 32 位无符号整数（占 2 个连续寄存器，范围 0 ~ 4294967295，常用于累计充电量/放电量）
     UINT32 = "UINT32"
+    # 64 位有符号长整数（占 4 个连续寄存器）
+    INT64 = "INT64"
+    # 64 位无符号长整数（占 4 个连续寄存器）
+    UINT64 = "UINT64"
     # 32 位 IEEE 754 单精度浮点数（占 2 个连续寄存器，工业遥测最常用浮点格式）
     FLOAT32 = "FLOAT32"
     # 64 位 IEEE 754 双精度浮点数（占 4 个连续寄存器，用于高精度电表总电能累计）
@@ -244,7 +248,7 @@ class DataType(str, Enum):
         elif self in (DataType.INT32, DataType.UINT32, DataType.FLOAT32):
             return 2
         # 64 位宽类型：64 bits / 16 bits = 占用 4 个连续寄存器（8 字节）
-        elif self in (DataType.FLOAT64,):
+        elif self in (DataType.FLOAT64, DataType.INT64, DataType.UINT64):
             return 4
         # 字符串类型：默认分配 8 个寄存器（可容纳 16 个 ASCII 字节）
         elif self == DataType.STRING:
@@ -279,6 +283,11 @@ class DataType(str, Enum):
         # 匹配 32 位单精度浮点（C 语言 float）
         if "FLOAT" in s or "FLOAT32" in s:
             return cls.FLOAT32
+        # 匹配 64 位无符号/有符号长整型（必须在 UINT32/INT32 之前判断，避免被子串误截胡）
+        if "UINT64" in s or "UNSIGNED INT64" in s:
+            return cls.UINT64
+        if "INT64" in s or "SIGNED INT64" in s:
+            return cls.INT64
         # 匹配 32 位无符号整数（C 语言 unsigned int / Windows DWORD）
         if "UINT32" in s or "DWORD" in s:
             return cls.UINT32

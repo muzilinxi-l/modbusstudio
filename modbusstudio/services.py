@@ -206,10 +206,18 @@ class PointService:
         try:
             if dt_enum == DataType.BOOL:
                 val_converted = 1 if str(val_input).strip().lower() in ("1", "true", "on", "yes") else 0
-            elif dt_enum in (DataType.INT16, DataType.INT32):
-                val_converted = int(float(str(val_input).strip() or "0"))
-            elif dt_enum in (DataType.UINT16, DataType.UINT32):
-                val_converted = int(float(str(val_input).strip() or "0"))
+            elif dt_enum in (DataType.INT16, DataType.INT32, DataType.INT64):
+                s_num = str(val_input).strip() or "0"
+                try:
+                    val_converted = int(s_num)
+                except ValueError:
+                    val_converted = int(float(s_num))
+            elif dt_enum in (DataType.UINT16, DataType.UINT32, DataType.UINT64):
+                s_num = str(val_input).strip() or "0"
+                try:
+                    val_converted = int(s_num)
+                except ValueError:
+                    val_converted = int(float(s_num))
                 if val_converted < 0:
                     val_converted = 0
             elif dt_enum in (DataType.FLOAT32, DataType.FLOAT64):
@@ -217,9 +225,12 @@ class PointService:
             elif dt_enum == DataType.STRING:
                 val_converted = str(val_input)
             elif dt_enum == DataType.HEX16:
-                s_hex = str(val_input).strip().lower()
-                s_hex_clean = s_hex[2:] if s_hex.startswith("0x") else s_hex
-                val_converted = int(s_hex_clean, 16)
+                if isinstance(val_input, int) and not isinstance(val_input, bool):
+                    val_converted = val_input & 0xFFFF
+                else:
+                    s_hex = str(val_input).strip().lower()
+                    s_hex_clean = s_hex[2:] if s_hex.startswith("0x") else s_hex
+                    val_converted = int(s_hex_clean, 16) & 0xFFFF
         except Exception as e:
             return False, None, f"数值格式与类型 {dt_enum.value} 不匹配: {e}"
 
@@ -369,14 +380,13 @@ class SlaveService:
                 warnings.append(f"反序列化从机配置失败 [{item.get('name', '未知')}]: {e}")
                 continue
 
-            # TCP 端口占用冲突预检
-            if device.conn_config and device.conn_config.comm_type == CommType.TCP:
-                occupied = self.get_occupied_tcp_ports()
-                if device.conn_config.port in occupied:
-                    warnings.append(
-                        f"从机 '{device.name}' (ID: {device.id}) 的 TCP 端口 {device.conn_config.port} 已被占用，跳过恢复"
-                    )
-                    continue
+            # 同端点 + 同站号冲突预检（允许 Server Hub 同 TCP 端口挂载不同 unit_id 的多从机）
+            conflict_reason = self._has_endpoint_unit_conflict(device.conn_config)
+            if conflict_reason:
+                warnings.append(
+                    f"从机 '{device.name}' (ID: {device.id}) {conflict_reason}，跳过恢复"
+                )
+                continue
 
             # 配额检查（复用现有 can_register_device）
             can_ok, can_err = self.can_register_device(device.conn_config.comm_type)
@@ -392,6 +402,57 @@ class SlaveService:
                 warnings.append(f"从机 '{device.name}' 注册失败: {msg}")
 
         return success_count, warnings
+
+    def _has_endpoint_unit_conflict(self, cfg: Optional[ConnectionConfig]) -> Optional[str]:
+        """检查给定连接配置是否与已注册从机或活跃 Hub 端点存在同物理端点且同站号冲突。"""
+        if not cfg:
+            return None
+        for other_dev in self._devices.values():
+            other_cfg = other_dev.conn_config
+            if not other_cfg or cfg.comm_type != other_cfg.comm_type:
+                continue
+            same_endpoint = False
+            if cfg.comm_type == CommType.RTU:
+                same_endpoint = (cfg.com_port.upper().strip() == other_cfg.com_port.upper().strip())
+            elif cfg.comm_type == CommType.TCP:
+                same_endpoint = (
+                    cfg.port == other_cfg.port
+                    and (
+                        cfg.host == other_cfg.host
+                        or cfg.host in ("0.0.0.0", "", "*")
+                        or other_cfg.host in ("0.0.0.0", "", "*")
+                    )
+                )
+            if same_endpoint and cfg.unit_id == other_cfg.unit_id:
+                return f"与已有从机 '{other_dev.name}' 在同端点存在相同站地址 {cfg.unit_id}"
+
+        hub = ModbusServerHub.get_instance()
+        with hub._lock:
+            for ep, srv in hub._servers.items():
+                if not ep:
+                    continue
+                if cfg.comm_type == CommType.TCP and ep[0] == "TCP" and len(ep) >= 3:
+                    try:
+                        ep_port = int(ep[2])
+                    except Exception:
+                        continue
+                    same_ep = (
+                        ep_port == cfg.port
+                        and (
+                            ep[1] == cfg.host
+                            or ep[1] in ("0.0.0.0", "", "*")
+                            or cfg.host in ("0.0.0.0", "", "*")
+                        )
+                    )
+                    if same_ep and srv.get_slave(cfg.unit_id) is not None:
+                        return f"活跃 TCP 端口 {cfg.port} 已挂载站地址 {cfg.unit_id}"
+                elif cfg.comm_type == CommType.RTU and ep[0] == "RTU" and len(ep) >= 2:
+                    if (
+                        str(ep[1]).upper().strip() == cfg.com_port.upper().strip()
+                        and srv.get_slave(cfg.unit_id) is not None
+                    ):
+                        return f"活跃串口 {cfg.com_port} 已挂载站地址 {cfg.unit_id}"
+        return None
 
     def get_occupied_tcp_ports(self) -> set:
         """获取所有已注册 TCP 从机及活跃 ModbusServerHub listener 所占用的端口集合。"""
@@ -765,14 +826,15 @@ class PollService:
         if self._is_connected and self._engine:
             self.disconnect()
 
-        # 在 [connect] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [connect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
-            self._engine = ModbusPollEngine()
-            # 在 [connect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
+            self._engine = ModbusPollEngine(
+                host=cfg.host,
+                port=cfg.port,
+                slave_id=cfg.unit_id,
+            )
             self._engine.on_packet_log = lambda msg, level: self.logging_service.post(
                 "RX" if "RX" in msg else ("TX" if "TX" in msg else "SYS"),
-                cfg.unit_id,
+                self._engine.slave_id if self._engine else cfg.unit_id,
                 msg,
             )
 
@@ -856,8 +918,8 @@ class PollService:
                     elapsed_ms=(time.time() - t0) * 1000,
                 )
 
-        # 在 [read_registers] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
+            self._engine.slave_id = task.conn_config.unit_id
             ok, values, err_msg = self._engine.read_block(
                 area=task.area.value,
                 start_addr=task.start_address,
@@ -934,6 +996,7 @@ class PollService:
             # 在 [start_continuous_polling] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._engine.on_poll_error = on_error
 
+        self._engine.slave_id = task.conn_config.unit_id
         self._engine.start_polling(
             area=task.area.value,
             start_addr=task.start_address,

@@ -544,14 +544,17 @@ def encode_value(
         return bytes_to_registers(adjusted)
 
     # HEX16 编码：
-    # 剥离可选的 "0x" 前缀后按 16 进制基数（base=16）解析为整数，再打包为 1 个寄存器
+    # 兼容已解析好的整数值（避免将十进制整数再次按 16 进制字符串解析导致双重转换），以及带/不带 "0x" 前缀的十六进制字符串
     elif data_type == ModbusDataType.HEX16:
-        str_val = str(value).strip().lower()
-        # 若用户输入了 "0x1A2B"，去掉前两个字符 "0x"
-        if str_val.startswith("0x"):
-            str_val = str_val[2:]
-        # 空串兜底按 "0" 解析，并掩码截断在 16 位以内
-        val = int(str_val or "0", 16) & 0xFFFF
+        if isinstance(value, int) and not isinstance(value, bool):
+            val = value & 0xFFFF
+        else:
+            str_val = str(value).strip().lower()
+            # 若用户输入了 "0x1A2B"，去掉前两个字符 "0x"
+            if str_val.startswith("0x"):
+                str_val = str_val[2:]
+            # 空串兜底按 "0" 解析，并掩码截断在 16 位以内
+            val = int(str_val or "0", 16) & 0xFFFF
         raw = struct.pack(">H", val)
         adjusted = transform_bytes(raw, mode)
         return bytes_to_registers(adjusted)
@@ -592,12 +595,15 @@ def encode_value(
         return bytes_to_registers(adjusted)
 
     # HEX32 编码：
-    # 解析 8 位十六进制字符串（掩码 0xFFFFFFFF）并拆分为 2 个 16 位寄存器
+    # 兼容已解析好的整数值或 8 位十六进制字符串（掩码 0xFFFFFFFF），并拆分为 2 个 16 位寄存器
     elif data_type == ModbusDataType.HEX32:
-        str_val = str(value).strip().lower()
-        if str_val.startswith("0x"):
-            str_val = str_val[2:]
-        val = int(str_val or "0", 16) & 0xFFFFFFFF
+        if isinstance(value, int) and not isinstance(value, bool):
+            val = value & 0xFFFFFFFF
+        else:
+            str_val = str(value).strip().lower()
+            if str_val.startswith("0x"):
+                str_val = str_val[2:]
+            val = int(str_val or "0", 16) & 0xFFFFFFFF
         raw = struct.pack(">I", val)
         adjusted = transform_bytes(raw, mode)
         return bytes_to_registers(adjusted)
