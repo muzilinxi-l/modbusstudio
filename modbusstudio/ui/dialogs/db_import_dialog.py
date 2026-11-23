@@ -338,84 +338,50 @@ class DbImportDialog:
         self.mode_search_var.trace_add("write", lambda *args: self._filter_tree())
         self.type_var.trace_add("write", lambda *args: self._filter_tree())
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_on_table_resize]（入参: event）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _on_table_resize(self, event=None) -> None:
         """动态感知表格容器宽度变化，通过 6px 死区过滤与 20ms 防抖定时器平滑调度列宽重算。"""
-        # 在 [_on_table_resize] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
-            # 从 [_on_table_resize] 返回执行结果给调用方，结束当前处理分支
             return
-        # 在 [_on_table_resize] 中更新局部变量 [width]：为后续协议编码、服务调度或界面渲染准备中间状态
         width = event.width if event else self.table_frame.winfo_width()
-        # 在 [_on_table_resize] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if width < 400:
-            # 从 [_on_table_resize] 返回执行结果给调用方，结束当前处理分支
             return
 
         # 为什么设置 6px 阈值过滤与 20ms after_cancel 防抖：
         # 用户拖拽窗口边缘时每秒会产生数十次 `<Configure>` 事件，过滤微小抖动并合并 20ms 内的重排可彻底消除闪烁卡顿。
-        # 在 [_on_table_resize] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if hasattr(self, "_last_rendered_width") and abs(width - self._last_rendered_width) < 6:
-            # 从 [_on_table_resize] 返回执行结果给调用方，结束当前处理分支
             return
 
         # 20ms 防抖调度：丢弃高频连续拖动事件，合并执行，确保窗口拖动丝滑顺畅
-        # 在 [_on_table_resize] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if hasattr(self, "_resize_job") and self._resize_job is not None:
             self.dlg.after_cancel(self._resize_job)
 
-        # 在 [_on_table_resize] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._pending_width = width
-        # 在 [_on_table_resize] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._resize_job = self.dlg.after(20, self._apply_table_resize)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_apply_table_resize]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _apply_table_resize(self) -> None:
         """根据防抖后确定的容器可用宽度，按预设比例重算并应用每一列的像素宽度。"""
-        # 在 [_apply_table_resize] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._resize_job = None
-        # 在 [_apply_table_resize] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
-            # 从 [_apply_table_resize] 返回执行结果给调用方，结束当前处理分支
             return
         # 预留 25px 给右侧垂直滚动条与边框，防止水平滚动条无故出现
-        # 在 [_apply_table_resize] 中更新局部变量 [avail_w]：为后续协议编码、服务调度或界面渲染准备中间状态
         avail_w = getattr(self, "_pending_width", self.table_frame.winfo_width()) - 25
-        # 在 [_apply_table_resize] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if avail_w < 400:
-            # 从 [_apply_table_resize] 返回执行结果给调用方，结束当前处理分支
             return
-        # 在 [_apply_table_resize] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._last_rendered_width = self._pending_width
-        # 在 [_apply_table_resize] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for cid, _, ratio, min_w, _ in self.col_specs:
-            # 在 [_apply_table_resize] 中更新局部变量 [w]：为后续协议编码、服务调度或界面渲染准备中间状态
             w = max(min_w, int(avail_w * ratio))
             self.tree.column(cid, width=w)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_populate_data]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _populate_data(self) -> None:
         """在弹窗打开时一次性预解析所有设备的点位与展示标签并缓存至 `self.app_item_map`。"""
         # 为什么预先构建 app_item_map 缓存而非每次搜索时调用 extract_studio_points()：
         # 避免用户在搜索框连续打字时反复解析数千个 JSON 点位，保证搜索与分类切换达到毫秒级响应。
         self.app_item_map: Dict[int, Tuple[Any, List[Dict[str, Any]], str, str, str, str]] = {}
-        # 在 [_populate_data] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for a in self.apps:
-            # 在 [_populate_data] 中更新局部变量 [pts]：为后续协议编码、服务调度或界面渲染准备中间状态
             pts = a.extract_studio_points()
-            # 在 [_populate_data] 中更新局部变量 [role_tag]：为后续协议编码、服务调度或界面渲染准备中间状态
             role_tag = "南向物理设备 (Type=1)" if a.is_south_master else "北向转发从机 (Type=2)" if a.is_north_slave else f"业务模块 (Type={a.app_type})"
-            # 在 [_populate_data] 中更新局部变量 [comm_str]：为后续协议编码、服务调度或界面渲染准备中间状态
             comm_str = f"串口 {a.serial_info.get('port_name', 'RS-485')}" if a.comm_type == "RTU" else f"TCP {a.ip}:{a.port}"
-            # 在 [_populate_data] 中更新局部变量 [pt_count_str]：为后续协议编码、服务调度或界面渲染准备中间状态
             pt_count_str = f"{len(pts)} 点"
-            # 在 [_populate_data] 中更新局部变量 [enable_tag]：为后续协议编码、服务调度或界面渲染准备中间状态
             enable_tag = "✅ 已使能" if a.enable == 1 else "⚪ 未使能"
             self.app_item_map[a.app_id] = (a, pts, role_tag, comm_str, pt_count_str, enable_tag)
 
@@ -429,9 +395,6 @@ class DbImportDialog:
         if not getattr(self, "_syncing_rtu_ui", False):
             self._rtu_user_overridden = True
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_filter_tree]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _filter_tree(self) -> None:
         """根据当前设备分类、顶部搜索词与规则区搜索词过滤刷新 Treeview，并在特定分类下智能预选或恢复勾选状态。"""
         current_sel = list(self.tree.selection())
@@ -442,25 +405,18 @@ class DbImportDialog:
         if has_active_search and self._saved_selection_before_search is None and current_sel:
             self._saved_selection_before_search = current_sel
 
-        # 在 [_filter_tree] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        # 在 [_filter_tree] 中更新局部变量 [sel_type]：为后续协议编码、服务调度或界面渲染准备中间状态
         sel_type = self.type_var.get()
 
-        # 在 [_filter_tree] 中更新局部变量 [first_item]：为后续协议编码、服务调度或界面渲染准备中间状态
         first_item = None
-        # 在 [_filter_tree] 中更新局部变量 [enabled_items]：为后续协议编码、服务调度或界面渲染准备中间状态
         enabled_items = []
         visible_items: List[str] = []
-        # 在 [_filter_tree] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for app_id, (a, pts, role_tag, comm_str, pt_count_str, enable_tag) in self.app_item_map.items():
             # 按 Type=1 / Type=2 过滤
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if sel_type == "1" and a.app_type != 1:
                 continue
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if sel_type == "2" and a.app_type != 2:
                 continue
 
@@ -493,7 +449,6 @@ class DbImportDialog:
                     continue
 
             # 将 app_id 字符串直接作为 Treeview 行 iid，方便后续 selection() 直接反查 app_item_map
-            # 在 [_filter_tree] 中更新局部变量 [item_id]：为后续协议编码、服务调度或界面渲染准备中间状态
             item_id = self.tree.insert(
                 "",
                 "end",
@@ -501,11 +456,8 @@ class DbImportDialog:
                 values=(app_id, enable_tag, disp_name, a.english_name, role_tag, comm_str, pt_count_str),
             )
             visible_items.append(item_id)
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if first_item is None:
-                # 在 [_filter_tree] 中更新局部变量 [first_item]：为后续协议编码、服务调度或界面渲染准备中间状态
                 first_item = item_id
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if a.enable == 1:
                 enabled_items.append(item_id)
 
@@ -522,20 +474,16 @@ class DbImportDialog:
         # 为什么在 Type=1 或 Type=2 时默认全选“已使能”设备，而在 all 模式下仅单选第一项：
         # 1. 当工程师明确切到“南向采集设备”分类时，通常希望一键把现场启用的所有南向设备批量导入模拟；
         # 2. 而在默认的“全部业务模块”视图下同时包含南北向和未使能模板，仅单选首项可避免误操作一次性导入过多无关模块。
-        # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if sel_type in ("1", "2"):
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if enabled_items:
                 self.tree.selection_set(enabled_items)
                 self.tree.focus(enabled_items[0])
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             elif first_item:
                 self.tree.selection_set(first_item)
                 self.tree.focus(first_item)
             else:
                 self.tree.selection_set([])
         else:
-            # 在 [_filter_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if first_item:
                 self.tree.selection_set(first_item)
                 self.tree.focus(first_item)
@@ -544,13 +492,9 @@ class DbImportDialog:
 
         self._on_tree_selection_changed()
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_on_tree_selection_changed]（入参: event）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _on_tree_selection_changed(self, event=None) -> None:
         """当 Treeview 选中行集合发生变化时，实时更新已选中设备数量提示、中文名汇总与 RTU 串口规则回显。"""
         selected_ids = list(self.tree.selection())
-        # 在 [_on_tree_selection_changed] 中更新局部变量 [selected_count]：为后续协议编码、服务调度或界面渲染准备中间状态
         selected_count = len(selected_ids)
         self.lbl_selected_status.config(text=f"当前已选中: {selected_count} 个设备")
 
@@ -606,30 +550,19 @@ class DbImportDialog:
             except Exception:
                 pass
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_select_all_visible]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _select_all_visible(self) -> None:
         """一键全选当前过滤列表中可见的所有设备行。"""
-        # 在 [_select_all_visible] 中更新局部变量 [all_items]：为后续协议编码、服务调度或界面渲染准备中间状态
         all_items = self.tree.get_children()
         self.tree.selection_set(all_items)
         if self._saved_selection_before_search is not None:
             self._saved_selection_before_search = list(all_items)
         self._on_tree_selection_changed()
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_select_all_enabled]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _select_all_enabled(self) -> None:
         """一键选中当前可见列表中所有标记为“已使能 (enable=1)”的设备行。"""
-        # 在 [_select_all_enabled] 中更新局部变量 [enabled_items]：为后续协议编码、服务调度或界面渲染准备中间状态
         enabled_items = []
-        # 在 [_select_all_enabled] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for item in self.tree.get_children():
-            # 在 [_select_all_enabled] 中更新局部变量 [vals]：为后续协议编码、服务调度或界面渲染准备中间状态
             vals = self.tree.item(item, "values")
-            # 在 [_select_all_enabled] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if vals and len(vals) > 1 and "已使能" in str(vals[1]):
                 enabled_items.append(item)
         self.tree.selection_set(enabled_items)
@@ -637,64 +570,40 @@ class DbImportDialog:
             self._saved_selection_before_search = list(enabled_items)
         self._on_tree_selection_changed()
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_invert_selection]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _invert_selection(self) -> None:
         """对当前可见列表执行集合差集反选操作。"""
-        # 在 [_invert_selection] 中更新局部变量 [all_items]：为后续协议编码、服务调度或界面渲染准备中间状态
         all_items = set(self.tree.get_children())
-        # 在 [_invert_selection] 中更新局部变量 [selected]：为后续协议编码、服务调度或界面渲染准备中间状态
         selected = set(self.tree.selection())
-        # 在 [_invert_selection] 中更新局部变量 [new_sel]：为后续协议编码、服务调度或界面渲染准备中间状态
         new_sel = list(all_items - selected)
         self.tree.selection_set(new_sel)
         if self._saved_selection_before_search is not None:
             self._saved_selection_before_search = list(new_sel)
         self._on_tree_selection_changed()
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_clear_selection]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _clear_selection(self) -> None:
         """清空当前 Treeview 中的所有选中项。"""
         self.tree.selection_set([])
         self._saved_selection_before_search = None
         self._on_tree_selection_changed()
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_execute_import]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _execute_import(self) -> None:
         """校验当前选中项并根据所选导入模式分发至“批量新建独立从机”或“替换/追加至当前从机”。"""
-        # 在 [_execute_import] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [_execute_import] 中更新局部变量 [selected_ids]：为后续协议编码、服务调度或界面渲染准备中间状态
             selected_ids = list(self.tree.selection())
-            # 在 [_execute_import] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not selected_ids:
                 messagebox.showwarning("提示", "请先在列表中选中至少一个业务设备！", parent=self.dlg)
-                # 从 [_execute_import] 返回执行结果给调用方，结束当前处理分支
                 return
 
-            # 在 [_execute_import] 中更新局部变量 [mode]：为后续协议编码、服务调度或界面渲染准备中间状态
             mode = self.import_mode_var.get()
-            # 在 [_execute_import] 中更新局部变量 [selected_apps_data]：为后续协议编码、服务调度或界面渲染准备中间状态
             selected_apps_data = []
-            # 在 [_execute_import] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
             for sel_str in selected_ids:
-                # 在 [_execute_import] 中更新局部变量 [app_id]：为后续协议编码、服务调度或界面渲染准备中间状态
                 app_id = int(sel_str)
-                # 在 [_execute_import] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if app_id in self.app_item_map:
                     selected_apps_data.append(self.app_item_map[app_id])
 
-            # 在 [_execute_import] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not selected_apps_data:
-                # 从 [_execute_import] 返回执行结果给调用方，结束当前处理分支
                 return
 
-            # 在 [_execute_import] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if mode == "new_instance":
                 self._import_as_new_instances(selected_apps_data)
             else:
@@ -705,9 +614,6 @@ class DbImportDialog:
             logger.error(f"批量导入执行发生异常: {ex}\n{traceback.format_exc()}")
             messagebox.showerror("导入失败", f"导入过程中发生异常:\n{ex}", parent=self.dlg)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_import_as_new_instances]（入参: apps_data_list）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _import_as_new_instances(self, apps_data_list: List[Tuple[Any, List[Dict[str, Any]], str, str, str, str]]) -> None:
         """为选中的每个业务设备分别创建独立的从机服务实例，严格执行 TCP/RTU 独立 100 实例配额与同端点站号防冲突分配。"""
         # 步骤拆解：
@@ -715,46 +621,33 @@ class DbImportDialog:
         # 2. 若多选超过 1 台设备，弹出二次确认框；
         # 3. 收集已有设备的 `(物理端点, 站号)` 集合，为每台新设备分配不冲突的 Unit ID；
         # 4. 逐台构建 SlaveDevice、加载点表并注册至 SlaveService，最后销毁弹窗并回调刷新主界面。
-        # 在 [_import_as_new_instances] 中更新局部变量 [slave_svc]：为后续协议编码、服务调度或界面渲染准备中间状态
         slave_svc = self.app.slave_service
-        # 在 [_import_as_new_instances] 中更新局部变量 [current_tcp_cnt]：为后续协议编码、服务调度或界面渲染准备中间状态
         current_tcp_cnt = slave_svc.count_devices_by_comm(CommType.TCP)
-        # 在 [_import_as_new_instances] 中更新局部变量 [current_rtu_cnt]：为后续协议编码、服务调度或界面渲染准备中间状态
         current_rtu_cnt = slave_svc.count_devices_by_comm(CommType.RTU)
 
-        # 在 [_import_as_new_instances] 中更新局部变量 [to_import_tcp]：为后续协议编码、服务调度或界面渲染准备中间状态
         to_import_tcp = sum(1 for (a, _, _, _, _, _) in apps_data_list if str(a.comm_type).upper() != "RTU")
-        # 在 [_import_as_new_instances] 中更新局部变量 [to_import_rtu]：为后续协议编码、服务调度或界面渲染准备中间状态
         to_import_rtu = sum(1 for (a, _, _, _, _, _) in apps_data_list if str(a.comm_type).upper() == "RTU")
 
         # 为什么在创建任何实例前先执行整批配额预检：
         # 保证批量导入的原子性——若拟导入数量加上已有数量超出 100 上限，直接整批拒绝并提示，避免只导入一半造成状态混乱。
-        # 在 [_import_as_new_instances] 中更新局部变量 [exceed_messages]：为后续协议编码、服务调度或界面渲染准备中间状态
         exceed_messages = []
-        # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if current_tcp_cnt + to_import_tcp > MAX_TCP_SLAVE_INSTANCES:
             exceed_messages.append(
                 f"Modbus TCP 从机将超限: 当前已有 {current_tcp_cnt} 个，拟导入 {to_import_tcp} 个，上限为 {MAX_TCP_SLAVE_INSTANCES} 个！"
             )
-        # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if current_rtu_cnt + to_import_rtu > MAX_RTU_SLAVE_INSTANCES:
             exceed_messages.append(
                 f"Modbus RTU 从机将超限: 当前已有 {current_rtu_cnt} 个，拟导入 {to_import_rtu} 个，上限为 {MAX_RTU_SLAVE_INSTANCES} 个！"
             )
 
-        # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if exceed_messages:
-            # 在 [_import_as_new_instances] 中更新局部变量 [msg]：为后续协议编码、服务调度或界面渲染准备中间状态
             msg = "\n".join(exceed_messages)
             msg += "\n\n系统设置每个通信协议最多承载 100 个从机服务实例以确保工业通信稳定性。请缩减所选设备或清理现有从机后再试！"
             messagebox.showerror("实例配额限制", msg, parent=self.dlg)
-            # 从 [_import_as_new_instances] 返回执行结果给调用方，结束当前处理分支
             return
 
         # 多选批量导入前弹出确认提示，列明 TCP 与 RTU 数量明细
-        # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if len(apps_data_list) > 1:
-            # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not messagebox.askyesno(
                 "确认批量导入",
                 f"确定要一次性为选中的 {len(apps_data_list)} 个设备分别创建独立的从机服务实例吗？\n"
@@ -762,7 +655,6 @@ class DbImportDialog:
                 f"- RTU 串口设备: {to_import_rtu} 个",
                 parent=self.dlg,
             ):
-                # 从 [_import_as_new_instances] 返回执行结果给调用方，结束当前处理分支
                 return
 
         created_devices: List[SlaveDevice] = []
@@ -774,13 +666,9 @@ class DbImportDialog:
         # 为什么维护 used_endpoint_units `Set[Tuple[str, int]]`：
         # 同一 RS-485 总线（如 RS-485(A1/B1)）或同一 TCP 端口下可能挂载多台设备；
         # 若数据库中未配站号或两台设备站号意外重号，自动顺延寻找当前端点下最小未占用的站号 `cand`，确保后续“全部启动”零冲突。
-        # 在 [_import_as_new_instances] 中更新局部变量 [used_endpoint_units]：为后续协议编码、服务调度或界面渲染准备中间状态
         used_endpoint_units = set()
-        # 在 [_import_as_new_instances] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for dev in existing_devices:
-            # 在 [_import_as_new_instances] 中更新局部变量 [cfg_e]：为后续协议编码、服务调度或界面渲染准备中间状态
             cfg_e = dev.conn_config
-            # 在 [_import_as_new_instances] 中更新局部变量 [ep_tag]：为后续协议编码、服务调度或界面渲染准备中间状态
             ep_tag = cfg_e.com_port.upper().strip() if cfg_e.comm_type == CommType.RTU else f"{cfg_e.host}:{cfg_e.port}"
             used_endpoint_units.add((ep_tag, cfg_e.unit_id))
 
@@ -812,13 +700,9 @@ class DbImportDialog:
 
         use_ui_rtu_override = getattr(self, "_rtu_user_overridden", False) or len(apps_data_list) == 1
 
-        # 在 [_import_as_new_instances] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for idx, (sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag) in enumerate(apps_data_list):
-            # 在 [_import_as_new_instances] 中更新局部变量 [is_rtu]：为后续协议编码、服务调度或界面渲染准备中间状态
             is_rtu = (str(sel_app.comm_type).upper() == "RTU")
-            # 在 [_import_as_new_instances] 中更新局部变量 [comm_mode]：为后续协议编码、服务调度或界面渲染准备中间状态
             comm_mode = CommType.RTU if is_rtu else CommType.TCP
-            # 在 [_import_as_new_instances] 中更新局部变量 [s_info]：为后续协议编码、服务调度或界面渲染准备中间状态
             s_info = getattr(sel_app, "serial_info", {}) or {}
 
             # 解析串口五要素参数（波特率、数据位、校验位、停止位、串口名）：
@@ -854,7 +738,6 @@ class DbImportDialog:
 
                 com_name = str(s_info.get("port_name", ui_com or "COM1") or ui_com or "COM1")
 
-            # 在 [_import_as_new_instances] 中更新局部变量 [ip_addr]：为后续协议编码、服务调度或界面渲染准备中间状态
             ip_addr = getattr(sel_app, "ip", "127.0.0.1") or "127.0.0.1"
             # [H2] 端口计算：对于 TCP 从机，自动探测未被占用的端口，避免与已有从机/Hub或同批导入设备冲突
             if comm_mode == CommType.TCP:
@@ -880,7 +763,6 @@ class DbImportDialog:
             else:
                 port_num = 502
 
-            # 在 [_import_as_new_instances] 中更新局部变量 [ep_key]：为后续协议编码、服务调度或界面渲染准备中间状态
             ep_key = com_name.upper().strip() if comm_mode == CommType.RTU else f"{ip_addr}:{port_num}"
 
             # 站号分配：优先采用数据库中配置的真实从机站地址；若冲突或未指定，顺延分配当前端点下未被占用的站号
@@ -900,14 +782,10 @@ class DbImportDialog:
 
             used_endpoint_units.add((ep_key, unit_id))
 
-            # 在 [_import_as_new_instances] 中更新局部变量 [disp_name]：为后续协议编码、服务调度或界面渲染准备中间状态
             disp_name = sel_app.chinese_name or sel_app.english_name
-            # 在 [_import_as_new_instances] 中更新局部变量 [new_name]：为后续协议编码、服务调度或界面渲染准备中间状态
             new_name = f"从机{unit_id} [{disp_name}]"
-            # 在 [_import_as_new_instances] 中更新局部变量 [new_id]：为后续协议编码、服务调度或界面渲染准备中间状态
             new_id = f"slave_{time.time_ns()}_{idx}"
 
-            # 在 [_import_as_new_instances] 中更新局部变量 [cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
             cfg = ConnectionConfig(
                 comm_type=comm_mode,
                 host=ip_addr,
@@ -920,7 +798,6 @@ class DbImportDialog:
                 unit_id=unit_id,
             )
 
-            # 在 [_import_as_new_instances] 中更新局部变量 [device]：为后续协议编码、服务调度或界面渲染准备中间状态
             device = SlaveDevice(
                 id=new_id,
                 name=new_name,
@@ -930,12 +807,10 @@ class DbImportDialog:
             )
 
             # 逐点校验并装载到新建的从机实体中
-            # 在 [_import_as_new_instances] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
             for pt in points_data:
                 self._load_single_point_to_device(device, pt)
 
             ok, err_msg = slave_svc.register_device(device)
-            # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if ok:
                 created_devices.append(device)
                 total_points_imported += len(device.points)
@@ -964,29 +839,20 @@ class DbImportDialog:
                 f"批量导入完成: 一次性创建 {len(created_devices)} 个从机实例，累计装载 {total_points_imported} 个点位",
             )
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_import_merge_to_current]（入参: apps_data_list, is_replace）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _import_merge_to_current(
         self,
         apps_data_list: List[Tuple[Any, List[Dict[str, Any]], str, str, str, str]],
         is_replace: bool,
     ) -> None:
         """将所选设备的点表覆盖替换 (`is_replace=True`) 或增量追加 (`is_replace=False`) 到主界面当前选中的从机实例。"""
-        # 在 [_import_merge_to_current] 中更新局部变量 [slave_svc]：为后续协议编码、服务调度或界面渲染准备中间状态
         slave_svc = self.app.slave_service
-        # 在 [_import_merge_to_current] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not self.current_device_id:
             messagebox.showwarning("提示", "当前主界面未选定目标从机实例！", parent=self.dlg)
-            # 从 [_import_merge_to_current] 返回执行结果给调用方，结束当前处理分支
             return
 
-        # 在 [_import_merge_to_current] 中更新局部变量 [target_dev]：为后续协议编码、服务调度或界面渲染准备中间状态
         target_dev = slave_svc.get_device(self.current_device_id)
-        # 在 [_import_merge_to_current] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not target_dev:
             messagebox.showerror("错误", f"未找到当前从机实例: {self.current_device_id}", parent=self.dlg)
-            # 从 [_import_merge_to_current] 返回执行结果给调用方，结束当前处理分支
             return
 
         # 若为覆盖替换模式，先清空目标从机现有点表并按前 3 个导入设备名称自动更新从机显示名
@@ -994,45 +860,29 @@ class DbImportDialog:
             target_dev.points.clear()
             slave_svc.clear_runtime_points(target_dev.id)
             names = [sel_app.chinese_name or sel_app.english_name for (sel_app, _, _, _, _, _) in apps_data_list]
-            # 在 [_import_merge_to_current] 中更新局部变量 [summary_name]：为后续协议编码、服务调度或界面渲染准备中间状态
             summary_name = " + ".join(names[:3]) + (f" 等{len(names)}个设备" if len(names) > 3 else "")
-            # 在 [_import_merge_to_current] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             target_dev.name = f"从机{target_dev.conn_config.unit_id} [{summary_name}]"
 
-        # 在 [_import_merge_to_current] 中更新局部变量 [imported_cnt]：为后续协议编码、服务调度或界面渲染准备中间状态
         imported_cnt = 0
-        # 在 [_import_merge_to_current] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag in apps_data_list:
-            # 在 [_import_merge_to_current] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
             for pt in points_data:
-                # 在 [_import_merge_to_current] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if self._load_single_point_to_device(target_dev, pt):
                     imported_cnt += 1
 
         self.dlg.destroy()
         self.on_imported(target_dev)
 
-        # 在 [_import_merge_to_current] 中更新局部变量 [mode_text]：为后续协议编码、服务调度或界面渲染准备中间状态
         mode_text = "覆盖替换" if is_replace else "追加合并"
-        # 在 [_import_merge_to_current] 中更新局部变量 [msg]：为后续协议编码、服务调度或界面渲染准备中间状态
         msg = f"已成功完成【{mode_text}】！\n\n目标从机: [{target_dev.name}]\n当前总点位数: {len(target_dev.points)} 点"
         messagebox.showinfo("导入完成", msg, parent=self.parent.winfo_toplevel())
         self.app.logging_service.post("SYS", target_dev.conn_config.unit_id, f"成功完成点表{mode_text}，当前点位总数: {len(target_dev.points)}")
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_load_single_point_to_device]（入参: target_dev, pt）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _load_single_point_to_device(self, target_dev: SlaveDevice, pt: Dict[str, Any]) -> bool:
         """调用 PointService 校验单个点位字典并写入目标 SlaveDevice（若从机正在运行则同步热推至底层引擎）。"""
-        # 在 [_load_single_point_to_device] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [_load_single_point_to_device] 中更新局部变量 [addr]：为后续协议编码、服务调度或界面渲染准备中间状态
             addr = int(pt.get("address", 0))
-            # 在 [_load_single_point_to_device] 中更新局部变量 [desc]：为后续协议编码、服务调度或界面渲染准备中间状态
             desc = str(pt.get("desc", f"Point_{addr}"))
-            # 在 [_load_single_point_to_device] 中更新局部变量 [dt]：为后续协议编码、服务调度或界面渲染准备中间状态
             dt = pt.get("data_type", "INT16")
-            # 在 [_load_single_point_to_device] 中更新局部变量 [bo]：为后续协议编码、服务调度或界面渲染准备中间状态
             bo = pt.get("byte_order", "CDAB")
             default_area = (
                 self.combo_default_area.get()
@@ -1040,11 +890,8 @@ class DbImportDialog:
                 else "4x"
             )
             area = pt.get("area") or default_area
-            # 在 [_load_single_point_to_device] 中更新局部变量 [val]：为后续协议编码、服务调度或界面渲染准备中间状态
             val = pt.get("current_val", 0)
-            # 在 [_load_single_point_to_device] 中更新局部变量 [sim]：为后续协议编码、服务调度或界面渲染准备中间状态
             sim = pt.get("sim_mode", "固定")
-            # 在 [_load_single_point_to_device] 中更新局部变量 [scale]：为后续协议编码、服务调度或界面渲染准备中间状态
             scale = float(pt.get("scale", 1.0) or 1.0)
             field_name = str(pt.get("field_name", "") or "")
             unit = str(pt.get("unit", "") or "")
@@ -1061,18 +908,13 @@ class DbImportDialog:
                 scale=scale,
                 unit=unit,
             )
-            # 在 [_load_single_point_to_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if ok and point:
                 target_dev.add_point(point)
                 # 若在覆盖或追加导入时目标从机已处于运行状态，立即将新点位热推入底层 DataBlock
-                # 在 [_load_single_point_to_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if target_dev.is_running:
                     self.app.slave_service.sync_point_to_runtime(target_dev.id, point)
-                # 从 [_load_single_point_to_device] 返回执行结果给调用方，结束当前处理分支
                 return True
-            # 从 [_load_single_point_to_device] 返回执行结果给调用方，结束当前处理分支
             return False
         except Exception:
-            # 从 [_load_single_point_to_device] 返回执行结果给调用方，结束当前处理分支
             return False
 

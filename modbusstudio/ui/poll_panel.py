@@ -165,7 +165,6 @@ class PollPanel(ttk.Frame):
         self.btn_connect = ttk.Button(right0, text="🔌 建立连接", style="primary.TButton", command=self._toggle_connect)
         self.btn_connect.pack(side="left", padx=3)
 
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.lbl_conn_status = ttk.Label(right0, text="未连接", foreground="#6c757d", font=("Microsoft YaHei UI", 9, "bold"))
         self.lbl_conn_status.pack(side="left", padx=4)
 
@@ -173,78 +172,61 @@ class PollPanel(ttk.Frame):
         self._on_comm_type_change()
 
         # --- 第 1 行：读取指令配置与单次/连续轮询操作 ---
-        # 在 [_build_ui] 中更新局部变量 [row1]：为后续协议编码、服务调度或界面渲染准备中间状态
         row1 = ttk.Frame(top_box)
         row1.pack(fill="x", padx=4, pady=2)
 
-        # 在 [_build_ui] 中更新局部变量 [left1]：为后续协议编码、服务调度或界面渲染准备中间状态
         left1 = ttk.Frame(row1)
         left1.pack(side="left", fill="x", expand=True)
 
         ttk.Label(left1, text="区域:").pack(side="left", padx=(2, 1))
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.combo_area = ttk.Combobox(left1, state="readonly", width=12, values=self.AREA_CHOICES)
         self.combo_area.set(AreaType.HOLDING.friendly_name)
         self.combo_area.pack(side="left", padx=1)
 
         ttk.Label(left1, text="起始地址:").pack(side="left", padx=(4, 1))
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.entry_start_addr = ttk.Entry(left1, width=5)
         self.entry_start_addr.insert(0, "1")
         self.entry_start_addr.pack(side="left", padx=1)
 
         ttk.Label(left1, text="数量:").pack(side="left", padx=(4, 1))
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.entry_count = ttk.Entry(left1, width=4)
         self.entry_count.insert(0, "10")
         self.entry_count.pack(side="left", padx=1)
 
         ttk.Label(left1, text="变位:").pack(side="left", padx=(4, 1))
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.combo_order = ttk.Combobox(left1, state="readonly", width=6, values=self.BYTE_ORDER_CHOICES)
         self.combo_order.set("ABCD")
         self.combo_order.pack(side="left", padx=1)
 
         # [POLL-CONFIG] 增加"间隔(ms)"输入框，默认 1000ms，有效范围 100~60000ms
         ttk.Label(left1, text="间隔(ms):").pack(side="left", padx=(4, 1))
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.poll_interval_var = tk.IntVar(value=1000)
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.entry_interval = ttk.Entry(left1, textvariable=self.poll_interval_var, width=6)
         self.entry_interval.pack(side="left", padx=1)
 
-        # 在 [_build_ui] 中更新局部变量 [btn_poll_once]：为后续协议编码、服务调度或界面渲染准备中间状态
         btn_poll_once = ttk.Button(left1, text="🔍 单次读取", style="info.TButton", command=self._poll_once)
         btn_poll_once.pack(side="left", padx=(6, 2))
 
         # [POLL-CONFIG] 文案改为"连续轮询"，由用户输入的间隔(ms)动态驱动
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.btn_poll_loop = ttk.Button(left1, text="🔁 连续轮询", style="success.TButton", command=self._toggle_poll_loop)
         self.btn_poll_loop.pack(side="left", padx=2)
 
-        # 在 [_build_ui] 中更新局部变量 [right1]：为后续协议编码、服务调度或界面渲染准备中间状态
         right1 = ttk.Frame(row1)
         right1.pack(side="right")
 
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.lbl_stats = ttk.Label(right1, text="Tx: 0 | Rx: 0", font=("Consolas", 9))
         self.lbl_stats.pack(side="right", padx=4)
 
         # 2. 轮询监视数据表格：同屏并排展示 Hex、UINT16、INT16、FLOAT32(ABCD) 与 FLOAT32(CDAB) 解算值
-        # 在 [_build_ui] 中更新局部变量 [table_box]：为后续协议编码、服务调度或界面渲染准备中间状态
         table_box = ttk.Frame(self)
         table_box.pack(fill="both", expand=True, padx=2, pady=2)
 
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.tree_scroll_y = ttk.Scrollbar(table_box, orient="vertical")
         self.tree_scroll_y.pack(side="right", fill="y")
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.tree_scroll_x = ttk.Scrollbar(table_box, orient="horizontal")
         self.tree_scroll_x.pack(side="bottom", fill="x")
 
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.columns = ("addr", "raw_hex", "u16", "i16", "f32_abcd", "f32_cdab", "status")
-        # 在 [_build_ui] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.tree = ttk.Treeview(
             table_box,
             columns=self.columns,
@@ -259,7 +241,6 @@ class PollPanel(ttk.Frame):
 
         # 为什么同时展示 UINT16、INT16、FLOAT32(ABCD) 和 FLOAT32(CDAB) 四列解算结果：
         # 现场联调未知设备点表时，工程师无需反复切换类型或字节序，即可一眼看出哪种解算方式符合真实物理量（如电压 220.5V）。
-        # 在 [_build_ui] 中更新局部变量 [col_defs]：为后续协议编码、服务调度或界面渲染准备中间状态
         col_defs = [
             ("addr", "寄存器地址", 80, "center"),
             ("raw_hex", "原始值 (Hex)", 110, "center"),
@@ -269,19 +250,13 @@ class PollPanel(ttk.Frame):
             ("f32_cdab", "FLOAT32 (CDAB)", 120, "center"),
             ("status", "状态响应", 100, "center"),
         ]
-        # 在 [_build_ui] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for cid, head, w, align in col_defs:
             self.tree.heading(cid, text=head)
             self.tree.column(cid, width=w, anchor=align)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_on_comm_type_change]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _on_comm_type_change(self) -> None:
         """响应通信方式单选按钮切换，动态显示 TCP 网口输入框或 RTU 串口输入框。"""
-        # 在 [_on_comm_type_change] 中更新局部变量 [mode]：为后续协议编码、服务调度或界面渲染准备中间状态
         mode = self.poll_comm_type_var.get()
-        # 在 [_on_comm_type_change] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if mode == "RTU":
             self.tcp_frame.pack_forget()
             self.rtu_frame.pack(side="left")
@@ -289,35 +264,22 @@ class PollPanel(ttk.Frame):
             self.rtu_frame.pack_forget()
             self.tcp_frame.pack(side="left")
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_refresh_poll_com_ports]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _refresh_poll_com_ports(self) -> None:
         """扫描本机当前可用的物理或虚拟串口并刷新串口下拉框列表。"""
-        # 在 [_refresh_poll_com_ports] 中更新局部变量 [ports]：为后续协议编码、服务调度或界面渲染准备中间状态
         ports = []
         # 若安装了 pyserial 则动态枚举系统活跃串口，否则回退提供 COM1~COM4 默认选项
-        # 在 [_refresh_poll_com_ports] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if serial:
-            # 在 [_refresh_poll_com_ports] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
-                # 在 [_refresh_poll_com_ports] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
                 for p in serial.tools.list_ports.comports():
                     ports.append(p.device)
             except Exception:
                 pass
-        # 在 [_refresh_poll_com_ports] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not ports:
-            # 在 [_refresh_poll_com_ports] 中更新局部变量 [ports]：为后续协议编码、服务调度或界面渲染准备中间状态
             ports = ["COM1", "COM2", "COM3", "COM4"]
         self.combo_com["values"] = ports
-        # 在 [_refresh_poll_com_ports] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not self.combo_com.get() and ports:
             self.combo_com.set(ports[0])
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_get_connection_config]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _get_connection_config(self) -> ConnectionConfig:
         """从顶部输入框收集并构建强类型的 ConnectionConfig 连接配置实体。"""
         # 对空白输入应用安全的工业默认值（127.0.0.1:502、COM1、9600、8-N-1、站号 1）
@@ -350,28 +312,19 @@ class PollPanel(ttk.Frame):
             self.lbl_conn_status.config(text="● 已断开", foreground="#dc3545")
             self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
         else:
-            # 在 [_toggle_connect] 中更新局部变量 [cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
             cfg = self._get_connection_config()
             # 建连期间先将状态置为黄色“连接中...”并禁用按钮，防止重复点击触发并发连接
             self.lbl_conn_status.config(text="● 连接中...", foreground="#ffc107")
             self.btn_connect.config(state="disabled")
 
-            # ──────────────────────────────────────────────────────────────────
-            # 方法实现 [do_connect]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-            # ──────────────────────────────────────────────────────────────────
             def do_connect():
                 """在后台工作线程执行阻塞式 TCP/RTU 连接握手，完成后调度回主线程更新状态。"""
                 ok, msg = self.app.poll_service.connect(cfg)
-                # ──────────────────────────────────────────────────────────────────
-                # 方法实现 [on_done]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-                # ──────────────────────────────────────────────────────────────────
                 def on_done():
                     """在 Tkinter 主线程恢复连接按钮并更新连接状态指示灯。"""
                     # 为什么检查 winfo_exists()：防止用户在连接超时等待期间关闭了窗口导致控件已销毁报错
-                    # 在 [_toggle_connect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if hasattr(self, "winfo_exists") and self.winfo_exists():
                         self.btn_connect.config(state="normal")
-                        # 在 [_toggle_connect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                         if ok:
                             self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
                             self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
@@ -383,35 +336,22 @@ class PollPanel(ttk.Frame):
 
             self._executor.submit(do_connect)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_poll_once]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _poll_once(self) -> None:
         """异步执行单次寄存器轮询读取，彻底解放 UI 主线程，杜绝网络超时引起的界面假死。"""
         # 若上一次单次读取尚未返回，直接丢弃本次点击以防请求队列积压
-        # 在 [_poll_once] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self._is_poll_busy:
-            # 从 [_poll_once] 返回执行结果给调用方，结束当前处理分支
             return
 
-        # 在 [_poll_once] 中更新局部变量 [cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
         cfg = self._get_connection_config()
-        # 在 [_poll_once] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [_poll_once] 中更新局部变量 [start_addr]：为后续协议编码、服务调度或界面渲染准备中间状态
             start_addr = int(self.entry_start_addr.get().strip())
-            # 在 [_poll_once] 中更新局部变量 [count]：为后续协议编码、服务调度或界面渲染准备中间状态
             count = int(self.entry_count.get().strip())
-            # 在 [_poll_once] 中更新局部变量 [area_enum]：为后续协议编码、服务调度或界面渲染准备中间状态
             area_enum = AreaType.normalize(self.combo_area.get())
-            # 在 [_poll_once] 中更新局部变量 [bo_enum]：为后续协议编码、服务调度或界面渲染准备中间状态
             bo_enum = ByteOrder.normalize(self.combo_order.get())
         except Exception as e:
             messagebox.showerror("参数错误", f"输入格式有误: {e}")
-            # 从 [_poll_once] 返回执行结果给调用方，结束当前处理分支
             return
 
-        # 在 [_poll_once] 中更新局部变量 [task]：为后续协议编码、服务调度或界面渲染准备中间状态
         task = PollTask(
             conn_config=cfg,
             area=area_enum,
@@ -420,29 +360,18 @@ class PollPanel(ttk.Frame):
             byte_order=bo_enum,
         )
 
-        # 在 [_poll_once] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._is_poll_busy = True
         self._tx_count += 1
         self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
 
-        # ──────────────────────────────────────────────────────────────────
-        # 方法实现 [do_read]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-        # ──────────────────────────────────────────────────────────────────
         def do_read():
             """在后台线程调用 PollService 读取寄存器块，并将结果通过 after(0) 投递回主线程。"""
             res: PollResult = self.app.poll_service.read_registers(task)
-            # ──────────────────────────────────────────────────────────────────
-            # 方法实现 [on_done]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-            # ──────────────────────────────────────────────────────────────────
             def on_done():
                 """在主线程清除忙标志、更新接收统计并渲染读取到的寄存器表格。"""
-                # 在 [_poll_once] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                 self._is_poll_busy = False
-                # 在 [_poll_once] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if not hasattr(self, "winfo_exists") or not self.winfo_exists():
-                    # 从 [_poll_once] 返回执行结果给调用方，结束当前处理分支
                     return
-                # 在 [_poll_once] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if res.success:
                     self._rx_count += 1
                     self._update_result_tree(res)
@@ -454,49 +383,32 @@ class PollPanel(ttk.Frame):
         self._executor.submit(do_read)
 
     # [POLL-CONFIG] 连续轮询控制：调用 PollService.start_continuous_polling，支持用户自定义间隔
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_toggle_poll_loop]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _toggle_poll_loop(self) -> None:
         """启动或停止后台连续定时轮询任务，支持 100~60000ms 自定义轮询周期。"""
-        # 在 [_toggle_poll_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self._is_polling_loop:
-            # 在 [_toggle_poll_loop] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._is_polling_loop = False
             self.app.poll_service.stop_continuous_polling()
             self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
         else:
-            # 在 [_toggle_poll_loop] 中更新局部变量 [cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
             cfg = self._get_connection_config()
-            # 在 [_toggle_poll_loop] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
-                # 在 [_toggle_poll_loop] 中更新局部变量 [start_addr]：为后续协议编码、服务调度或界面渲染准备中间状态
                 start_addr = int(self.entry_start_addr.get().strip())
-                # 在 [_toggle_poll_loop] 中更新局部变量 [count]：为后续协议编码、服务调度或界面渲染准备中间状态
                 count = int(self.entry_count.get().strip())
-                # 在 [_toggle_poll_loop] 中更新局部变量 [area_enum]：为后续协议编码、服务调度或界面渲染准备中间状态
                 area_enum = AreaType.normalize(self.combo_area.get())
-                # 在 [_toggle_poll_loop] 中更新局部变量 [bo_enum]：为后续协议编码、服务调度或界面渲染准备中间状态
                 bo_enum = ByteOrder.normalize(self.combo_order.get())
             except Exception as e:
                 messagebox.showerror("参数错误", f"输入格式有误: {e}")
-                # 从 [_toggle_poll_loop] 返回执行结果给调用方，结束当前处理分支
                 return
 
             # 为什么将轮询间隔钳位在 100ms ~ 60000ms 之间并回写输入框：
             # 防止用户输入 0ms 或负数引发后台死循环打满 CPU 和串口带宽，同时将修正后的实际生效值直观反馈到界面。
-            # 在 [_toggle_poll_loop] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
-                # 在 [_toggle_poll_loop] 中更新局部变量 [raw_interval]：为后续协议编码、服务调度或界面渲染准备中间状态
                 raw_interval = int(self.poll_interval_var.get())
             except Exception:
-                # 在 [_toggle_poll_loop] 中更新局部变量 [raw_interval]：为后续协议编码、服务调度或界面渲染准备中间状态
                 raw_interval = 1000
-            # 在 [_toggle_poll_loop] 中更新局部变量 [interval_ms]：为后续协议编码、服务调度或界面渲染准备中间状态
             interval_ms = max(100, min(60000, raw_interval))
             self.poll_interval_var.set(interval_ms)
 
-            # 在 [_toggle_poll_loop] 中更新局部变量 [task]：为后续协议编码、服务调度或界面渲染准备中间状态
             task = PollTask(
                 conn_config=cfg,
                 area=area_enum,
@@ -510,9 +422,6 @@ class PollPanel(ttk.Frame):
             # 为什么在 _on_success_from_worker 与 _on_error_from_worker 内部必须套一层 self.after(0, ...)：
             # 底层 ModbusPollEngine 的轮询回调是在后台 daemon 线程中直接触发的，而 Tkinter 控件与 Treeview
             # 不是线程安全的；通过 after(0) 将 UI 更新派发给主事件循环，彻底杜绝跨线程操作 Tcl 解释器导致的闪退。
-            # ──────────────────────────────────────────────────────────────────
-            # 方法实现 [_on_success_from_worker]（入参: fresh_dict）：封装该操作的输入校验、状态转换与异常兜底逻辑
-            # ──────────────────────────────────────────────────────────────────
             def _on_success_from_worker(fresh_dict: Dict[int, int]):
                 """接收后台轮询线程返回的最新寄存器字典并派发到主线程渲染。"""
                 def _ui_update():
@@ -562,26 +471,16 @@ class PollPanel(ttk.Frame):
             self._executor.submit(_do_start_loop)
 
     # [POLL-CONFIG] 适配从局部有效寄存器字典渲染表格
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_update_from_regs]（入参: regs_dict, start_addr, count）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _update_from_regs(self, regs_dict: Dict[int, int], start_addr: int, count: int) -> None:
         """从后台连续轮询返回的局部有效地址字典提取连续寄存器列表并更新表格。"""
         # 按 [start_addr, start_addr + count) 顺序提取本次轮询的新鲜值，不混入历史不同地址段的残留缓存
-        # 在 [_update_from_regs] 中更新局部变量 [regs_list]：为后续协议编码、服务调度或界面渲染准备中间状态
         regs_list = [regs_dict.get(start_addr + i, 0) for i in range(count)]
         self._render_registers_to_tree(regs_list, start_addr)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_update_result_tree]（入参: res）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _update_result_tree(self, res: PollResult) -> None:
         """根据单次轮询结果对象 PollResult 刷新寄存器监视表格。"""
         self._render_registers_to_tree(res.raw_registers, res.start_address)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_render_registers_to_tree]（入参: regs, start）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _render_registers_to_tree(self, regs: List[int], start: int) -> None:
         """将原始 16 位寄存器数组解算为 Hex、UINT16、INT16 及双字 FLOAT32（响应顶部变位下拉框）并渲染到 Treeview。"""
         from ..modbus_codec import decode_value

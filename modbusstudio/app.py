@@ -46,17 +46,32 @@ from .ui import MainWindow
 #   使自动化测试可直接无头调用 save_session_state / load_session_state。
 # =============================================================================
 SAVE_FILENAME = "session_state.json"
+SETTINGS_FILENAME = "settings.json"
 SCHEMA_VERSION = 1
+
+
+def get_app_base_dir() -> str:
+    """获取应用运行期基准目录：PyInstaller 冻结 exe 返回可执行文件所在目录，源码模式返回仓库根目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_runtime_path(relative_or_abs: str) -> str:
+    """将运行期配置/日志/数据路径解析到应用基准目录（绝对路径原样归一化返回），避免因工作目录变化导致配置漂移。"""
+    if os.path.isabs(relative_or_abs):
+        return os.path.abspath(relative_or_abs)
+    return os.path.join(get_app_base_dir(), relative_or_abs)
 
 
 def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> bool:
     """将应用当前会话状态（业务数据库路径、所有从机配置及点表动态模拟状态）原子持久化至 JSON 文件。
-    参数：app（ModbusStudioAppCore 实例）、path（可选文件路径，默认为 session_state.json）。
+    参数：app（ModbusStudioAppCore 实例）、path（可选文件路径，默认为应用基准目录下的 session_state.json）。
     返回：bool（保存是否成功）。
     步骤：1.解析绝对路径；2.先写入同目录临时文件并 fsync；3.若原文件存在则备份为 .bak；4.原子 os.replace 替换目标文件。
     副作用：在磁盘上原子写入 session_state.json 及备份 session_state.json.bak。
     """
-    target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
+    target_path = os.path.abspath(path) if path else resolve_runtime_path(SAVE_FILENAME)
     tmp_path = target_path + ".tmp"
     try:
         parent_dir = os.path.dirname(target_path)
@@ -114,7 +129,7 @@ def load_session_state(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     返回：Optional[Dict[str, Any]]，成功读取且 schema_version 匹配时返回字典，否则返回 None。
     副作用：从 .bak 恢复时记录一条告警日志。
     """
-    target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
+    target_path = os.path.abspath(path) if path else resolve_runtime_path(SAVE_FILENAME)
     data = _read_session_json(target_path)
     if data is not None:
         return data
@@ -149,7 +164,7 @@ class ModbusStudioAppCore:
         # 1. 业务与通信基础设施初始化
         # 为什么必须最先创建 LoggingService：
         #   后续 SlaveService 和 PollService 在构造及运行期都需要通过它投递系统与收发报文日志
-        self.logging_service = LoggingService(log_dir="logs")
+        self.logging_service = LoggingService(log_dir=resolve_runtime_path("logs"))
         # 将日志服务注入从机管理服务，使所有从机站点共享同一双缓冲日志队列
         self.slave_service = SlaveService(self.logging_service)
         # 将日志服务注入主机轮询服务，确保主站与从站的 TX/RX 报文能在同一视图按时间序对照分析
@@ -219,9 +234,9 @@ class ModbusStudioAppCore:
         # 为什么按 .cdb -> .sqlite -> .db 顺序排列：
         #   现场 Linux ARM 一体机导出的 EMS 业务配置库统一采用 .cdb 扩展名（底层实为 SQLite3 格式）
         candidates = [
-            os.path.abspath("extra/hems.cdb"),
-            os.path.abspath("extra/hems.sqlite"),
-            os.path.abspath("extra/hems.db"),
+            resolve_runtime_path("extra/hems.cdb"),
+            resolve_runtime_path("extra/hems.sqlite"),
+            resolve_runtime_path("extra/hems.db"),
         ]
         # 遍历候选路径列表：只需命中第一个真实存在的物理文件即可短路返回
         for path in candidates:
@@ -357,8 +372,8 @@ def main():
     """
     # 默认使用亮色主题 bootstrap-light，适合工业现场笔记本屏幕阅读
     initial_theme = "bootstrap-light"
-    # 将相对路径转为绝对路径，确保从任意工作目录启动都能定位配置文件
-    settings_file = os.path.abspath("settings.json")
+    # 统一基于应用基准目录定位 settings.json，避免通过桌面快捷方式或其它工作目录启动时丢失主题偏好
+    settings_file = resolve_runtime_path(SETTINGS_FILENAME)
     # 为什么外包一层宽泛的 try/except：
     #   用户可能手动编辑损坏 settings.json，外观配置读取失败绝不能导致核心调试软件无法启动
     if os.path.exists(settings_file):

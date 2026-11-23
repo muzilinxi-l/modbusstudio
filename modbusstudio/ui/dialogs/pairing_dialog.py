@@ -144,9 +144,6 @@ class PairingDialog:
         # 2. 相比绑定 `<KeyRelease>` 事件，trace_add 能同时捕获鼠标右键粘贴或程序自动赋值引起的文本变化。
         self.search_var.trace_add("write", lambda *args: self._filter_rules())
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_load_rules]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _load_rules(self) -> None:
         """调用 HemsPairingEngine 从当前关联数据库解析全部配对规则并刷新视图。"""
         # 步骤拆解：
@@ -157,11 +154,8 @@ class PairingDialog:
         # 为什么用 try/except 包裹配对引擎初始化：
         # 1. 现场导入的 SQLite 文件可能损坏、被其他进程独占锁死，或并非标准 HEMS `.cdb` 结构（缺少 app 表）；
         # 2. 捕获异常后弹出友好错误提示框，仍保留空表格界面而非直接令主程序未捕获异常退栈。
-        # 在 [_load_rules] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [_load_rules] 中更新局部变量 [engine]：为后续协议编码、服务调度或界面渲染准备中间状态
             engine = HemsPairingEngine(self.app.db_path)
-            # 在 [_load_rules] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self.rules = engine.load_rules()
         except Exception as e:
             messagebox.showerror("加载配对规则失败", f"无法解析配对规则: {e}", parent=self.dlg)
@@ -172,9 +166,6 @@ class PairingDialog:
         )
         self._filter_rules()
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_filter_rules]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _filter_rules(self) -> None:
         """根据搜索框关键字过滤配对规则列表并重新渲染 Treeview 行。"""
         # 步骤拆解：
@@ -182,28 +173,21 @@ class PairingDialog:
         # 2. 提取搜索框关键字并转为小写；
         # 3. 遍历 self.rules 执行子串匹配，将命中的配对规则格式化插入 Treeview。
         # 先清空表格中所有已渲染行，准备按最新关键字重绘
-        # 在 [_filter_rules] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for item in self.tree_pair.get_children():
             self.tree_pair.delete(item)
 
-        # 在 [_filter_rules] 中更新局部变量 [kw]：为后续协议编码、服务调度或界面渲染准备中间状态
         kw = self.search_var.get().strip().lower()
         # 为什么将 rule_id、target_app_name、src_app_name、src_var_name 拼接为统一小写检索串：
         # 1. 允许工程师直接输入规则号（如 R_30）、北向服务名（如 North）、南向设备名（如 PCS）或具体信号名快速定位；
         # 2. 统一转小写实现大小写不敏感模糊搜索，提升现场排障效率。
-        # 在 [_filter_rules] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for i, r in enumerate(self.rules):
-            # 在 [_filter_rules] 中更新局部变量 [search_haystack]：为后续协议编码、服务调度或界面渲染准备中间状态
             search_haystack = f"{r.rule_id} {r.target_app_name} {r.src_app_name} {r.src_var_name}".lower()
-            # 在 [_filter_rules] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if kw and kw not in search_haystack:
                 continue
 
             # 组装目标北向寄存器信息（含寄存器地址、功能码与从机站号）
-            # 在 [_filter_rules] 中更新局部变量 [target_reg_str]：为后续协议编码、服务调度或界面渲染准备中间状态
             target_reg_str = f"{r.target_register} (FC:{r.target_fc}, 站号:{r.target_slave_id})"
             # 若南向源变量无物理寄存器地址（如系统内部计算量），显式标注“(内部)”以区分硬件采集点位
-            # 在 [_filter_rules] 中更新局部变量 [src_var_str]：为后续协议编码、服务调度或界面渲染准备中间状态
             src_var_str = (
                 f"{r.src_var_name} [Addr:{r.src_address}]"
                 if r.src_address is not None

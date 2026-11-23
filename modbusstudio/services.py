@@ -327,65 +327,37 @@ class SlaveService:
         # _active_engines 仅保存当前处于启动运行状态的底层 ModbusSlaveEngine 实例
         self._active_engines: Dict[str, ModbusSlaveEngine] = {}
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [get_devices]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def get_devices(self) -> List[SlaveDevice]:
         """获取当前已注册的所有从机设备实体列表。"""
-        # 从 [get_devices] 返回执行结果给调用方，结束当前处理分支
         return list(self._devices.values())
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [get_device]（入参: device_id）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def get_device(self, device_id: str) -> Optional[SlaveDevice]:
         """根据设备唯一标识 `device_id` 查询对应的 SlaveDevice 实体。"""
-        # 从 [get_device] 返回执行结果给调用方，结束当前处理分支
         return self._devices.get(device_id)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [count_devices_by_comm]（入参: comm_type）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def count_devices_by_comm(self, comm_type: CommType) -> int:
         """按物理通信协议类型 (TCP 或 RTU) 统计当前已注册的从机实例数量。"""
-        # 从 [count_devices_by_comm] 返回执行结果给调用方，结束当前处理分支
         return sum(1 for d in self._devices.values() if d.conn_config.comm_type == comm_type)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [can_register_device]（入参: comm_type）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def can_register_device(self, comm_type: CommType) -> Tuple[bool, str]:
         """检查指定通信协议下的从机实例数是否未超过系统配额上限（TCP/RTU 独立上限 100 个）。"""
         # 为什么对 TCP 和 RTU 分别设置 100 个实例的硬上限：
         # 每个运行中的从机均伴随独立的后台仿真线程与 4×65535 寄存器内存块，限制单协议 100 实例可保障工业现场长时间稳定运行。
-        # 在 [can_register_device] 中更新局部变量 [limit]：为后续协议编码、服务调度或界面渲染准备中间状态
         limit = MAX_RTU_SLAVE_INSTANCES if comm_type == CommType.RTU else MAX_TCP_SLAVE_INSTANCES
-        # 在 [can_register_device] 中更新局部变量 [current]：为后续协议编码、服务调度或界面渲染准备中间状态
         current = self.count_devices_by_comm(comm_type)
-        # 在 [can_register_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if current >= limit:
-            # 在 [can_register_device] 中更新局部变量 [proto_name]：为后续协议编码、服务调度或界面渲染准备中间状态
             proto_name = "Modbus RTU (串口)" if comm_type == CommType.RTU else "Modbus TCP (以太网)"
-            # 从 [can_register_device] 返回执行结果给调用方，结束当前处理分支
             return False, f"{proto_name} 从机服务实例已达系统容量上限 ({limit} 个)，禁止继续创建！"
-        # 从 [can_register_device] 返回执行结果给调用方，结束当前处理分支
         return True, ""
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [register_device]（入参: device, check_quota）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def register_device(self, device: SlaveDevice, check_quota: bool = True) -> Tuple[bool, str]:
         """注册或更新从机设备实例，对新增设备默认执行容量配额硬限制检查。"""
         # 若是新设备 ID 且开启了配额检查，则先验证对应协议（TCP/RTU）剩余槽位
-        # 在 [register_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if check_quota and device.id not in self._devices:
             ok, err = self.can_register_device(device.conn_config.comm_type)
-            # 在 [register_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not ok:
-                # 从 [register_device] 返回执行结果给调用方，结束当前处理分支
                 return False, err
         self._devices[device.id] = device
-        # 从 [register_device] 返回执行结果给调用方，结束当前处理分支
         return True, "注册成功"
 
     def restore_devices(self, devices_list: List[dict]) -> Tuple[int, List[str]]:
@@ -507,34 +479,21 @@ class SlaveService:
             cand += 1
         return cand
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [remove_device]（入参: device_id）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def remove_device(self, device_id: str) -> Tuple[bool, str]:
         """停止并从内存中移除指定 ID 的从机设备实例。"""
         # 若该从机正在运行，先调用 stop_slave 安全注销底层监听与仿真线程，防止残留孤儿从机响应主站问询
-        # 在 [remove_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if device_id in self._active_engines:
             self.stop_slave(device_id)
-        # 在 [remove_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if device_id in self._devices:
             del self._devices[device_id]
-            # 从 [remove_device] 返回执行结果给调用方，结束当前处理分支
             return True, f"成功移除从机 {device_id}"
-        # 从 [remove_device] 返回执行结果给调用方，结束当前处理分支
         return False, "从机不存在"
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [clear_all_devices]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def clear_all_devices(self) -> int:
         """停止所有运行中的底层通信引擎，并彻底清空所有从机设备实例与点表（如切换数据库时调用）。"""
-        # 在 [clear_all_devices] 中更新局部变量 [count]：为后续协议编码、服务调度或界面渲染准备中间状态
         count = len(self._devices)
         # 1. 逐个停止运行中的底层通信引擎并释放网络/串口资源
-        # 在 [clear_all_devices] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for device_id, engine in list(self._active_engines.items()):
-            # 在 [clear_all_devices] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
                 engine.stop()
             except Exception as e:
@@ -544,12 +503,8 @@ class SlaveService:
         # 2. 清空所有内存设备实体并记录系统级审计日志
         self._devices.clear()
         self.logging_service.post("SYS", 0, f"已安全停止底层通信并清空所有历史从机服务实例 (共 {count} 个)")
-        # 从 [clear_all_devices] 返回执行结果给调用方，结束当前处理分支
         return count
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [start_slave]（入参: device_id）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def start_slave(self, device_id: str) -> Tuple[bool, str]:
         """统一启动指定从机服务：执行健康探活与僵死清理、检查同端点站号冲突、装配点表并启动监听与波形仿真。"""
         # 步骤拆解：
@@ -557,82 +512,54 @@ class SlaveService:
         # 2. 若标记为运行中，调用 engine.is_healthy() 探活：健康则直接幂等返回，僵死则先从 Hub 注销并停止旧引擎；
         # 3. 扫描其余运行中从机，校验同一物理端点 (IP:Port 或 COM 口) 下是否存在相同 Unit ID 冲突；
         # 4. 创建 ModbusSlaveEngine、绑定报文与数值变动回调、全量写入点表并调用 engine.start()。
-        # 在 [start_slave] 中更新局部变量 [device]：为后续协议编码、服务调度或界面渲染准备中间状态
         device = self.get_device(device_id)
-        # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not device:
-            # 从 [start_slave] 返回执行结果给调用方，结束当前处理分支
             return False, f"未找到从机配置: {device_id}"
 
         # [SLAVE-RECONNECT] 探活放行：底层僵死则先彻底清理（清 Hub 映射 + 停旧 transport）再重跑注册路径
-        # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if device.is_running:
-            # 在 [start_slave] 中更新局部变量 [engine]：为后续协议编码、服务调度或界面渲染准备中间状态
             engine = self._active_engines.get(device_id)
-            # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if engine and engine.is_healthy():
-                # 从 [start_slave] 返回执行结果给调用方，结束当前处理分支
                 return True, f"从机 {device.name} 运行中"
             # 僵死：先 unregister（清 Hub 映射 + 停旧 transport）再清 active，
             # 保证下方 register 走"新建"路径，不会复用僵死实例
-            # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if engine:
-                # 在 [start_slave] 中更新局部变量 [hub]：为后续协议编码、服务调度或界面渲染准备中间状态
                 hub = ModbusServerHub.get_instance()
-                # 在 [start_slave] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
                 try:
                     # [SLAVE-RECONNECT] 必须走 unregister_and_stop_slave 彻底清映射，而非仅 engine.stop()
                     hub.unregister_and_stop_slave(engine)
                 except Exception as ex:
                     logger.warning(f"unregister 僵死 engine 失败: {ex}")
-                # 在 [start_slave] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
                 try:
                     engine.stop()
                 except Exception as ex:
                     logger.warning(f"清理僵死 engine 失败: {ex}")
                 self._active_engines.pop(device_id, None)
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             device.is_running = False   # 让下方注册 / 启动逻辑重跑
 
         # 检查通信资源冲突：标准 Modbus 规范下，同一物理端口允许挂载多个不同 Unit ID 的从机，
         # 仅当同一物理端点且从机站地址 (Unit ID) 完全相同时才判定为冲突。
-        # 在 [start_slave] 中更新局部变量 [cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
         cfg = device.conn_config
-        # 在 [start_slave] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for other_id, other_dev in self._devices.items():
-            # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if other_id != device_id and other_dev.is_running:
-                # 在 [start_slave] 中更新局部变量 [other_cfg]：为后续协议编码、服务调度或界面渲染准备中间状态
                 other_cfg = other_dev.conn_config
-                # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if cfg.comm_type == other_cfg.comm_type:
-                    # 在 [start_slave] 中更新局部变量 [same_endpoint]：为后续协议编码、服务调度或界面渲染准备中间状态
                     same_endpoint = False
-                    # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if cfg.comm_type == CommType.RTU:
-                        # 在 [start_slave] 中更新局部变量 [same_endpoint]：为后续协议编码、服务调度或界面渲染准备中间状态
                         same_endpoint = (cfg.com_port.upper().strip() == other_cfg.com_port.upper().strip())
-                    # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     elif cfg.comm_type == CommType.TCP:
                         # 0.0.0.0 通配监听与任意具体本地 IP 在同一端口上共享同一物理套接字
-                        # 在 [start_slave] 中更新局部变量 [same_endpoint]：为后续协议编码、服务调度或界面渲染准备中间状态
                         same_endpoint = (
                             cfg.port == other_cfg.port
                             and (cfg.host == other_cfg.host or cfg.host in ("0.0.0.0", "") or other_cfg.host in ("0.0.0.0", ""))
                         )
 
-                    # 在 [start_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if same_endpoint and cfg.unit_id == other_cfg.unit_id:
-                        # 在 [start_slave] 中更新局部变量 [proto_name]：为后续协议编码、服务调度或界面渲染准备中间状态
                         proto_name = "串口" if cfg.comm_type == CommType.RTU else "TCP网络"
-                        # 在 [start_slave] 中更新局部变量 [ep_desc]：为后续协议编码、服务调度或界面渲染准备中间状态
                         ep_desc = cfg.com_port if cfg.comm_type == CommType.RTU else f"{cfg.host}:{cfg.port}"
-                        # 从 [start_slave] 返回执行结果给调用方，结束当前处理分支
                         return False, f"站地址冲突：{proto_name} [{ep_desc}] 下已存在站地址为 {cfg.unit_id} 的运行中从机 [{other_dev.name}]！"
 
-        # 在 [start_slave] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [start_slave] 中更新局部变量 [engine]：为后续协议编码、服务调度或界面渲染准备中间状态
             engine = ModbusSlaveEngine(
                 comm_type=cfg.comm_type.value,
                 host=cfg.host,
@@ -646,7 +573,6 @@ class SlaveService:
             )
 
             # 注册报文日志回调：根据报文前缀中的 RX/TX 标记自动归类日志方向并投递至 LoggingService
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             engine.on_packet_log = lambda msg, level: self.logging_service.post(
                 "RX" if "RX" in msg else ("TX" if "TX" in msg else "SYS"),
                 cfg.unit_id,
@@ -654,15 +580,12 @@ class SlaveService:
             )
 
             # 注册动态模拟数值变动回调：实时将后台仿真产生的新值反向同步给领域模型 ModbusPoint
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             engine.on_point_value_changed = lambda area, addr, val: self._on_engine_point_value_changed(device_id, area, addr, val)
 
             # 同步所有已配置的点位到底层 DataBlock 及仿真点表字典：
             # 为什么同时写入 `(point.area.value, point.address)` 复合键与 `point.address` 整数键：
             # 复合键用于隔离不同存储区（如 3x 与 4x）的同号地址，整数键用于向下兼容旧版单键访问逻辑。
-            # 在 [start_slave] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
             for point in device.points.values():
-                # 在 [start_slave] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
                 try:
                     engine.write_typed_value(
                         area=point.area.value,
@@ -694,97 +617,57 @@ class SlaveService:
             # 启动底层从机引擎（挂载至 ModbusServerHub 并开启后台波形仿真线程）
             engine.start()
             self._active_engines[device_id] = engine
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             device.is_running = True
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             device.runtime_info = f"运行中 ({cfg.summary})"
             self.logging_service.post("SYS", cfg.unit_id, f"从机服务 [{device.name}] 成功启动: {cfg.summary}")
-            # 从 [start_slave] 返回执行结果给调用方，结束当前处理分支
             return True, f"从机服务 [{device.name}] 启动成功"
         except Exception as e:
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             device.is_running = False
-            # 在 [start_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             device.runtime_info = f"启动失败: {e}"
             self.logging_service.post("ERROR", cfg.unit_id, f"从机 [{device.name}] 启动失败: {e}")
-            # 从 [start_slave] 返回执行结果给调用方，结束当前处理分支
             return False, f"启动异常: {e}"
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_on_engine_point_value_changed]（入参: device_id, area_str, address, new_val）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _on_engine_point_value_changed(self, device_id: str, area_str: str, address: int, new_val: Any) -> None:
         """接收底层引擎波形仿真产生的新数值，反向更新 SlaveDevice 点位实体并重算十六进制表示。"""
-        # 在 [_on_engine_point_value_changed] 中更新局部变量 [device]：为后续协议编码、服务调度或界面渲染准备中间状态
         device = self.get_device(device_id)
-        # 在 [_on_engine_point_value_changed] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not device:
-            # 从 [_on_engine_point_value_changed] 返回执行结果给调用方，结束当前处理分支
             return
-        # 在 [_on_engine_point_value_changed] 中更新局部变量 [area_enum]：为后续协议编码、服务调度或界面渲染准备中间状态
         area_enum = AreaType.normalize(area_str)
-        # 在 [_on_engine_point_value_changed] 中更新局部变量 [point]：为后续协议编码、服务调度或界面渲染准备中间状态
         point = device.get_point(area_enum, address)
-        # 在 [_on_engine_point_value_changed] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if point:
-            # 在 [_on_engine_point_value_changed] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             point.value = new_val
             PointService.re_encode_point(point)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [stop_slave]（入参: device_id）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def stop_slave(self, device_id: str) -> Tuple[bool, str]:
         """统一停止指定从机服务，从物理传输中枢注销并释放串口/网络句柄（最后一台停止时关闭监听）。"""
-        # 在 [stop_slave] 中更新局部变量 [device]：为后续协议编码、服务调度或界面渲染准备中间状态
         device = self.get_device(device_id)
-        # 在 [stop_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not device:
-            # 从 [stop_slave] 返回执行结果给调用方，结束当前处理分支
             return False, "从机不存在"
 
-        # 在 [stop_slave] 中更新局部变量 [engine]：为后续协议编码、服务调度或界面渲染准备中间状态
         engine = self._active_engines.pop(device_id, None)
-        # 在 [stop_slave] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if engine:
-            # 在 [stop_slave] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
                 engine.stop()
             except Exception as e:
                 logger.error(f"关闭底层服务发生异常: {e}")
 
-        # 在 [stop_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         device.is_running = False
-        # 在 [stop_slave] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         device.runtime_info = "已停止"
         self.logging_service.post("SYS", device.conn_config.unit_id, f"从机服务 [{device.name}] 已停止并释放通信资源")
-        # 从 [stop_slave] 返回执行结果给调用方，结束当前处理分支
         return True, f"从机 [{device.name}] 已停止"
 
     # [SLAVE-RECONNECT] 兜底自动重连：对所有在跑从机做一次探活，僵死的自动重建
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [auto_reconnect_if_needed]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def auto_reconnect_if_needed(self) -> int:
         """委托 ModbusServerHub 扫描所有活跃物理端点，自动重建僵死的底层 listener 并返回重建数量。"""
-        # 在 [auto_reconnect_if_needed] 中更新局部变量 [hub]：为后续协议编码、服务调度或界面渲染准备中间状态
         hub = ModbusServerHub.get_instance()
-        # 在 [auto_reconnect_if_needed] 中更新局部变量 [n]：为后续协议编码、服务调度或界面渲染准备中间状态
         n = hub.restart_all_broken()
-        # 在 [auto_reconnect_if_needed] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if n > 0:
             self.logging_service.post("SYS", 0, f"[自动重连] 检测到 {n} 个僵死 listener，已重建")
-        # 从 [auto_reconnect_if_needed] 返回执行结果给调用方，结束当前处理分支
         return n
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [sync_point_to_runtime]（入参: device_id, point）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def sync_point_to_runtime(self, device_id: str, point: ModbusPoint) -> None:
         """当界面或业务运行期修改了点位数值、类型、变位或模拟规则时，实时热推入运行中的底层引擎。"""
-        # 在 [sync_point_to_runtime] 中更新局部变量 [engine]：为后续协议编码、服务调度或界面渲染准备中间状态
         engine = self._active_engines.get(device_id)
-        # 在 [sync_point_to_runtime] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if engine:
             try:
                 engine.write_typed_value(
@@ -841,33 +724,21 @@ class SlaveService:
 class PollService:
     """主机轮询与指令下发业务服务。"""
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [__init__]（入参: logging_service）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def __init__(self, logging_service: LoggingService):
         """初始化主机轮询服务，绑定日志分发器并初始化底层引擎与连接状态变量。"""
-        # 在 [__init__] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.logging_service = logging_service
         self._engine: Optional[ModbusPollEngine] = None
         self._is_connected: bool = False
         self._current_config: Optional[ConnectionConfig] = None
 
     @property
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [is_connected]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def is_connected(self) -> bool:
         """返回当前主机客户端是否已与目标从机建立物理连接。"""
-        # 从 [is_connected] 返回执行结果给调用方，结束当前处理分支
         return self._is_connected
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [connect]（入参: cfg）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def connect(self, cfg: ConnectionConfig) -> Tuple[bool, str]:
         """根据 ConnectionConfig 建立 Modbus TCP 或 RTU 主机连接，并挂载报文跟踪日志回调。"""
         # 若已有旧连接处于活跃状态，先安全断开并释放旧套接字/串口句柄
-        # 在 [connect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self._is_connected and self._engine:
             self.disconnect()
 
@@ -883,9 +754,7 @@ class PollService:
                 msg,
             )
 
-            # 在 [connect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if cfg.comm_type == CommType.RTU:
-                # 在 [connect] 中更新局部变量 [ok]：为后续协议编码、服务调度或界面渲染准备中间状态
                 ok = self._engine.connect_rtu(
                     serial_port=cfg.com_port,
                     baudrate=cfg.baudrate,
@@ -894,66 +763,42 @@ class PollService:
                     stopbits=cfg.stop_bits,
                 )
             else:
-                # 在 [connect] 中更新局部变量 [ok]：为后续协议编码、服务调度或界面渲染准备中间状态
                 ok = self._engine.connect_tcp(
                     host=cfg.host,
                     port=cfg.port,
                 )
 
-            # 在 [connect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if ok:
-                # 在 [connect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                 self._is_connected = True
-                # 在 [connect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                 self._current_config = cfg
                 self.logging_service.post("SYS", cfg.unit_id, f"主机客户端连接成功: {cfg.summary}")
-                # 从 [connect] 返回执行结果给调用方，结束当前处理分支
                 return True, "连接成功"
             else:
-                # 在 [connect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                 self._is_connected = False
-                # 从 [connect] 返回执行结果给调用方，结束当前处理分支
                 return False, "无法建立连接"
         except Exception as e:
-            # 在 [connect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._is_connected = False
-            # 从 [connect] 返回执行结果给调用方，结束当前处理分支
             return False, f"连接异常: {e}"
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [disconnect]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def disconnect(self) -> Tuple[bool, str]:
         """停止可能正在运行的后台连续轮询，并断开主机通信连接。"""
-        # 在 [disconnect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self._engine:
-            # 在 [disconnect] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
                 self._engine.disconnect()
             except Exception:
                 pass
-            # 在 [disconnect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._engine = None
-        # 在 [disconnect] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self._is_connected = False
-        # 从 [disconnect] 返回执行结果给调用方，结束当前处理分支
         return True, "已断开连接"
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [read_registers]（入参: task）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def read_registers(self, task: PollTask) -> PollResult:
         """执行单次寄存器/线圈块读取（若尚未连接则自动按 task.conn_config 尝试建连），返回强类型 PollResult。"""
-        # 在 [read_registers] 中更新局部变量 [t0]：为后续协议编码、服务调度或界面渲染准备中间状态
         t0 = time.time()
         # 为什么在未连接时自动调用 self.connect(task.conn_config)：
         # 允许用户打开主机面板后无需先手动点“建立连接”，直接点击“单次读取”即可一键完成建连与问询。
-        # 在 [read_registers] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not self._is_connected or not self._engine:
             ok, msg = self.connect(task.conn_config)
-            # 在 [read_registers] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not ok:
-                # 从 [read_registers] 返回执行结果给调用方，结束当前处理分支
                 return PollResult(
                     success=False,
                     area=task.area,
@@ -970,11 +815,8 @@ class PollService:
                 start_addr=task.start_address,
                 count=task.count,
             )
-            # 在 [read_registers] 中更新局部变量 [elapsed]：为后续协议编码、服务调度或界面渲染准备中间状态
             elapsed = (time.time() - t0) * 1000
-            # 在 [read_registers] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if ok:
-                # 从 [read_registers] 返回执行结果给调用方，结束当前处理分支
                 return PollResult(
                     success=True,
                     area=task.area,
@@ -984,7 +826,6 @@ class PollService:
                     elapsed_ms=elapsed,
                 )
             else:
-                # 从 [read_registers] 返回执行结果给调用方，结束当前处理分支
                 return PollResult(
                     success=False,
                     area=task.area,
@@ -994,7 +835,6 @@ class PollService:
                     elapsed_ms=elapsed,
                 )
         except Exception as e:
-            # 从 [read_registers] 返回执行结果给调用方，结束当前处理分支
             return PollResult(
                 success=False,
                 area=task.area,
@@ -1005,9 +845,6 @@ class PollService:
             )
 
     # [POLL-CONFIG] 新增后台连续轮询控制服务接口，支持自定义轮询间隔 (interval_ms)
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [start_continuous_polling]（入参: task, interval_ms, on_success, on_error）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def start_continuous_polling(
         self,
         task: PollTask,
@@ -1017,28 +854,19 @@ class PollService:
     ) -> Tuple[bool, str]:
         """启动后台连续定时轮询（间隔 interval_ms 毫秒），自动确保已建立连接并绑定成功/失败回调。"""
         # 1. 若尚未连接，先按任务配置自动建立物理连接
-        # 在 [start_continuous_polling] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if not self._is_connected or not self._engine:
             ok, msg = self.connect(task.conn_config)
-            # 在 [start_continuous_polling] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not ok:
-                # 从 [start_continuous_polling] 返回执行结果给调用方，结束当前处理分支
                 return False, f"建立连接失败: {msg}"
 
         # 2. 防重入保护：若底层引擎已在轮询中则拒绝重复启动
-        # 在 [start_continuous_polling] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self._engine.is_polling:
-            # 从 [start_continuous_polling] 返回执行结果给调用方，结束当前处理分支
             return False, "轮询已在运行中"
 
         # 3. 绑定成功与错误回调（注意：回调在后台 worker 线程触发，UI 调用方须通过 after(0) 切回主线程）
-        # 在 [start_continuous_polling] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if on_success:
-            # 在 [start_continuous_polling] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._engine.on_poll_success = on_success
-        # 在 [start_continuous_polling] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if on_error:
-            # 在 [start_continuous_polling] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
             self._engine.on_poll_error = on_error
 
         self._engine.slave_id = task.conn_config.unit_id
@@ -1048,15 +876,10 @@ class PollService:
             count=task.count,
             interval_ms=interval_ms,
         )
-        # 从 [start_continuous_polling] 返回执行结果给调用方，结束当前处理分支
         return True, "轮询已启动"
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [stop_continuous_polling]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def stop_continuous_polling(self) -> None:
         """安全停止后台连续轮询任务并唤醒等待中的轮询线程退出。"""
-        # 在 [stop_continuous_polling] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if self._engine:
             self._engine.stop_polling()
 

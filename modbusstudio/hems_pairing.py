@@ -4,10 +4,7 @@
 对外暴露：PairingRule（单条配对绑定规则模型）、HemsPairingEngine（配对解析与路由表构建引擎）。
 """
 
-import json
 import logging
-import os
-import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
 # 为什么使用 try/except 双路径导入：
@@ -22,7 +19,6 @@ try:
         map_db_format_to_data_type,
     )
     from .modbus_codec import ByteOrderMode, ModbusDataType
-    from .modbus_engine import AreaType
 except ImportError:
     from hems_db_loader import (
         HemsAppModel,
@@ -31,7 +27,6 @@ except ImportError:
         map_db_format_to_data_type,
     )
     from modbus_codec import ByteOrderMode, ModbusDataType
-    from modbus_engine import AreaType
 
 
 # 初始化模块级命名日志器，归属 HemsPairing 命名空间以便按模块过滤排障日志
@@ -294,26 +289,20 @@ class HemsPairingEngine:
         lines = [
             f"=== HEMS 业务数据库 (app.More) 配对绑定规则全景 (共 {len(self.rules)} 条配对) ===\n"
         ]
-        # 在 [get_summary_text] 中更新局部变量 [curr_target]：为后续协议编码、服务调度或界面渲染准备中间状态
         curr_target = ""
         # 为什么按 target_app_name 分段输出：
         # 1. 现场一台一体机可能配置多个北向对外服务通道（如同时对接省调与本地监控后台）；
         # 2. 当检测到 target_app_name 变化时插入分组小标题，使报表层次清晰；
         # 3. 对无物理地址的派生点位标注“内部变量”，方便联调工程师快速区分实测点与计算点。
-        # 在 [get_summary_text] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for r in self.rules:
-            # 在 [get_summary_text] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if r.target_app_name != curr_target:
-                # 在 [get_summary_text] 中更新局部变量 [curr_target]：为后续协议编码、服务调度或界面渲染准备中间状态
                 curr_target = r.target_app_name
                 lines.append(f"\n【目标北向转发服务: {curr_target} (App ID: {r.target_app_id})】")
-            # 在 [get_summary_text] 中更新局部变量 [src_addr_info]：为后续协议编码、服务调度或界面渲染准备中间状态
             src_addr_info = f"原始地址: {r.src_address}" if r.src_address is not None else "内部变量"
             lines.append(
                 f"  🔗 [源南向设备: {r.src_app_name}] 点位: {r.src_var_name:<28s} ({src_addr_info}) "
                 f"===> 映射至北向寄存器: {r.target_register:4d} (FC: {r.target_fc}, 站号: {r.target_slave_id}, 类型: {r.data_type.value}, 变位: {r.byte_order.value})"
             )
-        # 从 [get_summary_text] 返回执行结果给调用方，结束当前处理分支
         return "\n".join(lines)
 
 
