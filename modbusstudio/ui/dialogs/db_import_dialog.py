@@ -995,10 +995,9 @@ class DbImportDialog:
             return
 
         # 若为覆盖替换模式，先清空目标从机现有点表并按前 3 个导入设备名称自动更新从机显示名
-        # 在 [_import_merge_to_current] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if is_replace:
             target_dev.points.clear()
-            # 在 [_import_merge_to_current] 中更新局部变量 [names]：为后续协议编码、服务调度或界面渲染准备中间状态
+            slave_svc.clear_runtime_points(target_dev.id)
             names = [sel_app.chinese_name or sel_app.english_name for (sel_app, _, _, _, _, _) in apps_data_list]
             # 在 [_import_merge_to_current] 中更新局部变量 [summary_name]：为后续协议编码、服务调度或界面渲染准备中间状态
             summary_name = " + ".join(names[:3]) + (f" 等{len(names)}个设备" if len(names) > 3 else "")
@@ -1048,6 +1047,8 @@ class DbImportDialog:
             sim = pt.get("sim_mode", "固定")
             # 在 [_load_single_point_to_device] 中更新局部变量 [scale]：为后续协议编码、服务调度或界面渲染准备中间状态
             scale = float(pt.get("scale", 1.0) or 1.0)
+            field_name = str(pt.get("field_name", "") or "")
+            unit = str(pt.get("unit", "") or "")
 
             ok, point, _ = PointService.validate_and_build_point(
                 address=addr,
@@ -1057,7 +1058,9 @@ class DbImportDialog:
                 byte_order=bo,
                 val_input=val,
                 sim_rule=sim,
+                field_name=field_name,
                 scale=scale,
+                unit=unit,
             )
             # 在 [_load_single_point_to_device] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if ok and point:

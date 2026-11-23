@@ -37,6 +37,31 @@ def _parse_port(val: Any, default: int = 502) -> int:
         return default
 
 
+def _parse_int(val: Any, default: int, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
+    """将输入安全转换为整数并在指定边界内校验，遇到 None 或非法字符串时回退 default。"""
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        v = int(str(val).strip())
+        if min_val is not None and v < min_val:
+            return default
+        if max_val is not None and v > max_val:
+            return default
+        return v
+    except (ValueError, TypeError):
+        return default
+
+
+def _parse_float(val: Any, default: float) -> float:
+    """将输入安全转换为浮点数，遇到 None、bool 或非法字符串时回退 default。"""
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        return float(str(val).strip())
+    except (ValueError, TypeError):
+        return default
+
+
 # =============================================================================
 # 1. 通信物理层枚举（CommType）
 # 为什么同时继承 str 和 Enum：
@@ -430,17 +455,17 @@ class ConnectionConfig:
             # 解析通信介质，缺失时默认走 TCP
             comm_type=CommType.from_str(d.get("comm_type", "TCP")),
             # 强转主机地址与端口号（通过 _parse_port 防御非法输入与越界）
-            host=str(d.get("host", "127.0.0.1")),
+            host=str(d.get("host") or "127.0.0.1"),
             port=_parse_port(d.get("port", 502), default=502),
-            # 强转串口名称、波特率、数据位、校验位、停止位
-            com_port=str(d.get("com_port", "COM1")),
-            baudrate=int(d.get("baudrate", 9600)),
-            data_bits=int(d.get("data_bits", 8)),
-            parity=str(d.get("parity", "N")),
-            stop_bits=int(d.get("stop_bits", 1)),
+            # 强转串口名称、波特率、数据位、校验位、停止位（单字段损坏安全回退默认值）
+            com_port=str(d.get("com_port") or "COM1"),
+            baudrate=_parse_int(d.get("baudrate", 9600), default=9600, min_val=1),
+            data_bits=_parse_int(d.get("data_bits", 8), default=8, min_val=5, max_val=8),
+            parity=str(d.get("parity") or "N"),
+            stop_bits=_parse_int(d.get("stop_bits", 1), default=1, min_val=1, max_val=2),
             # 强转从机站点号与超时秒数
-            unit_id=int(d.get("unit_id", 1)),
-            timeout=float(d.get("timeout", 1.0)),
+            unit_id=_parse_int(d.get("unit_id", 1), default=1, min_val=1, max_val=247),
+            timeout=_parse_float(d.get("timeout", 1.0), default=1.0),
         )
 
 
@@ -519,9 +544,9 @@ class ModbusPoint:
         """
         # 使用各枚举类的 normalize 方法，兼容不同版本导出的 JSON 点表文件格式
         return cls(
-            # 强转起始地址与描述文案
-            address=int(d.get("address", 0)),
-            description=str(d.get("description", "")),
+            # 强转起始地址与描述文案（对脏字段做安全回退，避免单个坏字段导致整点位被丢弃）
+            address=_parse_int(d.get("address", 0), default=0, min_val=0, max_val=65535),
+            description=str(d.get("description") or ""),
             # 归一化存储区域、数据类型与字节序枚举
             area=AreaType.normalize(d.get("area", "4x_HoldingRegister")),
             data_type=DataType.normalize(d.get("data_type", "UINT16")),
@@ -529,12 +554,12 @@ class ModbusPoint:
             # 还原工程值、仿真规则与十六进制字符串
             value=d.get("value", 0),
             sim_rule=SimRule.normalize(d.get("sim_rule", "固定")),
-            raw_hex=str(d.get("raw_hex", "0x0000")),
+            raw_hex=str(d.get("raw_hex") or "0x0000"),
             # 还原字符串长度与 HEMS 业务扩展属性
-            string_length=int(d.get("string_length", 16)),
-            field_name=str(d.get("field_name", "")),
-            scale=float(d.get("scale", 1.0)),
-            unit=str(d.get("unit", "")),
+            string_length=_parse_int(d.get("string_length", 16), default=16, min_val=1),
+            field_name=str(d.get("field_name") or ""),
+            scale=_parse_float(d.get("scale", 1.0), default=1.0),
+            unit=str(d.get("unit") or ""),
         )
 
 

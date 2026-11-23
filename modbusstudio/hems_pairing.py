@@ -214,35 +214,37 @@ class HemsPairingEngine:
             ref_vars = more.get("Referred Variables", [])
             for rv in ref_vars:
                 full_eng = rv.get("English Name", "")
-                # 兼容不同固件版本 JSON 字段命名（Register Address 或 Register Start Address）
-                reg_addr_str = rv.get("Register Address") or rv.get("Register Start Address")
-                # 为什么跳过空地址或 "none" 字符串：
-                # 部分未启用的预留引用点位在数据库中填为 "None"，不占用实际北向 Modbus 寄存器。
-                if not reg_addr_str or str(reg_addr_str).lower() == "none":
+                # 兼容不同固件版本 JSON 字段命名，且显式保留合法的 0 号寄存器地址
+                reg_addr_str = rv.get("Register Address")
+                if reg_addr_str is None or str(reg_addr_str).strip() == "":
+                    reg_addr_str = rv.get("Register Start Address")
+                if reg_addr_str is None or str(reg_addr_str).strip() == "" or str(reg_addr_str).strip().lower() == "none":
                     continue
 
                 # 过滤非整型非法寄存器地址配置，防止脏数据中断整个数据库的配对加载
                 try:
                     reg_addr = int(reg_addr_str)
-                except ValueError:
+                except (ValueError, TypeError):
                     continue
 
-                # 提取北向功能码（默认 FC04 输入寄存器）、北向从机站号（默认 1）及传输数据格式
-                fc = int(rv.get("Function Code", 4))
-                slave_id = int(rv.get("Slave Id", 1))
-                fmt = rv.get("Variable Transfer Format", "Unsigned short 1")
+                # 使用统一归一化解析功能码（兼容 "FC03"/"0x03"/3/None）与站号，避免脏值中断加载
+                fc = HemsAppModel._normalize_function_code(rv.get("Function Code"))
+                if fc is None:
+                    fc = 4
+                try:
+                    raw_sid = rv.get("Slave Id", 1)
+                    slave_id = int(raw_sid) if raw_sid not in (None, "") else 1
+                except (ValueError, TypeError):
+                    slave_id = 1
+                fmt = rv.get("Variable Transfer Format") or ""
 
                 # 默认回退值：当引用名未包含 "|" 或未命中南向索引时，仍保留原始标识供排障
                 src_app_name = "未知设备"
                 src_var_name = full_eng
                 src_app_id = 0
                 src_reg = None
+                src_fmt = ""
 
-                # 为什么按首个竖线 "|" 分割并回退保留原名：
-                # 1. 标准引用名格式为 "南向设备名|南向变量名"（例如 "FDDSL600|Communication Status"）；
-                # 2. 使用 split("|", 1) 只切分第一个竖线，防止变量名本身含有特殊字符时被误拆；
-                # 3. 若在 south_index 中命中，则提取南向源应用的真实 ID、标准英文名与南向物理寄存器起始地址；
-                # 4. 若未命中（如引用了非 Modbus 虚拟设备或已删除设备），仍保留拆分出的设备名与变量名以便界面排查。
                 if "|" in full_eng:
                     parts = full_eng.split("|", 1)
                     dev_key = parts[0].strip().lower()
@@ -254,21 +256,27 @@ class HemsPairingEngine:
                         src_app_id = src_app.app_id
                         src_app_name = src_app.english_name
                         src_var_name = src_var.get("English Name", var_key)
-                        # 提取南向设备侧的物理寄存器起始地址，若为 "None" 则保持 src_reg = None
-                        addr_str = src_var.get("Register Start Address") or src_var.get("Register Address")
-                        if addr_str and addr_str != "None":
-                            src_reg = int(addr_str)
+                        src_fmt = src_var.get("Variable Transfer Format") or ""
+                        # 提取南向设备侧的物理寄存器起始地址（保留 0 号地址，安全过滤 None/非整数）
+                        addr_str = src_var.get("Register Start Address")
+                        if addr_str is None or str(addr_str).strip() == "":
+                            addr_str = src_var.get("Register Address")
+                        if addr_str is not None and str(addr_str).strip() != "" and str(addr_str).strip().lower() != "none":
+                            try:
+                                src_reg = int(addr_str)
+                            except (ValueError, TypeError):
+                                src_reg = None
                     else:
                         src_app_name = parts[0].strip()
                         src_var_name = parts[1].strip()
 
-                # 构建强类型配对规则实例并追加到全局路由表
+                # 构建强类型配对规则实例并追加到全局路由表（target_format 缺失时回退南向源变量格式 src_fmt）
                 rule = PairingRule(
                     src_app_id=src_app_id,
                     src_app_name=src_app_name,
                     src_var_name=src_var_name,
                     src_address=src_reg,
-                    src_format=fmt,
+                    src_format=src_fmt,
                     target_app_id=target_app.app_id,
                     target_app_name=target_app.english_name,
                     target_register=reg_addr,

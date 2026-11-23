@@ -10,6 +10,7 @@ import csv
 import logging
 import os
 import queue
+import threading
 import time
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -68,21 +69,32 @@ class LoggingService:
         # 为什么使用 maxsize=20000 的有界 Queue：
         # 当主窗口最小化或被模态弹窗阻塞时，有界队列配合满队列淘汰旧项策略可防止后台持续收发报文撑爆内存。
         self._queue: queue.Queue[LogEntry] = queue.Queue(maxsize=20000)
+        self._csv_lock = threading.Lock()
+        self._csv_date: str = ""
+        self._closed: bool = False
         self.csv_path: Optional[str] = None
         self._csv_file = None
         self._csv_writer = None
         self._init_csv()
 
-    def _init_csv(self) -> None:
-        """创建或以追加模式打开当日通信报文 CSV 归档文件，并在新文件首行写入中文表头。"""
-        # 按当前日期生成文件名（如 modbus_traffic_20261012.csv），实现按天自然归档
-        today_str = time.strftime("%Y%m%d")
+    def _init_csv(self, date_str: Optional[str] = None) -> None:
+        """创建或以追加模式打开当日通信报文 CSV 归档文件，并在新文件首行写入中文表头（调用方须持有 _csv_lock）。"""
+        today_str = date_str or time.strftime("%Y%m%d")
         self.csv_path = os.path.join(self.log_dir, f"modbus_traffic_{today_str}.csv")
         is_new = not os.path.exists(self.csv_path)
         # 为什么使用 encoding="utf-8-sig"：写入 BOM 头使 Excel 直接双击打开时不出现中文乱码
         try:
+            if self._csv_file:
+                try:
+                    self._csv_file.flush()
+                    self._csv_file.close()
+                except Exception:
+                    pass
+                self._csv_file = None
+                self._csv_writer = None
             self._csv_file = open(self.csv_path, "a", newline="", encoding="utf-8-sig")
             self._csv_writer = csv.writer(self._csv_file)
+            self._csv_date = today_str
             if is_new:
                 self._csv_writer.writerow(["时间戳", "方向", "从机ID", "概要信息", "原始报文Hex"])
                 self._csv_file.flush()
@@ -90,13 +102,11 @@ class LoggingService:
             logger.error(f"创建日志 CSV 文件失败: {e}")
 
     def post(self, direction: str, slave_id: int, message: str, raw_frame_hex: str = "") -> None:
-        """供后台通信线程或主线程快速非阻塞投递一条日志记录，并同步刷入磁盘 CSV。"""
-        # 参数：direction（"RX"/"TX"/"SYS"/"ERROR"）、slave_id（从机站号，系统级为 0）、message（摘要）、raw_frame_hex（可选原始帧）。
-        # 步骤：1. 生成毫秒级屏幕时间与完整日期时间；2. put_nowait 压入有界队列（满则淘汰队首）；3. 追加写入 CSV 并 flush。
+        """供后台通信线程或主线程快速非阻塞投递一条日志记录，并在互斥锁保护下同步刷入按日切分的磁盘 CSV。"""
         now = datetime.now()
-        # 切片 `[:-3]` 将 6 位微秒截断为 3 位毫秒，兼顾工业报文时序分析精度与屏幕紧凑度
-        now_time_ms = now.strftime("%H:%M:%S.%f")[:-3]        # 屏幕显示毫秒时间: 09:38:10.123
-        now_full_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # 磁盘归档完整毫秒时间: 2026-10-09 09:38:10.123
+        now_time_ms = now.strftime("%H:%M:%S.%f")[:-3]
+        now_full_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        today_str = now.strftime("%Y%m%d")
 
         entry = LogEntry(
             timestamp=now_time_ms,
@@ -105,8 +115,6 @@ class LoggingService:
             message=message,
             raw_frame_hex=raw_frame_hex,
         )
-        # 为什么使用 put_nowait + queue.Full 丢弃最旧条目重试：
-        # 后台通信线程绝不能因为 UI 消费慢而阻塞在日志锁上，否则会导致 Modbus 响应超时。
         try:
             self._queue.put_nowait(entry)
         except queue.Full:
@@ -116,16 +124,20 @@ class LoggingService:
             except Exception:
                 pass
 
-        if self._csv_writer and self._csv_file:
-            try:
-                self._csv_writer.writerow([now_full_ms, direction, slave_id, message, raw_frame_hex])
-                self._csv_file.flush()
-            except Exception:
-                pass
+        with self._csv_lock:
+            if self._closed:
+                return
+            if today_str != self._csv_date or not self._csv_writer or not self._csv_file:
+                self._init_csv(today_str)
+            if self._csv_writer and self._csv_file:
+                try:
+                    self._csv_writer.writerow([now_full_ms, direction, slave_id, message, raw_frame_hex])
+                    self._csv_file.flush()
+                except Exception:
+                    pass
 
     def drain_batch(self, max_count: int = 150) -> List[LogEntry]:
         """供 UI 主线程定时批量拉取队列中的日志条目（单次最多拉取 max_count 条）。"""
-        # 参数：max_count（单次拉取上限，防止单帧渲染耗时过长）。返回：按时间顺序排列的 LogEntry 列表。
         entries: List[LogEntry] = []
         for _ in range(max_count):
             try:
@@ -136,14 +148,16 @@ class LoggingService:
 
     def close(self) -> None:
         """安全刷新缓冲区并关闭磁盘 CSV 日志文件句柄（应用退出时由 ModbusStudioAppCore.shutdown 调用）。"""
-        if self._csv_file:
-            try:
-                self._csv_file.flush()
-                self._csv_file.close()
-            except Exception:
-                pass
-            self._csv_file = None
-            self._csv_writer = None
+        with self._csv_lock:
+            self._closed = True
+            if self._csv_file:
+                try:
+                    self._csv_file.flush()
+                    self._csv_file.close()
+                except Exception:
+                    pass
+                self._csv_file = None
+                self._csv_writer = None
 
 
 
@@ -234,6 +248,14 @@ class PointService:
         except Exception as e:
             return False, None, f"数值格式与类型 {dt_enum.value} 不匹配: {e}"
 
+        # 对数值型做上下界强类型钳位，保证 point.value 与编码后的 raw_hex 严格一致
+        if dt_enum in (
+            DataType.INT16, DataType.UINT16, DataType.INT32, DataType.UINT32,
+            DataType.INT64, DataType.UINT64, DataType.FLOAT32, DataType.FLOAT64,
+        ):
+            codec_dt = ModbusDataType.DOUBLE64 if dt_enum == DataType.FLOAT64 else ModbusDataType(dt_enum.value)
+            val_converted = clamp_value_to_type(val_converted, codec_dt)
+
         # 原始十六进制编码（遵循 Modbus 工业标准与原始代码规范）：
         # 布尔量 (0x / 1x) 显示单字节状态 0x00 或 0x01；寄存器量显示 0x0000 及多字空格分隔组合
         if area_enum in (AreaType.COIL, AreaType.DISCRETE) or dt_enum == DataType.BOOL:
@@ -243,7 +265,7 @@ class PointService:
         else:
             raw_hex = "0x0000"
             try:
-                raw_regs = encode_value(val_converted, dt_enum.value, bo_enum.value)
+                raw_regs = encode_value(val_converted, dt_enum.value, bo_enum.value, string_length=string_length)
                 if raw_regs:
                     raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
             except Exception as e:
@@ -274,7 +296,12 @@ class PointService:
                 b_val = 1 if (point.value is True or str(point.value).strip().lower() in ("1", "true", "yes", "on")) else 0
                 point.raw_hex = "0x01" if b_val else "0x00"
             else:
-                raw_regs = encode_value(point.value, point.data_type.value, point.byte_order.value)
+                raw_regs = encode_value(
+                    point.value,
+                    point.data_type.value,
+                    point.byte_order.value,
+                    string_length=point.string_length,
+                )
                 if raw_regs:
                     point.raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
         except Exception as e:
@@ -644,8 +671,8 @@ class SlaveService:
                         data_type=point.data_type.value,
                         mode=point.byte_order.value,
                         byte_order=point.byte_order.value,
+                        string_length=point.string_length,
                     )
-                    # 在 [start_slave] 中更新局部变量 [pt_dict]：为后续协议编码、服务调度或界面渲染准备中间状态
                     pt_dict = {
                         "address": point.address,
                         "desc": point.description,
@@ -657,6 +684,7 @@ class SlaveService:
                         "sim_mode": point.sim_rule,
                         "sim_rule": point.sim_rule,
                         "current_val": point.value,
+                        "string_length": point.string_length,
                     }
                     engine.points[(point.area.value, point.address)] = pt_dict
                     engine.points[point.address] = pt_dict
@@ -758,7 +786,6 @@ class SlaveService:
         engine = self._active_engines.get(device_id)
         # 在 [sync_point_to_runtime] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if engine:
-            # 在 [sync_point_to_runtime] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
                 engine.write_typed_value(
                     area=point.area.value,
@@ -767,8 +794,8 @@ class SlaveService:
                     data_type=point.data_type.value,
                     mode=point.byte_order.value,
                     byte_order=point.byte_order.value,
+                    string_length=point.string_length,
                 )
-                # 在 [sync_point_to_runtime] 中更新局部变量 [pt_dict]：为后续协议编码、服务调度或界面渲染准备中间状态
                 pt_dict = {
                     "address": point.address,
                     "desc": point.description,
@@ -780,11 +807,29 @@ class SlaveService:
                     "sim_mode": point.sim_rule,
                     "sim_rule": point.sim_rule,
                     "current_val": point.value,
+                    "string_length": point.string_length,
                 }
                 engine.points[(point.area.value, point.address)] = pt_dict
                 engine.points[point.address] = pt_dict
             except Exception as e:
                 logger.error(f"动态同步点位到底层失败: {e}")
+
+    def remove_point_from_runtime(self, device_id: str, area: Union[str, AreaType], address: int) -> None:
+        """从运行中的底层从机引擎点表字典中移除指定点位，防止已删除点位继续后台模拟。"""
+        engine = self._active_engines.get(device_id)
+        if not engine:
+            return
+        area_str = AreaType.normalize(area).value
+        engine.points.pop((area_str, address), None)
+        legacy_pt = engine.points.get(address)
+        if isinstance(legacy_pt, dict) and AreaType.normalize(legacy_pt.get("area", "")).value == area_str:
+            engine.points.pop(address, None)
+
+    def clear_runtime_points(self, device_id: str) -> None:
+        """清空运行中底层引擎的模拟点表字典（用于覆盖替换导入场景）。"""
+        engine = self._active_engines.get(device_id)
+        if engine:
+            engine.points.clear()
 
 
 # =====================================================================

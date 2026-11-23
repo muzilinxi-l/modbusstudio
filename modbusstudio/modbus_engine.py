@@ -480,17 +480,27 @@ class MultiStationServerContext(ModbusServerContext):
         base = getattr(engine, "address_base", 1)
         start_idx = address - (1 if base == 1 else 0)
 
-        # 3. 逐个提取点位值：FC01/02 强转为 bool，FC03/04 掩码截断为 16 位无符号整数
+        # 3. 逐个提取点位值：在 engine._data_lock 保护下原子读取多字寄存器，避免并发写入造成撕裂读
         is_bit = func_code in (1, 2)
         res = []
-        for i in range(count):
-            idx = start_idx + i
-            if 0 <= idx < len(values_list):
-                v = values_list[idx]
-                res.append(bool(v) if is_bit else (int(v) & 0xFFFF))
-            else:
-                # 越界安全保护：返回 0 或 False 填充，不抛出异常破坏通信连接
-                res.append(False if is_bit else 0)
+        data_lock = getattr(engine, "_data_lock", None)
+        if data_lock:
+            with data_lock:
+                for i in range(count):
+                    idx = start_idx + i
+                    if 0 <= idx < len(values_list):
+                        v = values_list[idx]
+                        res.append(bool(v) if is_bit else (int(v) & 0xFFFF))
+                    else:
+                        res.append(False if is_bit else 0)
+        else:
+            for i in range(count):
+                idx = start_idx + i
+                if 0 <= idx < len(values_list):
+                    v = values_list[idx]
+                    res.append(bool(v) if is_bit else (int(v) & 0xFFFF))
+                else:
+                    res.append(False if is_bit else 0)
         return res
 
     async def async_setValues(
@@ -533,12 +543,26 @@ class MultiStationServerContext(ModbusServerContext):
         base = getattr(engine, "address_base", 1)
         start_idx = address - (1 if base == 1 else 0)
 
-        # 将主机写入值逐个落盘到底层 simdata 数组
+        # 将主机写入值原子落盘到底层 simdata 数组，并反向通知引擎更新点表与回调 UI
         is_bit = func_code in (5, 15)
-        for i, val in enumerate(values):
-            idx = start_idx + i
-            if 0 <= idx < len(values_list):
-                values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+        data_lock = getattr(engine, "_data_lock", None)
+        if data_lock:
+            with data_lock:
+                for i, val in enumerate(values):
+                    idx = start_idx + i
+                    if 0 <= idx < len(values_list):
+                        values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+        else:
+            for i, val in enumerate(values):
+                idx = start_idx + i
+                if 0 <= idx < len(values_list):
+                    values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+
+        if hasattr(engine, "_notify_external_write"):
+            try:
+                engine._notify_external_write(area_str, address, len(values))
+            except Exception as ex:
+                logger.debug(f"外部写回通知点表异常 ({area_str}:{address}): {ex}")
         return None
 
 
@@ -1135,6 +1159,8 @@ class ModbusSlaveEngine:
         # [REVIEW-FIX-1] 显式定义地址偏移基准 (默认 1-based)，消除启发式看值推断
         # 在 [__init__] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         self.address_base = address_base
+        # 保护四大 DataBlock 多寄存器原子读写的可重入互斥锁，防止仿真/UI 写与网络读并发撕裂
+        self._data_lock = threading.RLock()
 
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1351,69 +1377,41 @@ class ModbusSlaveEngine:
         # List[int]: 长度为 `count` 的整数列表（布尔位 True/False 已统一转为 1/0；越界位置补 0）。
         # 在 [read_raw_values] 中更新局部变量 [block]：为后续协议编码、服务调度或界面渲染准备中间状态
         block = self._get_datablock(area)
-        # 在 [read_raw_values] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if block and hasattr(block, "simdata") and block.simdata:
-            # 在 [read_raw_values] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
-                # 计算相对于数据块起始地址的数组下标
-                # 在 [read_raw_values] 中更新局部变量 [base_addr]：为后续协议编码、服务调度或界面渲染准备中间状态
                 base_addr = block.simdata[0].address
-                # 在 [read_raw_values] 中更新局部变量 [start_idx]：为后续协议编码、服务调度或界面渲染准备中间状态
-                start_idx = address - 1 - base_addr
-                # 在 [read_raw_values] 中更新局部变量 [values_list]：为后续协议编码、服务调度或界面渲染准备中间状态
+                addr_base = getattr(self, "address_base", 1)
+                start_idx = address - (1 if addr_base == 1 else 0) - base_addr
                 values_list = block.simdata[0].values
-                # 在 [read_raw_values] 中更新局部变量 [res]：为后续协议编码、服务调度或界面渲染准备中间状态
                 res = []
-                # 在 [read_raw_values] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
-                for i in range(count):
-                    # 在 [read_raw_values] 中更新局部变量 [idx]：为后续协议编码、服务调度或界面渲染准备中间状态
-                    idx = start_idx + i
-                    # 在 [read_raw_values] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-                    if 0 <= idx < len(values_list):
-                        # 在 [read_raw_values] 中更新局部变量 [v]：为后续协议编码、服务调度或界面渲染准备中间状态
-                        v = values_list[idx]
-                        res.append(1 if v is True else 0 if v is False else int(v))
-                    else:
-                        res.append(0)
-                # 从 [read_raw_values] 返回执行结果给调用方，结束当前处理分支
+                with self._data_lock:
+                    for i in range(count):
+                        idx = start_idx + i
+                        if 0 <= idx < len(values_list):
+                            v = values_list[idx]
+                            res.append(1 if v is True else 0 if v is False else int(v))
+                        else:
+                            res.append(0)
                 return res
             except Exception as e:
                 logger.error(f"read_raw_values 异常: {e}")
-        # 从 [read_raw_values] 返回执行结果给调用方，结束当前处理分支
         return [0] * count
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [write_raw_values]（入参: area, address, values）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def write_raw_values(self, area: str, address: int, values: List[int]) -> None:
         """向本地数据块直接写入连续的原始 16 位寄存器值或布尔位（支持服务未启动时的点表初值预热写入）。"""
-        # 参数：
-        # area: 存储区域标识。
-        # address: 起始点位地址。
-        # values: 待写入的原始整数列表（线圈/离散输入区会自动转为 bool，寄存器区会按 `& 0xFFFF` 截断为 16 位无符号字）。
-        # 在 [write_raw_values] 中更新局部变量 [block]：为后续协议编码、服务调度或界面渲染准备中间状态
         block = self._get_datablock(area)
-        # 在 [write_raw_values] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if block and hasattr(block, "simdata") and block.simdata:
-            # 在 [write_raw_values] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
-                # 在 [write_raw_values] 中更新局部变量 [base_addr]：为后续协议编码、服务调度或界面渲染准备中间状态
                 base_addr = block.simdata[0].address
-                # 在 [write_raw_values] 中更新局部变量 [start_idx]：为后续协议编码、服务调度或界面渲染准备中间状态
-                start_idx = address - 1 - base_addr
-                # 在 [write_raw_values] 中更新局部变量 [values_list]：为后续协议编码、服务调度或界面渲染准备中间状态
+                addr_base = getattr(self, "address_base", 1)
+                start_idx = address - (1 if addr_base == 1 else 0) - base_addr
                 values_list = block.simdata[0].values
-                # 在 [write_raw_values] 中更新局部变量 [is_bit]：为后续协议编码、服务调度或界面渲染准备中间状态
-                # 健壮判定：支持原始枚举值及带区名/偏移的派生串（如 "0x_Coil (线圈) @ 1"）
-                s_area = str(area).strip().upper()
-                is_bit = ("0X" in s_area or "COIL" in s_area or "1X" in s_area or "DISCRETE" in s_area)
-                # 在 [write_raw_values] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
-                for i, val in enumerate(values):
-                    # 在 [write_raw_values] 中更新局部变量 [idx]：为后续协议编码、服务调度或界面渲染准备中间状态
-                    idx = start_idx + i
-                    # 在 [write_raw_values] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-                    if 0 <= idx < len(values_list):
-                        values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+                is_bit = _classify_area(area) in ("COIL", "DISCRETE")
+                with self._data_lock:
+                    for i, val in enumerate(values):
+                        idx = start_idx + i
+                        if 0 <= idx < len(values_list):
+                            values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
             except Exception as ex:
                 logger.warning(f"写入数据块异常 ({area}:{address}): {ex}")
 
@@ -1428,62 +1426,100 @@ class ModbusSlaveEngine:
         data_type: Any,
         mode: Any = ByteOrderMode.ABCD,
         byte_order: Any = None,
+        string_length: int = 16,
     ) -> None:
         """将业务工程数值按指定数据类型（如 `FLOAT32`、`INT32`）和字节序（如 `ABCD`、`CDAB`）编码后写入本地数据块。"""
-        # 参数：
-        # area: 存储区域标识。
-        # address: 起始寄存器或线圈地址。
-        # value: 待写入的工程值（支持数值、布尔或字符串）。
-        # data_type: 数据类型枚举或字符串。
-        # mode: 默认字序枚举或字符串。
-        # byte_order: 可选别名参数（若传入则优先于 `mode`，兼容不同调用方命名习惯）。
-        # 在 [write_typed_value] 中更新局部变量 [actual_mode]：为后续协议编码、服务调度或界面渲染准备中间状态
         actual_mode = byte_order if byte_order is not None else mode
-        # 若目标区域为 0x 线圈或 1x 离散输入，按布尔量解析并写入单比特
-        # 在 [write_typed_value] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if _classify_area(area) in ("COIL", "DISCRETE"):
-            # 在 [write_typed_value] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
             try:
-                # 在 [write_typed_value] 中更新局部变量 [b_val]：为后续协议编码、服务调度或界面渲染准备中间状态
                 b_val = bool(int(float(str(value).strip())))
             except Exception:
-                # 在 [write_typed_value] 中更新局部变量 [b_val]：为后续协议编码、服务调度或界面渲染准备中间状态
                 b_val = str(value).strip().lower() in ("1", "true", "yes", "on")
             self.write_raw_values(area, address, [1 if b_val else 0])
         else:
-            # 若目标区域为 3x/4x 寄存器，调用 modbus_codec.encode_value 编码为 16 位寄存器列表后落盘
-            # 在 [write_typed_value] 中更新局部变量 [regs]：为后续协议编码、服务调度或界面渲染准备中间状态
-            regs = encode_value(value, data_type, actual_mode)
+            regs = encode_value(value, data_type, actual_mode, string_length=string_length)
             self.write_raw_values(area, address, regs)
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [read_typed_value]（入参: area, address, data_type, mode）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def read_typed_value(
         self,
         area: str,
         address: int,
         data_type: ModbusDataType,
         mode: ByteOrderMode = ByteOrderMode.ABCD,
+        string_length: int = 16,
     ) -> Any:
         """从本地数据块读取指定地址的连续寄存器，并按数据类型与字节序解码还原为工程数值。"""
-        # 参数：
-        # area: 存储区域标识。
-        # address: 起始点位地址。
-        # data_type: 目标 `ModbusDataType` 枚举。
-        # mode: 字节序 `ByteOrderMode` 枚举。
-        # 返回：
-        # Any: 解码后的 Python 强类型值（`bool` / `int` / `float` / `str`）。
-        # 在 [read_typed_value] 中更新局部变量 [count]：为后续协议编码、服务调度或界面渲染准备中间状态
-        count = TYPE_REGISTER_COUNT.get(data_type, 1)
-        # 在 [read_typed_value] 中更新局部变量 [raw]：为后续协议编码、服务调度或界面渲染准备中间状态
+        if data_type == ModbusDataType.STRING:
+            count = max(1, (string_length + 1) // 2)
+        else:
+            count = TYPE_REGISTER_COUNT.get(data_type, 1)
         raw = self.read_raw_values(area, address, count)
-        # 在 [read_typed_value] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if _classify_area(area) in ("COIL", "DISCRETE"):
-            # 从 [read_typed_value] 返回执行结果给调用方，结束当前处理分支
             return bool(raw[0])
-        # 从 [read_typed_value] 返回执行结果给调用方，结束当前处理分支
-        return decode_value(raw, data_type, mode)
+        return decode_value(raw, data_type, mode, string_length=string_length)
+
+    def _notify_external_write(self, area_str: str, start_addr: int, count: int) -> None:
+        """外部主站执行 FC05/06/15/16 写入后，反解受影响的点位并同步更新仿真点表与领域模型回调。"""
+        if count <= 0 or not self.points:
+            return
+        write_kind = _classify_area(area_str)
+        write_end = start_addr + count
+        items_snapshot = list(self.points.items())
+        has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
+
+        for key, pt in items_snapshot:
+            if has_composite and not isinstance(key, tuple):
+                continue
+            if isinstance(key, tuple) and len(key) >= 2:
+                pt_area, pt_addr = str(key[0]), int(key[1])
+            else:
+                pt_addr = int(key)
+                pt_area = str(pt.get("area", AreaType.HOLDING_REGISTER))
+
+            if _classify_area(pt_area) != write_kind:
+                continue
+
+            dt_raw = pt.get("data_type") or pt.get("type") or ModbusDataType.INT16
+            try:
+                if isinstance(dt_raw, ModbusDataType):
+                    data_type = dt_raw
+                else:
+                    dt_s = str(dt_raw.value if hasattr(dt_raw, "value") else dt_raw).strip().upper()
+                    if dt_s == "FLOAT64":
+                        dt_s = "DOUBLE64"
+                    data_type = ModbusDataType(dt_s)
+            except Exception:
+                data_type = ModbusDataType.INT16
+
+            str_len = int(pt.get("string_length", 16) or 16)
+            reg_cnt = max(1, (str_len + 1) // 2) if data_type == ModbusDataType.STRING else TYPE_REGISTER_COUNT.get(data_type, 1)
+            # 区间交集判定：[pt_addr, pt_addr + reg_cnt) 与 [start_addr, write_end) 有重叠即重解码
+            if pt_addr >= write_end or (pt_addr + reg_cnt) <= start_addr:
+                continue
+
+            bo_raw = pt.get("byte_order") or pt.get("mode") or ByteOrderMode.ABCD
+            try:
+                mode = bo_raw if isinstance(bo_raw, ByteOrderMode) else ByteOrderMode(str(bo_raw))
+            except Exception:
+                mode = ByteOrderMode.ABCD
+
+            if write_kind in ("COIL", "DISCRETE"):
+                raw_bits = self.read_raw_values(pt_area, pt_addr, 1)
+                new_val: Any = 1 if raw_bits and raw_bits[0] else 0
+            else:
+                new_val = self.read_typed_value(pt_area, pt_addr, data_type, mode, string_length=str_len)
+                if data_type == ModbusDataType.HEX16 and isinstance(new_val, str):
+                    try:
+                        new_val = int(new_val, 16) & 0xFFFF
+                    except Exception:
+                        pass
+
+            pt["current_val"] = new_val
+            if self.on_point_value_changed:
+                try:
+                    self.on_point_value_changed(pt_area, pt_addr, new_val)
+                except Exception:
+                    pass
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_run_simulation_loop]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑

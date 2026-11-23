@@ -50,16 +50,18 @@ SCHEMA_VERSION = 1
 
 
 def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> bool:
-    """将应用当前会话状态（业务数据库路径、所有从机配置及点表动态模拟状态）持久化至 JSON 文件。
+    """将应用当前会话状态（业务数据库路径、所有从机配置及点表动态模拟状态）原子持久化至 JSON 文件。
     参数：app（ModbusStudioAppCore 实例）、path（可选文件路径，默认为 session_state.json）。
     返回：bool（保存是否成功）。
-    步骤：1.解析绝对路径；2.若文件已存在则备份为 .bak；3.提取 app.db_path 绝对值与所有从机 to_dict()；4.写入 JSON 文件。
-    副作用：在磁盘上写入或覆盖 session_state.json 及 session_state.json.bak。
+    步骤：1.解析绝对路径；2.先写入同目录临时文件并 fsync；3.若原文件存在则备份为 .bak；4.原子 os.replace 替换目标文件。
+    副作用：在磁盘上原子写入 session_state.json 及备份 session_state.json.bak。
     """
     target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
+    tmp_path = target_path + ".tmp"
     try:
-        if os.path.exists(target_path):
-            shutil.copy2(target_path, target_path + ".bak")
+        parent_dir = os.path.dirname(target_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
 
         last_db = os.path.abspath(app.db_path) if app.db_path else None
         slaves = [d.to_dict() for d in app.slave_service.get_devices()]
@@ -69,31 +71,60 @@ def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> 
             "slaves": slaves,
             "saved_at": datetime.now().astimezone().isoformat(),
         }
-        with open(target_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+
+        if os.path.exists(target_path):
+            shutil.copy2(target_path, target_path + ".bak")
+
+        os.replace(tmp_path, target_path)
         return True
     except Exception as e:
         logging.getLogger("App").warning(f"保存会话状态异常: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
         return False
 
 
-def load_session_state(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """从磁盘读取并解析会话状态 JSON 文件。
-    参数：path（可选文件路径，默认为 session_state.json）。
-    返回：Optional[Dict[str, Any]]，成功读取且 schema_version 匹配时返回字典，否则返回 None。
-    副作用：无。
-    """
-    target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
-    if not os.path.exists(target_path):
+def _read_session_json(file_path: str) -> Optional[Dict[str, Any]]:
+    """读取并校验单个会话 JSON 文件的 schema_version。"""
+    if not os.path.exists(file_path):
         return None
     try:
-        with open(target_path, "r", encoding="utf-8") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict) and data.get("schema_version") == SCHEMA_VERSION:
             return data
         return None
     except Exception:
         return None
+
+
+def load_session_state(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """从磁盘读取并解析会话状态 JSON 文件；若主文件损坏或缺失，自动尝试从 .bak 备份恢复。
+    参数：path（可选文件路径，默认为 session_state.json）。
+    返回：Optional[Dict[str, Any]]，成功读取且 schema_version 匹配时返回字典，否则返回 None。
+    副作用：从 .bak 恢复时记录一条告警日志。
+    """
+    target_path = os.path.abspath(path) if path else os.path.abspath(SAVE_FILENAME)
+    data = _read_session_json(target_path)
+    if data is not None:
+        return data
+
+    bak_path = target_path + ".bak"
+    bak_data = _read_session_json(bak_path)
+    if bak_data is not None:
+        logging.getLogger("App").warning(f"主会话存档损坏或缺失，已自动回退恢复备份: {bak_path}")
+        return bak_data
+    return None
 
 
 # =============================================================================
@@ -123,6 +154,8 @@ class ModbusStudioAppCore:
         self.slave_service = SlaveService(self.logging_service)
         # 将日志服务注入主机轮询服务，确保主站与从站的 TX/RX 报文能在同一视图按时间序对照分析
         self.poll_service = PollService(self.logging_service)
+        # 记住启动时指定的会话存档路径，便于 save_session_state() 默认写回同一路径
+        self._session_path: Optional[str] = session_path
 
         # 2. 尝试从会话状态存档恢复（记住上次库路径、从机配置与点表变位模拟规则）
         restored = False
@@ -175,7 +208,7 @@ class ModbusStudioAppCore:
         参数：self（ModbusStudioAppCore 实例）、path（可选文件路径）。
         返回：bool（保存是否成功）。
         """
-        return save_session_state(self, path)
+        return save_session_state(self, path if path is not None else self._session_path)
 
     def _probe_default_db(self) -> Optional[str]:
         """按优先级探测项目 extra/ 目录下是否存在可用的现场业务数据库文件。
@@ -330,7 +363,6 @@ def main():
     #   用户可能手动编辑损坏 settings.json，外观配置读取失败绝不能导致核心调试软件无法启动
     if os.path.exists(settings_file):
         try:
-            import json
             with open(settings_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
                 # 校验字段存在且非空字符串后再覆盖默认主题名
@@ -379,6 +411,11 @@ def main():
         步骤：1.调用 app.shutdown() 释放端口与文件；2.捕获异常防止卡死；3.调用 root.destroy() 退出事件循环。
         副作用：停止所有后台通信服务并销毁主窗口。
         """
+        try:
+            # 退出前兜底持久化最新会话状态，避免未触发单项保存的修改丢失
+            app.save_session_state()
+        except Exception:
+            pass
         try:
             # 先执行系统级停机清理，确保 TCP 端口立即释放，避免下次重启报 Address already in use
             app.shutdown()

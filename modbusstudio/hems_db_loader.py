@@ -16,10 +16,10 @@ from typing import Any, Dict, List, Optional, Tuple
 # 2. 支持在独立脚本或诊断工具直接加载 `hems_db_loader.py` 时退回同级模块导入；
 # 3. 避免不同启动入口下因包上下文缺失而触发 ImportError。
 try:
-    from .modbus_codec import ByteOrderMode, ModbusDataType, parse_hems_type
+    from .modbus_codec import ByteOrderMode, HEMS_TYPE_DEFINITIONS, ModbusDataType, parse_hems_type
     from .modbus_engine import AreaType
 except ImportError:
-    from modbus_codec import ByteOrderMode, ModbusDataType, parse_hems_type
+    from modbus_codec import ByteOrderMode, HEMS_TYPE_DEFINITIONS, ModbusDataType, parse_hems_type
     from modbus_engine import AreaType
 
 
@@ -325,14 +325,16 @@ class HemsAppModel:
         # 4. 提取初始值并设置默认动态模拟规则。
         result = []
         for p in self.points:
-            addr_str = p.get("Register Start Address") or p.get("Register Address")
-            # 跳过未绑定 Modbus 物理地址的内部点位（地址为空或 "None"）
-            if addr_str is None or str(addr_str).lower() == "none" or str(addr_str) == "":
+            # 显式区分 None/空串与合法的 0 号地址，避免 `0 or ...` 误将地址 0 跳过
+            addr_str = p.get("Register Start Address")
+            if addr_str is None or str(addr_str).strip() == "":
+                addr_str = p.get("Register Address")
+            if addr_str is None or str(addr_str).strip().lower() == "none" or str(addr_str).strip() == "":
                 continue
 
             try:
                 addr = int(addr_str)
-            except ValueError:
+            except (ValueError, TypeError):
                 continue
 
             eng_name = p.get("English Name", f"Point_{addr}")
@@ -342,7 +344,12 @@ class HemsAppModel:
             fmt_str = p.get("Variable Transfer Format")
             dtype = map_db_format_to_data_type(fmt_str)
             order = map_db_format_to_byte_order(fmt_str, default_mode=ByteOrderMode.CDAB)
-            scale = float(p.get("Scale Factor", 1.0) or 1.0)
+            try:
+                raw_scale = p.get("Scale Factor", 1.0)
+                scale = float(raw_scale) if raw_scale not in (None, "") else 1.0
+            except (ValueError, TypeError):
+                scale = 1.0
+            unit = str(p.get("Unit") or p.get("Engineering Unit") or "").strip()
 
             # 为什么先把 Function Code 统一归一化为整数且在存在时严格尊重库值：
             # 1. 现场数据库中 Function Code 可能表现为 "03"、"3"、3、"0x03"、"FC03" 等多种形态；
@@ -429,6 +436,8 @@ class HemsAppModel:
             result.append({
                 "address": addr,
                 "desc": desc,
+                "field_name": str(eng_name or "").strip(),
+                "unit": unit,
                 "area": area,
                 "data_type": dtype,
                 "byte_order": order,
@@ -475,154 +484,186 @@ class HemsDatabase:
             logger.warning(f"数据库文件不存在: {self.db_path}")
             return []
 
-        # 设置 5.0 秒锁等待超时，防止现场数据库被其他工具短暂读取时立即抛出 OperationalError
+        # 设置 5.0 秒锁等待超时，并用 try/finally 确保任意 SQL 异常下都不泄漏 SQLite 连接句柄
         conn = sqlite3.connect(self.db_path, timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        try:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM app;")
-        rows = cursor.fetchall()
-        apps = []
+            cursor.execute("SELECT * FROM app;")
+            rows = cursor.fetchall()
+            apps = []
 
-        for r in rows:
-            row_keys = set(r.keys())
-            # 为什么对 More 字段同时处理 bytes 与 str 两种类型：
-            # 不同版本的 SQLite 驱动或现场 `.cdb` 导出工具可能将 BLOB/TEXT 列存储为 UTF-8 字节流或字符串。
-            more_raw = r["More"]
+            for r in rows:
+                row_keys = set(r.keys())
+                more_raw = r["More"]
+                more = {}
+                if isinstance(more_raw, bytes):
+                    try:
+                        more = json.loads(more_raw.decode("utf-8"))
+                    except Exception:
+                        pass
+                elif isinstance(more_raw, str) and more_raw.strip().startswith("{"):
+                    try:
+                        more = json.loads(more_raw)
+                    except Exception:
+                        pass
+
+                for var_col in ("Realtime Variables", "Referred Variables"):
+                    if var_col in row_keys and r[var_col] and isinstance(more.get(var_col), list):
+                        try:
+                            col_raw = r[var_col]
+                            col_list = json.loads(col_raw.decode("utf-8") if isinstance(col_raw, bytes) else col_raw)
+                            if isinstance(col_list, list):
+                                chn_lookup = {
+                                    str(item.get("English Name", "")).strip(): str(item.get("Chinese Name", "")).strip()
+                                    for item in col_list
+                                    if isinstance(item, dict) and item.get("English Name") and item.get("Chinese Name")
+                                }
+                                for pt in more[var_col]:
+                                    if isinstance(pt, dict) and not pt.get("Chinese Name"):
+                                        eng_k = str(pt.get("English Name", "")).strip()
+                                        if eng_k in chn_lookup and chn_lookup[eng_k]:
+                                            pt["Chinese Name"] = chn_lookup[eng_k]
+                        except Exception:
+                            pass
+
+                lp_raw = r["Local Parameters"]
+                local_params = {}
+                if isinstance(lp_raw, bytes):
+                    try:
+                        lp_list = json.loads(lp_raw.decode("utf-8"))
+                        if isinstance(lp_list, list):
+                            local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
+                    except Exception:
+                        pass
+                elif isinstance(lp_raw, str) and lp_raw.strip().startswith("["):
+                    try:
+                        lp_list = json.loads(lp_raw)
+                        if isinstance(lp_list, list):
+                            local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
+                    except Exception:
+                        pass
+
+                ctrl = str(r["Controller Library"])
+                has_polls = len(more.get("Pollings", [])) > 0
+                has_vars = len(more.get("Realtime Variables", [])) > 0 or len(more.get("Referred Variables", [])) > 0
+                is_modbus = "Mb" in ctrl or has_polls or has_vars or r["Type"] in (1, 2)
+
+                if is_modbus:
+                    app_obj = HemsAppModel(
+                        app_id=r["Id"],
+                        app_type=r["Type"],
+                        english_name=r["English Name"] or "",
+                        chinese_name=r["Chinese Name"] or "",
+                        model_name=r["Referred Model"] or "",
+                        controller_lib=ctrl,
+                        enable=r["enable"],
+                        raw_more=more,
+                        local_params=local_params,
+                    )
+                    apps.append(app_obj)
+            return apps
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _to_hems_transfer_format(data_type: Any, byte_order: Any) -> str:
+        """将 (数据类型, 字节序) 反向映射为 HEMS menu 表标准英文格式名，保障写回后再读不丢字节序。"""
+        dt_str = (data_type.value if hasattr(data_type, "value") else str(data_type or "INT16")).strip().upper()
+        if dt_str == "FLOAT64":
+            dt_str = "DOUBLE64"
+        bo_str = (byte_order.value if hasattr(byte_order, "value") else str(byte_order or "ABCD")).strip().upper()
+        # 优先精确匹配 (ModbusDataType, ByteOrderMode)，跳过 0=Invalid 与 2/3=char
+        for tid in sorted(HEMS_TYPE_DEFINITIONS.keys()):
+            if tid in (0, 2, 3):
+                continue
+            eng_name, _, d_enum, b_enum, _ = HEMS_TYPE_DEFINITIONS[tid]
+            if d_enum.value == dt_str and b_enum.value == bo_str:
+                return eng_name
+        # 退回匹配同数据类型的首个标准格式
+        for tid in sorted(HEMS_TYPE_DEFINITIONS.keys()):
+            if tid in (0, 2, 3):
+                continue
+            eng_name, _, d_enum, _, _ = HEMS_TYPE_DEFINITIONS[tid]
+            if d_enum.value == dt_str:
+                return eng_name
+        return dt_str
+
+    def save_app_points(self, app_id: int, points: List[Dict[str, Any]]) -> bool:
+        """将软件中调整好的点表与变位信息反向序列化更新回 SQLite app 表的 More 字段。"""
+        if not os.path.exists(self.db_path):
+            return False
+
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT More FROM app WHERE Id = ?;", (app_id,))
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            more_raw = row[0]
             more = {}
             if isinstance(more_raw, bytes):
                 try:
                     more = json.loads(more_raw.decode("utf-8"))
                 except Exception:
                     pass
-            elif isinstance(more_raw, str) and more_raw.strip().startswith("{"):
+            elif isinstance(more_raw, str):
                 try:
                     more = json.loads(more_raw)
                 except Exception:
                     pass
 
-            # 为什么从顶层 Realtime Variables / Referred Variables 列回填点位 Chinese Name：
-            # 现场 hems.cdb 的 app.More 内部仅保存寄存器地址、功能码与 English Name，
-            # 而点位的中文业务名称存放在同行的 Realtime Variables / Referred Variables 顶层列中。
-            for var_col in ("Realtime Variables", "Referred Variables"):
-                if var_col in row_keys and r[var_col] and isinstance(more.get(var_col), list):
-                    try:
-                        col_raw = r[var_col]
-                        col_list = json.loads(col_raw.decode("utf-8") if isinstance(col_raw, bytes) else col_raw)
-                        if isinstance(col_list, list):
-                            chn_lookup = {
-                                str(item.get("English Name", "")).strip(): str(item.get("Chinese Name", "")).strip()
-                                for item in col_list
-                                if isinstance(item, dict) and item.get("English Name") and item.get("Chinese Name")
-                            }
-                            for pt in more[var_col]:
-                                if isinstance(pt, dict) and not pt.get("Chinese Name"):
-                                    eng_k = str(pt.get("English Name", "")).strip()
-                                    if eng_k in chn_lookup and chn_lookup[eng_k]:
-                                        pt["Chinese Name"] = chn_lookup[eng_k]
-                    except Exception:
-                        pass
+            var_key = "Realtime Variables" if "Realtime Variables" in more else "Referred Variables"
+            existing_by_addr: Dict[str, Dict[str, Any]] = {}
+            for old_item in more.get(var_key, []):
+                if isinstance(old_item, dict):
+                    old_addr = old_item.get("Register Start Address")
+                    if old_addr is None or str(old_addr).strip() == "":
+                        old_addr = old_item.get("Register Address")
+                    if old_addr is not None and str(old_addr).strip() != "":
+                        existing_by_addr[str(old_addr).strip()] = old_item
 
-            # 解析 Local Parameters 数组（将 [{"English Name": k, "Value": v}, ...] 扁平化为 {k: v} 字典）
-            lp_raw = r["Local Parameters"]
-            local_params = {}
-            if isinstance(lp_raw, bytes):
-                try:
-                    lp_list = json.loads(lp_raw.decode("utf-8"))
-                    if isinstance(lp_list, list):
-                        local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
-                except Exception:
-                    pass
-            elif isinstance(lp_raw, str) and lp_raw.strip().startswith("["):
-                try:
-                    lp_list = json.loads(lp_raw)
-                    if isinstance(lp_list, list):
-                        local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
-                except Exception:
-                    pass
+            db_vars = []
+            for p in points:
+                area_raw = str(p.get("area", ""))
+                area_str = area_raw.upper()
+                if "1X" in area_str or "DISCRETE" in area_str or "离散" in area_raw:
+                    fc = "2"
+                elif "0X" in area_str or "COIL" in area_str or "线圈" in area_raw:
+                    fc = "1"
+                elif "3X" in area_str or "INPUT" in area_str or "输入" in area_raw:
+                    fc = "4"
+                else:
+                    fc = "3"
 
-            # 判定该行是否为 Modbus 相关业务模块（驱动名含 Mb、或含轮询/点表配置、或 Type 为 1/2）
-            ctrl = str(r["Controller Library"])
-            has_polls = len(more.get("Pollings", [])) > 0
-            has_vars = len(more.get("Realtime Variables", [])) > 0 or len(more.get("Referred Variables", [])) > 0
-            is_modbus = "Mb" in ctrl or has_polls or has_vars or r["Type"] in (1, 2)
+                addr_key = str(p.get("address"))
+                base_item = dict(existing_by_addr.get(addr_key, {}))
+                eng_name = p.get("field_name") or base_item.get("English Name") or p.get("desc")
+                chn_name = p.get("desc") or base_item.get("Chinese Name") or eng_name
+                hems_fmt = self._to_hems_transfer_format(p.get("data_type"), p.get("byte_order"))
 
-            if is_modbus:
-                app_obj = HemsAppModel(
-                    app_id=r["Id"],
-                    app_type=r["Type"],
-                    english_name=r["English Name"] or "",
-                    chinese_name=r["Chinese Name"] or "",
-                    model_name=r["Referred Model"] or "",
-                    controller_lib=ctrl,
-                    enable=r["enable"],
-                    raw_more=more,
-                    local_params=local_params,
-                )
-                apps.append(app_obj)
+                base_item.update({
+                    "English Name": eng_name,
+                    "Chinese Name": chn_name,
+                    "Function Code": fc,
+                    "Register Start Address": addr_key,
+                    "Variable Transfer Format": hems_fmt,
+                    "Scale Factor": str(p.get("scale", 1)),
+                    "Byte Order": p.get("byte_order").value if hasattr(p.get("byte_order"), "value") else str(p.get("byte_order")),
+                })
+                if p.get("unit"):
+                    base_item["Unit"] = str(p.get("unit"))
+                db_vars.append(base_item)
+            more[var_key] = db_vars
 
-        conn.close()
-        return apps
-
-    def save_app_points(self, app_id: int, points: List[Dict[str, Any]]) -> bool:
-        """将软件中调整好的点表与变位信息反向序列化更新回 SQLite app 表的 More 字段。"""
-        # 参数：app_id（目标应用 ID）、points（点位字典列表）。返回：是否成功写回数据库。
-        # 副作用：修改 SQLite 文件中对应 Id 行的 More 字段并提交事务。
-        if not os.path.exists(self.db_path):
-            return False
-
-        conn = sqlite3.connect(self.db_path, timeout=5.0)
-        cursor = conn.cursor()
-        cursor.execute("SELECT More FROM app WHERE Id = ?;", (app_id,))
-        row = cursor.fetchone()
-        if not row:
+            new_more_json = json.dumps(more, ensure_ascii=False)
+            cursor.execute("UPDATE app SET More = ? WHERE Id = ?;", (new_more_json, app_id))
+            conn.commit()
+            return True
+        finally:
             conn.close()
-            return False
-
-        # 先读取并反序列化原有的 More JSON，确保只更新变量数组而不破坏 Pollings 等其他兄弟字段
-        more_raw = row[0]
-        more = {}
-        if isinstance(more_raw, bytes):
-            try:
-                more = json.loads(more_raw.decode("utf-8"))
-            except Exception:
-                pass
-        elif isinstance(more_raw, str):
-            try:
-                more = json.loads(more_raw)
-            except Exception:
-                pass
-
-        # 更新实时变量表：若原 JSON 使用 Realtime Variables 则保持该键名，否则写入 Referred Variables
-        var_key = "Realtime Variables" if "Realtime Variables" in more else "Referred Variables"
-        db_vars = []
-        for p in points:
-            area_str = str(p.get("area", "")).upper()
-            if "COIL" in area_str or "线圈" in str(p.get("area", "")) or "0X" in area_str:
-                fc = "1"
-            elif "DISCRETE" in area_str or "离散" in str(p.get("area", "")) or "1X" in area_str:
-                fc = "2"
-            elif "INPUT" in area_str or "输入" in str(p.get("area", "")) or "3X" in area_str:
-                fc = "4"
-            else:
-                fc = "3"
-
-            db_vars.append({
-                "English Name": p.get("desc"),
-                "Chinese Name": p.get("desc"),
-                "Function Code": fc,
-                "Register Start Address": str(p.get("address")),
-                "Variable Transfer Format": p.get("data_type").value if hasattr(p.get("data_type"), "value") else str(p.get("data_type")),
-                "Scale Factor": str(p.get("scale", 1)),
-                "Byte Order": p.get("byte_order").value if hasattr(p.get("byte_order"), "value") else str(p.get("byte_order")),
-            })
-        more[var_key] = db_vars
-
-        # 序列化回 UTF-8 JSON 字符串并执行参数化 UPDATE，防止 SQL 注入且保留中文字符可读性
-        new_more_json = json.dumps(more, ensure_ascii=False)
-        cursor.execute("UPDATE app SET More = ? WHERE Id = ?;", (new_more_json, app_id))
-        conn.commit()
-        conn.close()
-        return True
 
 

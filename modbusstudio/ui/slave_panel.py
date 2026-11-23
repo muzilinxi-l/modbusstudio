@@ -647,37 +647,19 @@ class SlavePanel(ttk.Frame):
         # 因此本方法仅筛选 `sim_rule != "固定"` 的行，原位更新 `val` 和 `raw_hex` 两个单元格。
         # 在 [_start_runtime_sync_loop] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
         try:
-            # 在 [_start_runtime_sync_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if self._current_device_id and hasattr(self, "tree") and self.tree.winfo_exists():
-                # 在 [_start_runtime_sync_loop] 中更新局部变量 [device]：为后续协议编码、服务调度或界面渲染准备中间状态
                 device = self.app.slave_service.get_device(self._current_device_id)
-                # 在 [_start_runtime_sync_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if device and device.is_running:
-                    # 检查是否有点位开启了动态模拟 (固定点位跳过重绘)
-                    # 在 [_start_runtime_sync_loop] 中更新局部变量 [has_sim]：为后续协议编码、服务调度或界面渲染准备中间状态
-                    has_sim = any(p.sim_rule != "固定" for p in device.points.values())
-                    # 在 [_start_runtime_sync_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-                    if has_sim:
-                        # 在 [_start_runtime_sync_loop] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
-                        for row_id in self.tree.get_children():
-                            # 在 [_start_runtime_sync_loop] 中更新局部变量 [vals]：为后续协议编码、服务调度或界面渲染准备中间状态
-                            vals = self.tree.item(row_id, "values")
-                            # 在 [_start_runtime_sync_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-                            if vals and len(vals) >= 8:
-                                # 在 [_start_runtime_sync_loop] 中更新局部变量 [addr]：为后续协议编码、服务调度或界面渲染准备中间状态
-                                addr = int(vals[0])
-                                # 在 [_start_runtime_sync_loop] 中更新局部变量 [area_name]：为后续协议编码、服务调度或界面渲染准备中间状态
-                                area_name = vals[2]
-                                # 在 [_start_runtime_sync_loop] 中更新局部变量 [sim_mode]：为后续协议编码、服务调度或界面渲染准备中间状态
-                                sim_mode = vals[7]
-                                # 在 [_start_runtime_sync_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-                                if sim_mode != "固定":
-                                    # 在 [_start_runtime_sync_loop] 中更新局部变量 [p]：为后续协议编码、服务调度或界面渲染准备中间状态
-                                    p = device.get_point(area_name, addr)
-                                    # 在 [_start_runtime_sync_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-                                    if p:
-                                        self.tree.set(row_id, "val", p.value)
-                                        self.tree.set(row_id, "raw_hex", p.raw_hex)
+                    # 差异刷新所有行：既同步动态仿真点位，也实时展示外部主站写入的“固定”点位，值未变时不触发重绘
+                    for row_id in self.tree.get_children():
+                        vals = self.tree.item(row_id, "values")
+                        if vals and len(vals) >= 8:
+                            addr = int(vals[0])
+                            area_name = vals[2]
+                            p = device.get_point(area_name, addr)
+                            if p and (str(vals[5]) != str(p.value) or str(vals[6]) != str(p.raw_hex)):
+                                self.tree.set(row_id, "val", p.value)
+                                self.tree.set(row_id, "raw_hex", p.raw_hex)
         except Exception:
             pass
         finally:
@@ -809,8 +791,9 @@ class SlavePanel(ttk.Frame):
         else:
             ok, msg = self.app.slave_service.stop_slave(device.id)
 
-        # 界面仅据此更新状态
+        # 界面仅据此更新状态并持久化最新通信配置
         self._update_status_indicator(device)
+        save_session_state(self.app)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_start_all_slaves]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -1055,18 +1038,15 @@ class SlavePanel(ttk.Frame):
         if not device:
             # 从 [_batch_delete_selected] 返回执行结果给调用方，结束当前处理分支
             return
-        # 在 [_batch_delete_selected] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for item in selected:
-            # 在 [_batch_delete_selected] 中更新局部变量 [vals]：为后续协议编码、服务调度或界面渲染准备中间状态
             vals = self.tree.item(item, "values")
-            # 在 [_batch_delete_selected] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if vals:
-                # 在 [_batch_delete_selected] 中更新局部变量 [addr]：为后续协议编码、服务调度或界面渲染准备中间状态
                 addr = int(vals[0])
-                # 在 [_batch_delete_selected] 中更新局部变量 [area]：为后续协议编码、服务调度或界面渲染准备中间状态
                 area = vals[2]
                 device.remove_point(area, addr)
+                self.app.slave_service.remove_point_from_runtime(device.id, area, addr)
         self._refresh_tree(device)
+        save_session_state(self.app)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_apply_batch_sim]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -1247,12 +1227,11 @@ class SlavePanel(ttk.Frame):
             # 从 [_on_tree_double_click] 返回执行结果给调用方，结束当前处理分支
             return
 
-        # 在 [_on_tree_double_click] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         point.value = updated_pt.value
-        # 在 [_on_tree_double_click] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
         point.raw_hex = updated_pt.raw_hex
         self.app.slave_service.sync_point_to_runtime(device.id, point)
         self._refresh_tree(device)
+        save_session_state(self.app)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_sort_by_column]（入参: col, reverse）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -1385,6 +1364,7 @@ class SlavePanel(ttk.Frame):
                 cur_a += step
 
             self._refresh_tree(device)
+            save_session_state(self.app)
             dlg.destroy()
             messagebox.showinfo("生成成功", f"成功批量生成 {count} 个点位")
 

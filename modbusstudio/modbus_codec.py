@@ -164,6 +164,11 @@ def clamp_value_to_type(val: Any, data_type: ModbusDataType) -> Any:
             # 整型夹逼在 [min_v, max_v] 闭区间内
             return max(min_v, min(max_v, numeric))
         else:
+            # 拦截 NaN / ±inf：防止 min(max_v, nan) 误返回 3.4e38
+            if math.isnan(numeric):
+                return 0.0
+            if math.isinf(numeric):
+                return max_v if numeric > 0 else min_v
             # 浮点型同样夹逼在有限浮点数范围内，避免产生正负无穷大 (inf)
             return max(min_v, min(max_v, numeric))
     except Exception:
@@ -496,9 +501,10 @@ def decode_value(
             return "NaN"
         return round(d_val, 8)
 
-    # STRING（ASCII 文本字符串）：忽略非 ASCII 坏字节并剥离尾部填充的 `\x00` 空字符
+    # STRING（ASCII 文本字符串）：按 string_length 截断并忽略非 ASCII 坏字节，剥离尾部填充的 `\x00` 空字符
     elif data_type == ModbusDataType.STRING:
-        # 字符串可以截断到请求长度，并去除末尾 null
+        if string_length > 0:
+            raw_bytes = raw_bytes[:string_length]
         clean = raw_bytes.decode("ascii", errors="replace").rstrip("\x00")
         return clean
 
@@ -633,17 +639,15 @@ def encode_value(
         return bytes_to_registers(adjusted)
 
     # STRING 编码：
-    # 转为 ASCII 字节流后向上对齐到偶数长度（因 1 个寄存器装 2 个字节），不足部分右侧补 `\x00`
+    # 严格按 string_length 对齐到偶数字节（防止超长字符串溢出覆写相邻寄存器），不足部分右侧补 `\x00`
     elif data_type == ModbusDataType.STRING:
         # 非 ASCII 字符使用 '?' 替换，防止中文误填入 STRING 寄存器导致 UnicodeEncodeError
         s_bytes = str(value).encode("ascii", errors="replace")
-        # 取实际字节长度与预设最小长度中的较大者
-        target_len = max(len(s_bytes), string_length)
-        # 奇数个字节时加 1 凑成偶数字节，以便完整装入 16 位寄存器
+        target_len = max(2, int(string_length) if string_length and string_length > 0 else len(s_bytes))
         if target_len % 2 != 0:
             target_len += 1
-        # 右侧补零字节（C 风格字符串结尾 '\0'）
-        s_bytes = s_bytes.ljust(target_len, b"\x00")
+        # 超长截断、不足右侧补零，确保编码出的寄存器个数严格匹配 (string_length + 1) // 2
+        s_bytes = s_bytes[:target_len].ljust(target_len, b"\x00")
         return bytes_to_registers(s_bytes)
 
     # 未知类型兜底返回单寄存器 [0]
