@@ -926,6 +926,8 @@ class DbImportDialog:
             val = pt.get("current_val", 0)
             sim = pt.get("sim_mode", "固定")
             scale = float(pt.get("scale", 1.0) or 1.0)
+            raw_off = pt.get("offset", 0.0)
+            offset = float(raw_off) if raw_off not in (None, "") else 0.0
             field_name = str(pt.get("field_name", "") or "")
             unit = str(pt.get("unit", "") or "")
 
@@ -939,6 +941,7 @@ class DbImportDialog:
                 sim_rule=sim,
                 field_name=field_name,
                 scale=scale,
+                offset=offset,
                 unit=unit,
             )
             if ok and point:

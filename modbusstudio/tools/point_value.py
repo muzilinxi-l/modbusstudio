@@ -71,24 +71,41 @@ def decode_point(registers: List[int], point: ModbusPoint) -> Any:
 
 
 def scale_value(value: Any, point: ModbusPoint) -> Any:
-    """对解算值应用点位的 scale 系数，得到最终工程值。
+    """对解算值应用点位的 scale 系数与 offset 偏移量（eng = raw * scale + offset），得到最终工程值。
 
     为什么显式类型检查 + try/except 兜底：
     1. Python 中 int * str（如 100 * "bad"）会执行字符串序列乘法产生垃圾串，
-       且不会抛 TypeError/ValueError。因此入口显式校验 scale 为 int/float；
-    2. Python 中 bool 是 int 的子类（isinstance(True, int) 为 True），
-       但布尔值作为系数在工业点表中无实际意义，显式排除 bool；
+       且不会抛 TypeError/ValueError。因此入口显式校验 scale/offset 为有限数值类型；
+    2. Python 中 bool 是 int 的子类（isinstance(True, int) 为 True），显式排除 bool；
     3. 个别点位计算异常时退回未换算值，不阻断整条链路。
     参数：value（decode_point 的解算结果）；point（点位定义）。
-    返回：数值型且 scale 合法时返回 value*scale；否则原样返回。
+    返回：数值型且 scale 合法时返回 value*scale + offset；否则原样返回。
     """
+    import math
     if not is_scalable(point):
         return value
-    # 显式校验 scale 为合法数值类型（int 或 float，排除 bool）
-    if not isinstance(point.scale, (int, float)) or isinstance(point.scale, bool):
+    # 显式校验 scale 为合法有限数值类型（int 或 float，排除 bool 与 0/NaN/Inf）
+    if (
+        not isinstance(point.scale, (int, float))
+        or isinstance(point.scale, bool)
+        or not math.isfinite(point.scale)
+        or point.scale == 0
+    ):
         return value
+    raw_offset = getattr(point, "offset", 0.0)
+    if (
+        not isinstance(raw_offset, (int, float))
+        or isinstance(raw_offset, bool)
+        or not math.isfinite(raw_offset)
+    ):
+        offset = 0.0
+    else:
+        offset = raw_offset
     try:
-        return value * point.scale
+        res = value * point.scale + offset
+        if isinstance(res, float) and math.isfinite(res):
+            return round(res, 8) if res != 0.0 else 0.0
+        return res
     except (TypeError, ValueError):
         # 兜底：计算无法完成时退回未换算值，避免整批失败
         return value

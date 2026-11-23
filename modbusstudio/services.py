@@ -38,6 +38,10 @@ from .modbus_codec import (
     clamp_value_to_type,
     decode_value,
     encode_value,
+    eng_to_raw,
+    is_numeric_codec_type,
+    normalize_scale_offset,
+    raw_to_eng,
 )
 # 导入底层通信引擎：从机模拟引擎、主机轮询引擎与多站点传输中枢单例
 from .modbus_engine import (
@@ -185,11 +189,9 @@ class PointService:
         field_name: str = "",
         scale: float = 1.0,
         unit: str = "",
+        offset: float = 0.0,
     ) -> Tuple[bool, Optional[ModbusPoint], str]:
-        """校验用户输入参数有效性、执行存储区与类型双向对齐，并构建带十六进制编码的 ModbusPoint 实体。"""
-        # 参数：address（0~65535）、description、area、data_type、byte_order、val_input、sim_rule 等。
-        # 返回：(是否成功, ModbusPoint 实例或 None, 错误提示文本)。
-        # 步骤：1. 校验地址边界；2. 枚举归一化与区域-类型双向修正；3. 转换标量初值；4. 编码 raw_hex 并实例化 ModbusPoint。
+        """校验用户输入参数有效性、执行存储区与类型双向对齐，并按系数/偏移量反算原始寄存器构建 ModbusPoint 实体。"""
         try:
             addr_int = int(str(address).strip())
             if addr_int < 0 or addr_int > 65535:
@@ -202,24 +204,30 @@ class PointService:
         bo_enum = ByteOrder.normalize(byte_order)
         sim_str = SimRule.normalize(sim_rule)
 
-        # 为什么强制执行存储区域与数据类型的双向对齐修正：
-        # 1. Modbus 协议中 0x(线圈) 与 1x(离散输入) 每个地址仅占 1 bit，物理上只能存储 BOOL；
-        # 2. 反之，若用户在界面上将类型改为 BOOL，但存储区仍停留在 3x/4x（16 位寄存器区），
-        #    自动将其校正到对应的 1x(只读位) 或 0x(读写位)，防止后续用 FC01/FC02 读取时找不到数据。
+        # 归一化系数与偏移量（scale=0/非法兜底 1.0，offset 非法兜底 0.0）
+        scale_clean, offset_clean = normalize_scale_offset(scale, offset)
+
+        # 存储区域与数据类型的双向对齐修正（0x/1x 必为 BOOL，BOOL 必在 0x/1x）
         if area_enum in (AreaType.COIL, AreaType.DISCRETE):
             dt_enum = DataType.BOOL
         elif dt_enum == DataType.BOOL:
-            # 布尔量绝不可放在 3x/4x 寄存器，自动校正为对应物理布尔区域
             if area_enum == AreaType.INPUT:
                 area_enum = AreaType.DISCRETE
             elif area_enum == AreaType.HOLDING:
                 area_enum = AreaType.COIL
 
-        # 按归一化后的数据类型将用户输入的字符串/数字转换为目标 Python 标量（无符号数自动钳位非负）
+        is_numeric = is_numeric_codec_type(dt_enum.value)
+        has_scaling = is_numeric and (scale_clean != 1.0 or offset_clean != 0.0)
+
+        # 按归一化后的数据类型将用户输入转换为目标工程源数据；
+        # 启用了系数/偏移量时，允许整型寄存器点位输入浮点工程值（如 220.5），再反算为整型寄存器原值。
         val_converted = val_input
         try:
             if dt_enum == DataType.BOOL:
                 val_converted = 1 if str(val_input).strip().lower() in ("1", "true", "on", "yes") else 0
+            elif has_scaling:
+                s_num = str(val_input).strip() or "0.0"
+                val_converted = float(s_num)
             elif dt_enum in (DataType.INT16, DataType.INT32, DataType.INT64):
                 s_num = str(val_input).strip() or "0"
                 try:
@@ -248,16 +256,19 @@ class PointService:
         except Exception as e:
             return False, None, f"数值格式与类型 {dt_enum.value} 不匹配: {e}"
 
-        # 对数值型做上下界强类型钳位，保证 point.value 与编码后的 raw_hex 严格一致
-        if dt_enum in (
-            DataType.INT16, DataType.UINT16, DataType.INT32, DataType.UINT32,
-            DataType.INT64, DataType.UINT64, DataType.FLOAT32, DataType.FLOAT64,
-        ):
+        # 对未缩放的数值型执行上下界强类型钳位；对启用缩放的数值型执行「工程值 -> 原始寄存器值 -> 回算工程值」
+        # 确保界面显示的 point.value 与总线寄存器经 raw * scale + offset 解析后的结果严格一致。
+        raw_val_for_encode = val_converted
+        if is_numeric:
             codec_dt = ModbusDataType.DOUBLE64 if dt_enum == DataType.FLOAT64 else ModbusDataType(dt_enum.value)
-            val_converted = clamp_value_to_type(val_converted, codec_dt)
+            if has_scaling:
+                raw_val_for_encode = eng_to_raw(val_converted, codec_dt, scale_clean, offset_clean)
+                val_converted = raw_to_eng(raw_val_for_encode, codec_dt, scale_clean, offset_clean)
+            else:
+                val_converted = clamp_value_to_type(val_converted, codec_dt)
+                raw_val_for_encode = val_converted
 
-        # 原始十六进制编码（遵循 Modbus 工业标准与原始代码规范）：
-        # 布尔量 (0x / 1x) 显示单字节状态 0x00 或 0x01；寄存器量显示 0x0000 及多字空格分隔组合
+        # 原始十六进制编码：布尔量显示 0x00/0x01；寄存器量对反算后的原始寄存器值编码
         if area_enum in (AreaType.COIL, AreaType.DISCRETE) or dt_enum == DataType.BOOL:
             b_val = 1 if (val_converted is True or str(val_converted).strip().lower() in ("1", "true", "yes", "on")) else 0
             val_converted = b_val
@@ -265,7 +276,7 @@ class PointService:
         else:
             raw_hex = "0x0000"
             try:
-                raw_regs = encode_value(val_converted, dt_enum.value, bo_enum.value, string_length=string_length)
+                raw_regs = encode_value(raw_val_for_encode, dt_enum.value, bo_enum.value, string_length=string_length)
                 if raw_regs:
                     raw_hex = " ".join([f"0x{r:04X}" for r in raw_regs])
             except Exception as e:
@@ -282,22 +293,28 @@ class PointService:
             raw_hex=raw_hex,
             string_length=string_length,
             field_name=field_name,
-            scale=scale,
+            scale=scale_clean,
+            offset=offset_clean,
             unit=unit,
         )
         return True, point, ""
 
     @classmethod
     def re_encode_point(cls, point: ModbusPoint) -> None:
-        """根据点位当前数值与字节序变位模式原地重新计算并更新 `point.raw_hex` 字符串。"""
-        # 场景：当后台波形仿真线程更新了 point.value 或用户批量切换了 byte_order 时调用，保持表格 Hex 列同步。
+        """根据点位当前工程值、系数/偏移量与字节序变位模式原地重算 `point.raw_hex` 字符串。"""
         try:
             if point.area in (AreaType.COIL, AreaType.DISCRETE) or point.data_type == DataType.BOOL:
                 b_val = 1 if (point.value is True or str(point.value).strip().lower() in ("1", "true", "yes", "on")) else 0
                 point.raw_hex = "0x01" if b_val else "0x00"
             else:
-                raw_regs = encode_value(
+                raw_val = eng_to_raw(
                     point.value,
+                    point.data_type.value,
+                    getattr(point, "scale", 1.0),
+                    getattr(point, "offset", 0.0),
+                )
+                raw_regs = encode_value(
+                    raw_val,
                     point.data_type.value,
                     point.byte_order.value,
                     string_length=point.string_length,
@@ -614,6 +631,7 @@ class SlaveService:
             # 复合键用于隔离不同存储区（如 3x 与 4x）的同号地址，整数键用于向下兼容旧版单键访问逻辑。
             for point in device.points.values():
                 try:
+                    pt_scale, pt_offset = normalize_scale_offset(getattr(point, "scale", 1.0), getattr(point, "offset", 0.0))
                     engine.write_typed_value(
                         area=point.area.value,
                         address=point.address,
@@ -622,6 +640,8 @@ class SlaveService:
                         mode=point.byte_order.value,
                         byte_order=point.byte_order.value,
                         string_length=point.string_length,
+                        scale=pt_scale,
+                        offset=pt_offset,
                     )
                     pt_dict = {
                         "address": point.address,
@@ -634,6 +654,9 @@ class SlaveService:
                         "sim_mode": point.sim_rule,
                         "sim_rule": point.sim_rule,
                         "current_val": point.value,
+                        "raw_val": eng_to_raw(point.value, point.data_type.value, pt_scale, pt_offset),
+                        "scale": pt_scale,
+                        "offset": pt_offset,
                         "string_length": point.string_length,
                     }
                     engine.points[(point.area.value, point.address)] = pt_dict
@@ -700,6 +723,7 @@ class SlaveService:
             engine = self._active_engines.get(device_id)
         if engine:
             try:
+                pt_scale, pt_offset = normalize_scale_offset(getattr(point, "scale", 1.0), getattr(point, "offset", 0.0))
                 engine.write_typed_value(
                     area=point.area.value,
                     address=point.address,
@@ -708,6 +732,8 @@ class SlaveService:
                     mode=point.byte_order.value,
                     byte_order=point.byte_order.value,
                     string_length=point.string_length,
+                    scale=pt_scale,
+                    offset=pt_offset,
                 )
                 pt_dict = {
                     "address": point.address,
@@ -720,6 +746,9 @@ class SlaveService:
                     "sim_mode": point.sim_rule,
                     "sim_rule": point.sim_rule,
                     "current_val": point.value,
+                    "raw_val": eng_to_raw(point.value, point.data_type.value, pt_scale, pt_offset),
+                    "scale": pt_scale,
+                    "offset": pt_offset,
                     "string_length": point.string_length,
                 }
                 pts_lock = getattr(engine, "_points_lock", None)

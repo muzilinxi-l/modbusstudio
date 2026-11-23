@@ -71,19 +71,29 @@ def load_slaves(session_path: str) -> Tuple[List[SlaveDevice], List[str]]:
     return slaves, warnings
 
 
+def _parse_raw_hex_registers(raw_hex: str) -> Optional[List[int]]:
+    """解析类似 '0x089D' 或 '0x435C 0x8000' 的 raw_hex 字符串为 16 位寄存器列表。"""
+    if not raw_hex or not isinstance(raw_hex, str):
+        return None
+    parts = raw_hex.strip().split()
+    if not parts:
+        return None
+    regs: List[int] = []
+    for token in parts:
+        try:
+            regs.append(int(token, 16) & 0xFFFF)
+        except ValueError:
+            return None
+    return regs
+
+
 def compute_local_rows(slave: SlaveDevice) -> List[Tuple[str, Any, Any]]:
     """计算一台从机所有点位的 (point_key, 解算值, 换算后工程值)。
 
-    参数：slave（恢复出的从机实例，点表已带 .value）。
-    返回：逐点三位组列表。
-
-    为什么不走 ModbusSlaveEngine 而是直接走 codec：
-    对账只关心"工程值 ↔ 寄存器"的编码关系，codec 的 encode/decode 是
-    这条关系的唯一事实源（引擎内部也是调它）。直接调用可避开引擎的
-    1-based 地址基准、端口参数与 pymodbus 废弃告警，纯 CPU 计算。
-    步骤：数值型把 .value 编码成寄存器再解算回（等价"现场读寄存器"），
-          用 scale_value 统一乘 scale 得工程值；非数值型直接取 .value。
-    副作用：无（纯函数，不碰网络/文件）。
+    兼容两种存档语义：
+    1. ModbusStudio 新版保存的会话存档：pt.value 存工程源数据、pt.raw_hex 存反算后的真实寄存器字，
+       若 raw_hex 反解并套 scale+offset 后与 pt.value 一致，则直接输出 (raw_from_hex, eng)，避免双重缩放；
+    2. 传统/测试最小存档（无匹配 raw_hex）：按 pt.value 视为原始值，编码再解算并套 scale_value(raw, pt)。
     """
     rows: List[Tuple[str, Any, Any]] = []
     for pt in slave.points.values():
@@ -94,13 +104,23 @@ def compute_local_rows(slave: SlaveDevice) -> List[Tuple[str, Any, Any]]:
         try:
             data_type = to_codec_type(pt.data_type)
             byte_order = ByteOrderMode(pt.byte_order.value)
-            regs = encode_value(pt.value, data_type, byte_order, pt.string_length)
-            raw_value = decode_value(regs, data_type, byte_order, pt.string_length)
-            scaled_value = scale_value(raw_value, pt)
+            # 优先识别已带真实 raw_hex 的工程值存档，避免对已换算的 pt.value 二次乘 scale 加 offset
+            hex_regs = _parse_raw_hex_registers(getattr(pt, "raw_hex", ""))
+            matched_from_hex = False
+            if hex_regs and len(hex_regs) >= pt.register_count:
+                raw_from_hex = decode_value(hex_regs[: pt.register_count], data_type, byte_order, pt.string_length)
+                scaled_from_hex = scale_value(raw_from_hex, pt)
+                if isinstance(scaled_from_hex, (int, float)) and isinstance(pt.value, (int, float)) and not isinstance(pt.value, bool):
+                    if abs(float(scaled_from_hex) - float(pt.value)) <= 1e-5:
+                        raw_value = raw_from_hex
+                        scaled_value = scaled_from_hex
+                        matched_from_hex = True
+
+            if not matched_from_hex:
+                regs = encode_value(pt.value, data_type, byte_order, pt.string_length)
+                raw_value = decode_value(regs, data_type, byte_order, pt.string_length)
+                scaled_value = scale_value(raw_value, pt)
         except Exception:
-            # 值与类型不匹配的坏点位：退回"存的就是换算值"的兜底口径。
-            # 用 point_value.scale_value 而非裸乘：scale 损坏（None/字符串）
-            # 或值非数值时不会抛 TypeError，安全原样返回。
             raw_value = pt.value
             scaled_value = scale_value(pt.value, pt)
         rows.append((key, raw_value, scaled_value))

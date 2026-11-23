@@ -6,6 +6,7 @@
 
 import json
 import logging
+import math
 import os
 import sqlite3
 import sys
@@ -354,8 +355,17 @@ class HemsAppModel:
             try:
                 raw_scale = p.get("Scale Factor", 1.0)
                 scale = float(raw_scale) if raw_scale not in (None, "") else 1.0
+                if not math.isfinite(scale) or scale == 0.0:
+                    scale = 1.0
             except (ValueError, TypeError):
                 scale = 1.0
+            try:
+                raw_offset = p.get("Offset", 0.0)
+                offset = float(raw_offset) if raw_offset not in (None, "") else 0.0
+                if not math.isfinite(offset):
+                    offset = 0.0
+            except (ValueError, TypeError):
+                offset = 0.0
             unit = str(p.get("Unit") or p.get("Engineering Unit") or "").strip()
 
             # 为什么先把 Function Code 统一归一化为整数且在存在时严格尊重库值：
@@ -455,6 +465,7 @@ class HemsAppModel:
                 "data_type": dtype,
                 "byte_order": order,
                 "scale": scale,
+                "offset": offset,
                 "current_val": current_val,
                 "sim_mode": "随机波动" if dtype in (ModbusDataType.FLOAT32, ModbusDataType.INT16, ModbusDataType.UINT16) else "固定",
             })
@@ -714,6 +725,8 @@ class HemsDatabase:
                 hems_fmt = self._to_hems_transfer_format(p.get("data_type"), p.get("byte_order"))
                 scale_raw = p.get("scale", 1)
                 scale_str = "1" if scale_raw is None else str(scale_raw)
+                offset_raw = p.get("offset", 0)
+                offset_str = "0" if offset_raw is None else str(offset_raw)
                 bo_raw = p.get("byte_order")
                 bo_str = bo_raw.value if hasattr(bo_raw, "value") else (str(bo_raw) if bo_raw is not None else "ABCD")
 
@@ -724,6 +737,7 @@ class HemsDatabase:
                     "Register Start Address": addr_key,
                     "Variable Transfer Format": hems_fmt,
                     "Scale Factor": scale_str,
+                    "Offset": offset_str,
                     "Byte Order": bo_str,
                 })
                 if "unit" in p:

@@ -500,7 +500,8 @@ class ModbusPoint:
     raw_hex: str = "0x0000"
     string_length: int = 16    # 当为 STRING 类型时指定的字符长度
     field_name: str = ""       # 业务数据库绑定的英文标识符
-    scale: float = 1.0         # 缩放比例
+    scale: float = 1.0         # 缩放比例 (Scale Factor)
+    offset: float = 0.0        # 偏移量 (Offset)，正向公式 eng = raw * scale + offset
     unit: str = ""             # 工程单位
 
     @property
@@ -534,9 +535,10 @@ class ModbusPoint:
             "sim_rule": self.sim_rule,
             "raw_hex": self.raw_hex,
             "string_length": self.string_length,
-            # 现场 HEMS 数据库关联元数据（变量名、缩放倍率、单位）
+            # 现场 HEMS 数据库关联元数据（变量名、缩放倍率、偏移量、单位）
             "field_name": self.field_name,
             "scale": self.scale,
+            "offset": self.offset,
             "unit": self.unit,
         }
 
@@ -546,6 +548,9 @@ class ModbusPoint:
         参数：cls（ModbusPoint 类）、d（点位配置字典）。返回：ModbusPoint 实例。
         步骤：1.转换地址与描述；2.调用 AreaType/DataType/ByteOrder/SimRule 的 normalize 方法；3.返回实例。副作用：无。
         """
+        parsed_scale = _parse_float(d.get("scale", 1.0), default=1.0)
+        if parsed_scale == 0.0:
+            parsed_scale = 1.0
         # 使用各枚举类的 normalize 方法，兼容不同版本导出的 JSON 点表文件格式
         return cls(
             # 强转起始地址与描述文案（对脏字段做安全回退，避免单个坏字段导致整点位被丢弃）
@@ -562,7 +567,8 @@ class ModbusPoint:
             # 还原字符串长度与 HEMS 业务扩展属性
             string_length=_parse_int(d.get("string_length", 16), default=16, min_val=1),
             field_name=str(d.get("field_name") or ""),
-            scale=_parse_float(d.get("scale", 1.0), default=1.0),
+            scale=parsed_scale,
+            offset=_parse_float(d.get("offset", 0.0), default=0.0),
             unit=str(d.get("unit") or ""),
         )
 

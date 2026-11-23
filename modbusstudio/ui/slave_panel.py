@@ -317,6 +317,16 @@ class SlavePanel(ttk.Frame):
         self.entry_pt_val.insert(0, "0")
         self.entry_pt_val.pack(side="left", padx=2)
 
+        ttk.Label(row_pt, text="系数:").pack(side="left")
+        self.entry_pt_scale = ttk.Entry(row_pt, width=5)
+        self.entry_pt_scale.insert(0, "1")
+        self.entry_pt_scale.pack(side="left", padx=2)
+
+        ttk.Label(row_pt, text="偏移:").pack(side="left")
+        self.entry_pt_offset = ttk.Entry(row_pt, width=5)
+        self.entry_pt_offset.insert(0, "0")
+        self.entry_pt_offset.pack(side="left", padx=2)
+
         ttk.Label(row_pt, text="模拟:").pack(side="left")
         self.combo_pt_sim = ttk.Combobox(row_pt, state="readonly", width=7, values=self.SIM_RULE_CHOICES)
         self.combo_pt_sim.set("固定")
@@ -383,6 +393,24 @@ class SlavePanel(ttk.Frame):
         btn_apply_val = ttk.Button(b_row1, text="批量修改数值", style="warning.TButton", command=self._apply_batch_value)
         btn_apply_val.pack(side="left", padx=2)
 
+        # 批量操作第 3 行：系数与偏移量（与 HEMS 数据库 Scale Factor / Offset 一一对应）
+        b_row2 = ttk.Frame(batch_box)
+        b_row2.pack(fill="x", padx=2, pady=1)
+
+        ttk.Label(b_row2, text="统一系数:").pack(side="left", padx=(2, 1))
+        self.entry_batch_scale = ttk.Entry(b_row2, width=7)
+        self.entry_batch_scale.insert(0, "1")
+        self.entry_batch_scale.pack(side="left", padx=1)
+        btn_apply_scale = ttk.Button(b_row2, text="批量修改系数", style="secondary.TButton", command=self._apply_batch_scale)
+        btn_apply_scale.pack(side="left", padx=2)
+
+        ttk.Label(b_row2, text="统一偏移:").pack(side="left", padx=(6, 1))
+        self.entry_batch_offset = ttk.Entry(b_row2, width=7)
+        self.entry_batch_offset.insert(0, "0")
+        self.entry_batch_offset.pack(side="left", padx=1)
+        btn_apply_offset = ttk.Button(b_row2, text="批量修改偏移", style="secondary.TButton", command=self._apply_batch_offset)
+        btn_apply_offset.pack(side="left", padx=2)
+
         # 4. 点表表格区域
         table_frame = ttk.Frame(self)
         table_frame.pack(fill="both", expand=True, padx=2, pady=2)
@@ -392,7 +420,7 @@ class SlavePanel(ttk.Frame):
         self.tree_scroll_x = ttk.Scrollbar(table_frame, orient="horizontal")
         self.tree_scroll_x.pack(side="bottom", fill="x")
 
-        self.columns = ("addr", "desc", "area", "type", "order", "val", "raw_hex", "sim", "reg_cnt")
+        self.columns = ("addr", "desc", "area", "type", "order", "scale", "offset", "val", "raw_hex", "sim", "reg_cnt")
         self.tree = ttk.Treeview(
             table_frame,
             columns=self.columns,
@@ -407,15 +435,17 @@ class SlavePanel(ttk.Frame):
 
         # 列配置：(列ID, 表头标题, 宽度占比, 最小像素宽度, 对齐方式)
         self._table_col_configs = [
-            ("addr", "起始地址", 0.08, 80, "center"),
-            ("desc", "点位描述 / 业务字段", 0.28, 220, "w"),
-            ("area", "存储区域", 0.12, 115, "center"),
-            ("type", "数据类型", 0.09, 85, "center"),
-            ("order", "变位模式", 0.08, 75, "center"),
-            ("val", "当前解析数值", 0.11, 100, "center"),
-            ("raw_hex", "原始寄存器(Hex)", 0.12, 120, "center"),
-            ("sim", "动态模拟", 0.07, 80, "center"),
-            ("reg_cnt", "占用字数", 0.05, 60, "center"),
+            ("addr", "起始地址", 0.07, 72, "center"),
+            ("desc", "点位描述 / 业务字段", 0.22, 180, "w"),
+            ("area", "存储区域", 0.11, 108, "center"),
+            ("type", "数据类型", 0.08, 80, "center"),
+            ("order", "变位模式", 0.07, 68, "center"),
+            ("scale", "系数", 0.06, 58, "center"),
+            ("offset", "偏移量", 0.06, 62, "center"),
+            ("val", "当前解析数值", 0.11, 95, "center"),
+            ("raw_hex", "原始寄存器(Hex)", 0.11, 115, "center"),
+            ("sim", "动态模拟", 0.06, 72, "center"),
+            ("reg_cnt", "占用字数", 0.05, 56, "center"),
         ]
         for col_id, heading, ratio, min_w, align in self._table_col_configs:
             head_align = align if col_id == "desc" else "center"
@@ -590,6 +620,8 @@ class SlavePanel(ttk.Frame):
 
         sorted_points = sorted(device.points.values(), key=lambda p: (p.address, p.area.value))
         for p in sorted_points:
+            scale_disp = f"{getattr(p, 'scale', 1.0):g}"
+            offset_disp = f"{getattr(p, 'offset', 0.0):g}"
             self.tree.insert(
                 "",
                 "end",
@@ -599,6 +631,8 @@ class SlavePanel(ttk.Frame):
                     p.area.friendly_name,
                     p.data_type.value,
                     p.byte_order.value,
+                    scale_disp,
+                    offset_disp,
                     p.value,
                     p.raw_hex,
                     p.sim_rule,
@@ -608,9 +642,6 @@ class SlavePanel(ttk.Frame):
 
     def _start_runtime_sync_loop(self) -> None:
         """主线程定时循环（1s 周期）：将运行中从机的动态波形模拟数值（`val` 与 `raw_hex` 列）原位刷新到表格界面。"""
-        # 设计说明（为什么使用 `self.tree.set` 局部更新单元格，而不是调用 `_refresh_tree` 全表重建）：
-        # 全表删除再重新插入数百行点位不仅消耗大量 CPU，还会丢失用户当前在表格中的滚动条位置与选中高亮状态。
-        # 因此本方法仅筛选 `sim_rule != "固定"` 的行，原位更新 `val` 和 `raw_hex` 两个单元格。
         try:
             if self._current_device_id and hasattr(self, "tree") and self.tree.winfo_exists():
                 device = self.app.slave_service.get_device(self._current_device_id)
@@ -618,11 +649,11 @@ class SlavePanel(ttk.Frame):
                     # 差异刷新所有行：既同步动态仿真点位，也实时展示外部主站写入的“固定”点位，值未变时不触发重绘
                     for row_id in self.tree.get_children():
                         vals = self.tree.item(row_id, "values")
-                        if vals and len(vals) >= 8:
+                        if vals and len(vals) >= 11:
                             addr = int(vals[0])
                             area_name = vals[2]
                             p = device.get_point(area_name, addr)
-                            if p and (str(vals[5]) != str(p.value) or str(vals[6]) != str(p.raw_hex)):
+                            if p and (str(vals[7]) != str(p.value) or str(vals[8]) != str(p.raw_hex)):
                                 self.tree.set(row_id, "val", p.value)
                                 self.tree.set(row_id, "raw_hex", p.raw_hex)
         except Exception:
@@ -656,6 +687,20 @@ class SlavePanel(ttk.Frame):
         bo_str = self.combo_pt_order.get()
         val_str = self.entry_pt_val.get()
         sim_str = self.combo_pt_sim.get()
+        scale_str = self.entry_pt_scale.get().strip() if hasattr(self, "entry_pt_scale") else "1"
+        offset_str = self.entry_pt_offset.get().strip() if hasattr(self, "entry_pt_offset") else "0"
+
+        try:
+            import math
+            scale_val = float(scale_str or "1")
+            if not math.isfinite(scale_val) or scale_val == 0.0:
+                raise ValueError("系数必须为非零有限数字")
+            offset_val = float(offset_str or "0")
+            if not math.isfinite(offset_val):
+                raise ValueError("偏移量必须为有限数字")
+        except Exception as ex:
+            messagebox.showerror("添加失败", f"系数或偏移量格式有误: {ex}")
+            return
 
         # 2. 统一交给业务模块 PointService 校验与构建模型
         ok, point, err = PointService.validate_and_build_point(
@@ -666,6 +711,8 @@ class SlavePanel(ttk.Frame):
             byte_order=bo_str,
             val_input=val_str,
             sim_rule=sim_str,
+            scale=scale_val,
+            offset=offset_val,
         )
         if not ok or not point:
             messagebox.showerror("添加失败", f"参数错误: {err}")
@@ -956,6 +1003,32 @@ class SlavePanel(ttk.Frame):
         val = self.entry_batch_val.get()
         self._apply_batch_point_property("value", val)
 
+    def _apply_batch_scale(self) -> None:
+        """将输入框中的缩放系数批量应用到目标范围内的数值型点位并按新系数重算寄存器。"""
+        import math
+        raw = self.entry_batch_scale.get().strip()
+        try:
+            s_val = float(raw)
+            if not math.isfinite(s_val) or s_val == 0.0:
+                raise ValueError("系数必须为非零有限数字")
+        except Exception as ex:
+            messagebox.showerror("参数错误", f"无效的系数输入: {ex}")
+            return
+        self._apply_batch_point_property("scale", s_val)
+
+    def _apply_batch_offset(self) -> None:
+        """将输入框中的偏移量批量应用到目标范围内的数值型点位并按新偏移重算寄存器。"""
+        import math
+        raw = self.entry_batch_offset.get().strip()
+        try:
+            o_val = float(raw)
+            if not math.isfinite(o_val):
+                raise ValueError("偏移量必须为有限数字")
+        except Exception as ex:
+            messagebox.showerror("参数错误", f"无效的偏移量输入: {ex}")
+            return
+        self._apply_batch_point_property("offset", o_val)
+
     def _apply_batch_point_property(self, prop_name: str, prop_val: Any) -> None:
         """通用批量属性修改器：支持“仅当前从机（若选中行则仅限选中行）”或“全部从机服务”两级作用范围。"""
         # 参数：
@@ -1004,6 +1077,7 @@ class SlavePanel(ttk.Frame):
                         string_length=point.string_length,
                         field_name=point.field_name,
                         scale=point.scale,
+                        offset=point.offset,
                         unit=point.unit,
                     )
                     if ok and new_pt:
@@ -1035,9 +1109,39 @@ class SlavePanel(ttk.Frame):
                         string_length=point.string_length,
                         field_name=point.field_name,
                         scale=point.scale,
+                        offset=point.offset,
                         unit=point.unit,
                     )
                     if ok and new_pt:
+                        point.value = new_pt.value
+                        point.raw_hex = new_pt.raw_hex
+                    else:
+                        skipped += 1
+                        continue
+                elif prop_name in ("scale", "offset"):
+                    from ..modbus_codec import is_numeric_codec_type
+                    if not is_numeric_codec_type(point.data_type.value):
+                        skipped += 1
+                        continue
+                    new_scale = float(prop_val) if prop_name == "scale" else point.scale
+                    new_offset = float(prop_val) if prop_name == "offset" else point.offset
+                    ok, new_pt, _ = PointService.validate_and_build_point(
+                        point.address,
+                        point.description,
+                        point.area,
+                        point.data_type,
+                        point.byte_order,
+                        point.value,
+                        point.sim_rule,
+                        string_length=point.string_length,
+                        field_name=point.field_name,
+                        scale=new_scale,
+                        offset=new_offset,
+                        unit=point.unit,
+                    )
+                    if ok and new_pt:
+                        point.scale = new_pt.scale
+                        point.offset = new_pt.offset
                         point.value = new_pt.value
                         point.raw_hex = new_pt.raw_hex
                     else:
@@ -1053,13 +1157,14 @@ class SlavePanel(ttk.Frame):
                 self._refresh_tree(dev)
         save_session_state(self.app)
         if skipped > 0:
-            messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性，跳过 {skipped} 个校验失败或目标地址冲突的点位")
+            messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性，跳过 {skipped} 个校验失败/非数值或目标地址冲突的点位")
         else:
             messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性")
 
     def _on_tree_double_click(self, event=None) -> None:
         """
-        响应点表 Treeview 双击事件：弹出输入框允许用户即时修改双击行的工程数值，校验通过后同步至底层寄存器。
+        响应点表 Treeview 双击事件：双击“系数”列改系数、双击“偏移量”列改偏移量、双击其他列改目标工程数值，
+        校验通过后按公式反算原始寄存器并同步至底层运行引擎。
         """
         if event is None:
             return
@@ -1070,16 +1175,80 @@ class SlavePanel(ttk.Frame):
         if not vals:
             return
 
-        addr, desc, area, dt, bo, cur_val = int(vals[0]), vals[1], vals[2], vals[3], vals[4], vals[5]
-        new_val = simpledialog.askstring("修改点位数值", f"修改点位 [地址:{addr} ({desc})]\n当前值: {cur_val}\n请输入新数值:", initialvalue=str(cur_val))
-        if new_val is None:
-            return
-
+        addr, desc, area = int(vals[0]), vals[1], vals[2]
         device = self.app.slave_service.get_device(self._current_device_id)
         if not device:
             return
         point = device.get_point(area, addr)
         if not point:
+            return
+
+        col_token = ""
+        if hasattr(event, "x"):
+            try:
+                col_token = self.tree.identify_column(event.x)
+            except Exception:
+                col_token = ""
+
+        # 列索引：#6=scale(系数), #7=offset(偏移量), 其余列默认修改目标工程数值
+        if col_token in ("#6", "#7"):
+            from ..modbus_codec import is_numeric_codec_type
+            if not is_numeric_codec_type(point.data_type.value):
+                messagebox.showinfo("提示", f"{point.data_type.value} 类型点位不参与系数与偏移量换算")
+                return
+            is_scale_col = (col_token == "#6")
+            label = "系数 (Scale Factor)" if is_scale_col else "偏移量 (Offset)"
+            cur_param = point.scale if is_scale_col else point.offset
+            raw_input = simpledialog.askstring(
+                f"修改{label}",
+                f"修改点位 [地址:{addr} ({desc})]\n当前{label}: {cur_param:g}\n请输入新{label}:",
+                initialvalue=f"{cur_param:g}",
+            )
+            if raw_input is None:
+                return
+            try:
+                import math
+                parsed_num = float(raw_input.strip())
+                if not math.isfinite(parsed_num) or (is_scale_col and parsed_num == 0.0):
+                    raise ValueError("系数必须为非零有限数字" if is_scale_col else "偏移量必须为有限数字")
+            except Exception as ex:
+                messagebox.showerror("修改失败", f"{label}格式有误: {ex}")
+                return
+            new_scale = parsed_num if is_scale_col else point.scale
+            new_offset = parsed_num if not is_scale_col else point.offset
+            ok, updated_pt, err = PointService.validate_and_build_point(
+                addr,
+                desc,
+                point.area,
+                point.data_type,
+                point.byte_order,
+                point.value,
+                point.sim_rule,
+                string_length=point.string_length,
+                field_name=point.field_name,
+                scale=new_scale,
+                offset=new_offset,
+                unit=point.unit,
+            )
+            if not ok or not updated_pt:
+                messagebox.showerror("修改失败", err)
+                return
+            point.scale = updated_pt.scale
+            point.offset = updated_pt.offset
+            point.value = updated_pt.value
+            point.raw_hex = updated_pt.raw_hex
+            self.app.slave_service.sync_point_to_runtime(device.id, point)
+            self._refresh_tree(device)
+            save_session_state(self.app)
+            return
+
+        cur_val = point.value
+        new_val = simpledialog.askstring(
+            "修改点位数值",
+            f"修改点位 [地址:{addr} ({desc})]\n当前值: {cur_val} (系数:{point.scale:g}, 偏移:{point.offset:g})\n请输入新数值:",
+            initialvalue=str(cur_val),
+        )
+        if new_val is None:
             return
 
         ok, updated_pt, err = PointService.validate_and_build_point(
@@ -1093,6 +1262,7 @@ class SlavePanel(ttk.Frame):
             string_length=point.string_length,
             field_name=point.field_name,
             scale=point.scale,
+            offset=point.offset,
             unit=point.unit,
         )
         if not ok or not updated_pt:
@@ -1133,7 +1303,7 @@ class SlavePanel(ttk.Frame):
 
         dlg = tk.Toplevel(self)
         dlg.title("批量输入规则生成点表")
-        dlg.geometry("450x380")
+        dlg.geometry("450x450")
         dlg.transient(self.winfo_toplevel())
         dlg.grab_set()
 
@@ -1171,20 +1341,37 @@ class SlavePanel(ttk.Frame):
         c_sim.set("随机波动")
         c_sim.grid(row=5, column=1, sticky="w", pady=4)
 
+        ttk.Label(f, text="缩放系数:").grid(row=6, column=0, sticky="w", pady=4)
+        e_scale = ttk.Entry(f, width=12)
+        e_scale.insert(0, "1")
+        e_scale.grid(row=6, column=1, sticky="w", pady=4)
+
+        ttk.Label(f, text="偏移量:").grid(row=7, column=0, sticky="w", pady=4)
+        e_offset = ttk.Entry(f, width=12)
+        e_offset.insert(0, "0")
+        e_offset.grid(row=7, column=1, sticky="w", pady=4)
+
         def do_generate():
-            """根据向导输入的起始地址、数量与数据类型步长，批量构建点位并同步到当前从机。"""
+            """根据向导输入的起始地址、数量、系数与偏移量，批量构建点位并同步到当前从机。"""
             if not self._current_device_id:
                 return
             device = self.app.slave_service.get_device(self._current_device_id)
             if not device:
                 return
             try:
+                import math
                 start_a = int(e_addr.get().strip())
                 count = int(e_cnt.get().strip())
                 area = c_area.get()
                 dt = self.normalize_data_type_choice(c_type.get())
                 bo = c_order.get()
                 sim = c_sim.get()
+                scale_v = float(e_scale.get().strip() or "1")
+                if not math.isfinite(scale_v) or scale_v == 0.0:
+                    raise ValueError("缩放系数必须为非零有限数字")
+                offset_v = float(e_offset.get().strip() or "0")
+                if not math.isfinite(offset_v):
+                    raise ValueError("偏移量必须为有限数字")
             except Exception as ex:
                 messagebox.showerror("错误", f"输入格式有误: {ex}", parent=dlg)
                 return
@@ -1206,7 +1393,9 @@ class SlavePanel(ttk.Frame):
             created_cnt = 0
             for i in range(count):
                 desc = f"AutoPoint_{cur_a}"
-                ok, pt, _ = PointService.validate_and_build_point(cur_a, desc, area, dt, bo, i + 1, sim)
+                ok, pt, _ = PointService.validate_and_build_point(
+                    cur_a, desc, area, dt, bo, i + 1, sim, scale=scale_v, offset=offset_v
+                )
                 if ok and pt:
                     device.add_point(pt)
                     self.app.slave_service.sync_point_to_runtime(device.id, pt)

@@ -150,6 +150,132 @@ def parse_bool_value(val: Any) -> bool:
         return False
 
 
+# 参与系数与偏移量换算的数值型数据类型集合（BOOL/STRING/HEX/BINARY 不参与）
+_NUMERIC_CODEC_TYPES = frozenset({
+    ModbusDataType.INT16,
+    ModbusDataType.UINT16,
+    ModbusDataType.INT32,
+    ModbusDataType.UINT32,
+    ModbusDataType.INT64,
+    ModbusDataType.UINT64,
+    ModbusDataType.FLOAT32,
+    ModbusDataType.DOUBLE64,
+})
+
+_INT_CODEC_TYPES = frozenset({
+    ModbusDataType.INT16,
+    ModbusDataType.UINT16,
+    ModbusDataType.INT32,
+    ModbusDataType.UINT32,
+    ModbusDataType.INT64,
+    ModbusDataType.UINT64,
+})
+
+
+def _resolve_codec_data_type(data_type: Any) -> Optional[ModbusDataType]:
+    """将领域层 DataType 或字符串归一化为 ModbusDataType（兼容 FLOAT64 -> DOUBLE64）。"""
+    if isinstance(data_type, ModbusDataType):
+        return data_type
+    raw_s = str(data_type.value if hasattr(data_type, "value") else data_type).strip().upper()
+    if "." in raw_s:
+        raw_s = raw_s.split(".")[-1]
+    if raw_s == "FLOAT64":
+        return ModbusDataType.DOUBLE64
+    try:
+        return ModbusDataType(raw_s)
+    except Exception:
+        return None
+
+
+def is_numeric_codec_type(data_type: Any) -> bool:
+    """判断给定数据类型是否属于参与系数/偏移量换算的数值型。"""
+    dt = _resolve_codec_data_type(data_type)
+    return dt in _NUMERIC_CODEC_TYPES
+
+
+def normalize_scale_offset(scale: Any = 1.0, offset: Any = 0.0) -> Tuple[float, float]:
+    """归一化系数与偏移量：scale 为 0/非数字/NaN/Inf 时兜底 1.0，offset 非法时兜底 0.0。"""
+    s = 1.0
+    if scale is not None and not isinstance(scale, bool):
+        try:
+            cand = float(str(scale).strip())
+            if math.isfinite(cand) and cand != 0.0:
+                s = cand
+        except (ValueError, TypeError):
+            pass
+
+    o = 0.0
+    if offset is not None and not isinstance(offset, bool):
+        try:
+            cand_o = float(str(offset).strip())
+            if math.isfinite(cand_o):
+                o = cand_o
+        except (ValueError, TypeError):
+            pass
+    return s, o
+
+
+def eng_to_raw(eng_val: Any, data_type: Any, scale: Any = 1.0, offset: Any = 0.0) -> Any:
+    """将目标工程源数据按公式 raw = (eng - offset) / scale 反算为底层寄存器数值并按类型取整钳位。"""
+    dt = _resolve_codec_data_type(data_type)
+    if dt is None or dt not in _NUMERIC_CODEC_TYPES:
+        return eng_val
+
+    s, o = normalize_scale_offset(scale, offset)
+    # 恒等换算快速路径：避免将 64 位大整数经 float 中转损失精度
+    if s == 1.0 and o == 0.0:
+        return clamp_value_to_type(eng_val, dt)
+
+    try:
+        eng_f = float(eng_val)
+    except (ValueError, TypeError):
+        return clamp_value_to_type(0, dt)
+
+    if math.isnan(eng_f):
+        return clamp_value_to_type(0, dt)
+
+    raw_f = (eng_f - o) / s
+    if not math.isfinite(raw_f):
+        limits = TYPE_RANGES.get(dt)
+        if limits:
+            return limits[1] if raw_f > 0 else limits[0]
+        return 0
+
+    if dt in _INT_CODEC_TYPES:
+        return clamp_value_to_type(int(round(raw_f)), dt)
+    return clamp_value_to_type(raw_f, dt)
+
+
+def raw_to_eng(raw_val: Any, data_type: Any, scale: Any = 1.0, offset: Any = 0.0) -> Any:
+    """将底层寄存器解算出的原始数值按公式 eng = raw * scale + offset 正向换算为工程源数据。"""
+    if raw_val == "NaN":
+        return raw_val
+    dt = _resolve_codec_data_type(data_type)
+    if dt is None or dt not in _NUMERIC_CODEC_TYPES:
+        return raw_val
+
+    s, o = normalize_scale_offset(scale, offset)
+    if s == 1.0 and o == 0.0:
+        return raw_val
+
+    try:
+        raw_f = float(raw_val)
+    except (ValueError, TypeError):
+        return raw_val
+
+    if math.isnan(raw_f):
+        return "NaN"
+    eng_f = raw_f * s + o
+    if not math.isfinite(eng_f):
+        return eng_f
+    digits = 8 if dt == ModbusDataType.DOUBLE64 else 6
+    rounded = round(eng_f, digits)
+    # 消除 -0.0 视觉噪音
+    if rounded == 0.0:
+        return 0.0
+    return rounded
+
+
 def clamp_value_to_type(val: Any, data_type: ModbusDataType) -> Any:
     """根据数据类型严格钳位合法数值范围，防止无符号整型下溢变成 65535 或有符号整型越界引发 struct.error。
     参数：val（待校验输入值 Any）、data_type（目标数据类型 ModbusDataType）。返回：Any，钳位后的安全值。

@@ -1,7 +1,7 @@
 ========================================================================
 Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 ========================================================================
-生成时间    : 2026-11-23T16:00:13.869634+08:00
+生成时间    : 2026-11-23T16:50:41.020070+08:00
 仓库根目录  : F:\GitHub\python
 记忆目录    : F:\GitHub\python\memory
 总体结论    : PASS (错误: 0, 警告: 9)
@@ -33,7 +33,7 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 ------------------------------------------------------------------------
 【JSON 完整载荷】
 {
-  "timestamp": "2026-11-23T16:00:13.869634+08:00",
+  "timestamp": "2026-11-23T16:50:41.020070+08:00",
   "repo_root": "F:\\GitHub\\python",
   "memory_dir": "F:\\GitHub\\python\\memory",
   "overall_status": "PASS",
@@ -102,15 +102,15 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
         "F:/GitHub/python-worktrees/task-1029-1423"
       ],
       "unmerged_conflicts": [],
-      "dirty_files_count": 5
+      "dirty_files_count": 10
     },
     "10_pytest_execution": {
       "status": "PASS",
       "command": "F:\\GitHub\\python\\.venv\\Scripts\\pytest.exe -q",
       "exit_code": 0,
       "passed": true,
-      "summary": "122 passed in 33.15s",
-      "stdout_tail": "........................................................................ [ 59%]\n..................................................                       [100%]\n122 passed in 33.15s",
+      "summary": "125 passed, 1 skipped in 73.37s (0:01:13)",
+      "stdout_tail": "..............................s......................................... [ 57%]\n......................................................                   [100%]\n125 passed, 1 skipped in 73.37s (0:01:13)",
       "stderr_tail": ""
     },
     "11_needs_human_review": {

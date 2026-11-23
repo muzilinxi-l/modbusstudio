@@ -1386,15 +1386,19 @@ class ModbusSlaveEngine:
         mode: Any = ByteOrderMode.ABCD,
         byte_order: Any = None,
         string_length: int = 16,
+        scale: float = 1.0,
+        offset: float = 0.0,
     ) -> None:
-        """将业务工程数值按指定数据类型（如 `FLOAT32`、`INT32`）和字节序（如 `ABCD`、`CDAB`）编码后写入本地数据块。"""
+        """将业务工程数值按系数/偏移量反算并依数据类型和字节序编码后写入本地数据块。"""
         actual_mode = byte_order if byte_order is not None else mode
         if _classify_area(area) in ("COIL", "DISCRETE"):
             from .modbus_codec import parse_bool_value
             b_val = parse_bool_value(value)
             self.write_raw_values(area, address, [1 if b_val else 0])
         else:
-            regs = encode_value(value, data_type, actual_mode, string_length=string_length)
+            from .modbus_codec import eng_to_raw
+            raw_val = eng_to_raw(value, data_type, scale, offset)
+            regs = encode_value(raw_val, data_type, actual_mode, string_length=string_length)
             self.write_raw_values(area, address, regs)
 
     def read_typed_value(
@@ -1474,13 +1478,19 @@ class ModbusSlaveEngine:
             if write_kind in ("COIL", "DISCRETE"):
                 raw_bits = self.read_raw_values(pt_area, pt_addr, 1)
                 new_val: Any = 1 if raw_bits and raw_bits[0] else 0
+                pt["raw_val"] = new_val
             else:
-                new_val = self.read_typed_value(pt_area, pt_addr, data_type, mode, string_length=str_len)
-                if data_type == ModbusDataType.HEX16 and isinstance(new_val, str):
+                from .modbus_codec import raw_to_eng
+                raw_decoded = self.read_typed_value(pt_area, pt_addr, data_type, mode, string_length=str_len)
+                if data_type == ModbusDataType.HEX16 and isinstance(raw_decoded, str):
                     try:
-                        new_val = int(new_val, 16) & 0xFFFF
+                        raw_decoded = int(raw_decoded, 16) & 0xFFFF
                     except Exception:
                         pass
+                pt["raw_val"] = raw_decoded
+                pt_scale = pt.get("scale", 1.0)
+                pt_offset = pt.get("offset", 0.0)
+                new_val = raw_to_eng(raw_decoded, data_type, pt_scale, pt_offset)
 
             pt["current_val"] = new_val
             if self.on_point_value_changed:
@@ -1582,9 +1592,19 @@ class ModbusSlaveEngine:
                                 pass
                         continue
 
-                    curr = clamp_value_to_type(curr, data_type)
                     if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
                         continue
+
+                    from .modbus_codec import eng_to_raw, normalize_scale_offset, raw_to_eng
+                    pt_scale, pt_offset = normalize_scale_offset(point.get("scale", 1.0), point.get("offset", 0.0))
+                    # 在底层原始寄存器数值空间演算波动：
+                    # 1) 无论 scale 多大或多小（如 0.01/10/100），每拍步进/波动都有效且绝不卡死或越界；
+                    # 2) 写出寄存器 new_raw 后，用同一公式 new_eng = new_raw * scale + offset 回算给界面，
+                    #    保证 ModbusStudio 展示数据与外部/一体机程序解析后的工程数据逐拍 100% 一致。
+                    if "raw_val" in point and point["raw_val"] is not None:
+                        curr = clamp_value_to_type(point["raw_val"], data_type)
+                    else:
+                        curr = eng_to_raw(curr, data_type, pt_scale, pt_offset)
 
                     limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
                     min_v, max_v, v_type = limits
@@ -1593,19 +1613,19 @@ class ModbusSlaveEngine:
                         if v_type is int:
                             wrap_limit = min(max_v, 10000)
                             # 回绕至 0（而非有符号最小负数 -9e18），保持正常工程步进循环
-                            new_val = (curr + 1) if curr < wrap_limit else 0
+                            new_raw = (curr + 1) if curr < wrap_limit else 0
                         else:
-                            new_val = round((curr + 0.5) % 1000.0, 2)
+                            new_raw = round((curr + 0.5) % 1000.0, 2)
 
                     elif sim_mode == "随机波动":
                         if v_type is int:
                             delta = random.choice([-2, -1, 0, 1, 2])
                             if min_v == 0 and curr <= 1:
                                 delta = random.choice([0, 1, 2, 3])
-                            new_val = int(max(min_v, min(max_v, curr + delta)))
+                            new_raw = int(max(min_v, min(max_v, curr + delta)))
                         else:
                             delta = random.uniform(-0.5, 0.5)
-                            new_val = round(max(min_v, min(max_v, curr + delta)), 2)
+                            new_raw = round(max(min_v, min(max_v, curr + delta)), 2)
 
                     elif sim_mode == "正弦波":
                         phase = (step * 0.25) + ((addr % 100) * 0.15)
@@ -1619,9 +1639,9 @@ class ModbusSlaveEngine:
                             calc_val = base + 30.0 * sin_factor
 
                         if v_type is int:
-                            new_val = int(max(min_v, min(max_v, round(calc_val))))
+                            new_raw = int(max(min_v, min(max_v, round(calc_val))))
                         else:
-                            new_val = round(max(min_v, min(max_v, calc_val)), 2)
+                            new_raw = round(max(min_v, min(max_v, calc_val)), 2)
 
                     elif sim_mode == "方波":
                         phase = (step + (addr % 10)) % 10
@@ -1629,19 +1649,22 @@ class ModbusSlaveEngine:
                         low_val = 0 if min_v == 0 else -50
                         val_out = high_val if phase >= 5 else low_val
                         if v_type is int:
-                            new_val = int(max(min_v, min(max_v, val_out)))
+                            new_raw = int(max(min_v, min(max_v, val_out)))
                         else:
-                            new_val = float(max(min_v, min(max_v, val_out)))
+                            new_raw = float(max(min_v, min(max_v, val_out)))
 
                     else:
-                        new_val = curr
+                        new_raw = curr
 
-                    point["current_val"] = new_val
-                    self.write_typed_value(area, addr, new_val, data_type, mode)
+                    # 将原始寄存器值直接写入底层 DataBlock，再正向换算为工程源数据回推模型与 UI
+                    self.write_typed_value(area, addr, new_raw, data_type, mode, scale=1.0, offset=0.0)
+                    new_eng = raw_to_eng(new_raw, data_type, pt_scale, pt_offset)
+                    point["raw_val"] = new_raw
+                    point["current_val"] = new_eng
 
                     if self.on_point_value_changed:
                         try:
-                            self.on_point_value_changed(area, addr, new_val)
+                            self.on_point_value_changed(area, addr, new_eng)
                         except Exception:
                             pass
             except Exception as ex:
