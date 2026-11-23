@@ -766,12 +766,8 @@ class DbImportDialog:
                 return
 
         created_devices: List[SlaveDevice] = []
-        # 在 [_import_as_new_instances] 中更新局部变量 [total_points_imported]：为后续协议编码、服务调度或界面渲染准备中间状态
         total_points_imported = 0
-        # 在 [_import_as_new_instances] 中更新局部变量 [existing_devices]：为后续协议编码、服务调度或界面渲染准备中间状态
         existing_devices = slave_svc.get_devices()
-        # 在 [_import_as_new_instances] 中更新局部变量 [next_unit]：为后续协议编码、服务调度或界面渲染准备中间状态
-        next_unit = len(existing_devices) + 1
         # [H2] 维护已占用的 TCP 端口集合（含已有从机与活跃 Hub 监听），从 502 起步探测避免撞车
         used_tcp_ports = set(slave_svc.get_occupied_tcp_ports())
 
@@ -948,18 +944,17 @@ class DbImportDialog:
 
         self.dlg.destroy()
 
-        # 在 [_import_as_new_instances] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
         if created_devices:
-            # 在 [_import_as_new_instances] 中更新局部变量 [last_dev]：为后续协议编码、服务调度或界面渲染准备中间状态
             last_dev = created_devices[-1]
             self.on_imported(last_dev)
 
-            # 在 [_import_as_new_instances] 中更新局部变量 [summary_msg]：为后续协议编码、服务调度或界面渲染准备中间状态
+            created_tcp = sum(1 for d in created_devices if d.conn_config.comm_type == CommType.TCP)
+            created_rtu = sum(1 for d in created_devices if d.conn_config.comm_type == CommType.RTU)
             summary_msg = (
                 f"批量导入成功完成！\n\n"
                 f"已一次性创建 {len(created_devices)} 个独立从机服务实例：\n"
-                f"- Modbus TCP 实例: {to_import_tcp} 个 (当前总数: {slave_svc.count_devices_by_comm(CommType.TCP)}/{MAX_TCP_SLAVE_INSTANCES})\n"
-                f"- Modbus RTU 实例: {to_import_rtu} 个 (当前总数: {slave_svc.count_devices_by_comm(CommType.RTU)}/{MAX_RTU_SLAVE_INSTANCES})\n"
+                f"- Modbus TCP 实例: {created_tcp} 个 (当前总数: {slave_svc.count_devices_by_comm(CommType.TCP)}/{MAX_TCP_SLAVE_INSTANCES})\n"
+                f"- Modbus RTU 实例: {created_rtu} 个 (当前总数: {slave_svc.count_devices_by_comm(CommType.RTU)}/{MAX_RTU_SLAVE_INSTANCES})\n"
                 f"- 累计成功装载点位: {total_points_imported} 个"
             )
             messagebox.showinfo("批量导入完成", summary_msg, parent=self.parent.winfo_toplevel())
@@ -1039,8 +1034,12 @@ class DbImportDialog:
             dt = pt.get("data_type", "INT16")
             # 在 [_load_single_point_to_device] 中更新局部变量 [bo]：为后续协议编码、服务调度或界面渲染准备中间状态
             bo = pt.get("byte_order", "CDAB")
-            # 在 [_load_single_point_to_device] 中更新局部变量 [area]：为后续协议编码、服务调度或界面渲染准备中间状态
-            area = pt.get("area", "4x")
+            default_area = (
+                self.combo_default_area.get()
+                if hasattr(self, "combo_default_area") and self.combo_default_area.get()
+                else "4x"
+            )
+            area = pt.get("area") or default_area
             # 在 [_load_single_point_to_device] 中更新局部变量 [val]：为后续协议编码、服务调度或界面渲染准备中间状态
             val = pt.get("current_val", 0)
             # 在 [_load_single_point_to_device] 中更新局部变量 [sim]：为后续协议编码、服务调度或界面渲染准备中间状态

@@ -197,15 +197,62 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.cloud_file:
         try:
             with open(args.cloud_file, "r", encoding="utf-8") as f:
-                cloud: Dict[str, Any] = json.load(f)
+                cloud_raw = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             print(f"[错误] 云端文件读取失败: {e}", file=sys.stderr)
             return 2
 
+        if not isinstance(cloud_raw, dict):
+            print("[错误] 云端文件顶层必须是 JSON 对象 ({point_key: 值})", file=sys.stderr)
+            return 2
+        cloud: Dict[str, Any] = cloud_raw
+
+        # 多从机同 point_key 防覆盖：若存在多台从机共享同名 point_key，
+        # 支持云端按 "slave_name|point_key" 精确区分，未带前缀时回退 plain point_key 且保留逐从机归属
+        multi_slave = len(slaves) > 1
+        key_counts: Dict[str, int] = {}
+        for _s, k, _raw, _sc in rows_all:
+            key_counts[k] = key_counts.get(k, 0) + 1
+        has_dup_key = multi_slave and any(c > 1 for c in key_counts.values())
+
+        if has_dup_key:
+            # 逐从机构建带归属的对账记录，避免 dict 键覆盖丢失早先从机信息
+            matched_cloud_keys = set()
+            multi_diff: List[Tuple[str, str, Any, Any, str]] = []
+            for s_name, k, _raw, scaled in rows_all:
+                prefixed = f"{s_name}|{k}"
+                if prefixed in cloud:
+                    matched_cloud_keys.add(prefixed)
+                    sub = diff_with_cloud([(prefixed, _raw, scaled)], {prefixed: cloud[prefixed]}, args.tolerance)
+                    _, loc, cl, st = sub[0]
+                    multi_diff.append((s_name, k, loc, cl, st))
+                elif k in cloud:
+                    matched_cloud_keys.add(k)
+                    sub = diff_with_cloud([(k, _raw, scaled)], {k: cloud[k]}, args.tolerance)
+                    _, loc, cl, st = sub[0]
+                    multi_diff.append((s_name, k, loc, cl, st))
+                else:
+                    multi_diff.append((s_name, k, scaled, None, "缺失"))
+            for ck, cval in cloud.items():
+                if ck not in matched_cloud_keys:
+                    multi_diff.append(("", ck, None, cval, "云端多"))
+
+            if args.json:
+                payload = [
+                    {"slave": s_name, "point_key": k, "local": loc, "cloud": cl, "status": st}
+                    for s_name, k, loc, cl, st in multi_diff
+                ]
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            else:
+                for s_name, k, loc, cl, st in multi_diff:
+                    prefix = f"[{s_name}] " if s_name else ""
+                    print(f"{prefix}{k}\t本地={loc}\t云端={cl}\t[{st}]")
+            fail = [r for r in multi_diff if r[4] != "OK"]
+            return 1 if fail else 0
+
         diff = diff_with_cloud(
             [(r[1], r[2], r[3]) for r in rows_all], cloud, args.tolerance)
         if args.json:
-            # P2 优化：预建 point_key -> slave_name 字典，避免逐行线性搜索导致 O(N*M)
             key_to_slave = {r[1]: r[0] for r in rows_all}
             payload = [
                 {"slave": key_to_slave.get(k, ""),

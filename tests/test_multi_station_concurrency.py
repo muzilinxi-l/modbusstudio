@@ -8,9 +8,17 @@
 - 全部从机停止后物理端口监听安全释放。
 """
 
+import socket
 import time
 import pytest
 from pymodbus.client import ModbusTcpClient
+
+
+def _pick_free_tcp_port() -> int:
+    """动态申请当前本机空闲 TCP 端口，避免硬编码端口与宿主进程撞车。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
 
 from modbusstudio.models import (
     AreaType,
@@ -24,11 +32,11 @@ from modbusstudio.services import LoggingService, PointService, SlaveService
 
 
 def test_same_port_three_slaves_concurrency_and_data_isolation():
-    """测试 127.0.0.1:5055 下并发运行 3 个从机 (UID=1, 2, 3) 且数据完全隔离"""
+    """测试同端口并发运行 3 个从机 (UID=1, 2, 3) 且数据完全隔离"""
     log_svc = LoggingService(log_dir="logs")
     slave_svc = SlaveService(log_svc)
 
-    test_port = 5055
+    test_port = _pick_free_tcp_port()
 
     # 1. 创建 3 个不同从机，配置相同 IP 和端口，不同 Unit ID
     dev1 = SlaveDevice(

@@ -26,7 +26,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import traceback
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger("SlavePanel")
 
@@ -106,8 +106,8 @@ class SlavePanel(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._current_device_id: Optional[str] = None
-        # [SLAVE-SPEED-4] 防止全部启动/全部停止重复点击并发重入的守卫标志
-        self._busy: Dict[str, bool] = {"start": False, "stop": False}
+        # [SLAVE-SPEED-4] 防止全部启动/全部停止/自动重连重复点击并发重入的守卫标志
+        self._busy: Dict[str, bool] = {"start": False, "stop": False, "reconnect": False}
 
         self._build_ui()
         self._load_initial_data()
@@ -915,14 +915,38 @@ class SlavePanel(ttk.Frame):
     # 方法实现 [_on_auto_reconnect]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
     # ──────────────────────────────────────────────────────────────────
     def _on_auto_reconnect(self) -> None:
-        """
-        响应“自动重连”按钮：调用 `SlaveService.auto_reconnect_if_needed()` 扫描并重建僵死的底层 listener，并在状态栏反馈结果。
-        """
-        # 在 [_on_auto_reconnect] 中更新局部变量 [n]：为后续协议编码、服务调度或界面渲染准备中间状态
-        n = self.app.slave_service.auto_reconnect_if_needed()
-        self.lbl_slave_status.config(
-            text=f"已重建 {n} 个僵死 listener" if n > 0 else "未检测到僵死 listener"
-        )
+        """响应“自动重连”按钮：在后台线程异步探活并重建僵死 listener，主线程轮询结果更新 UI（零跨线程 Tk 调用）。"""
+        if self._busy.get("reconnect"):
+            return
+        self._busy["reconnect"] = True
+        self.lbl_slave_status.config(text="● 正在检测并重建僵死 listener...", foreground="#ffc107")
+        result: Dict[str, Any] = {"done": False, "rebuilt": 0, "err": None}
+
+        def _worker() -> None:
+            try:
+                result["rebuilt"] = self.app.slave_service.auto_reconnect_if_needed()
+            except Exception as ex:
+                result["err"] = str(ex)
+            finally:
+                result["done"] = True
+
+        def _poll_result() -> None:
+            if not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                self._busy["reconnect"] = False
+                return
+            if not result["done"]:
+                self.after(30, _poll_result)
+                return
+            self._busy["reconnect"] = False
+            if result["err"]:
+                self.lbl_slave_status.config(text=f"● 自动重连异常: {result['err']}", foreground="#dc3545")
+            elif result["rebuilt"] > 0:
+                self.lbl_slave_status.config(text=f"● 已重建 {result['rebuilt']} 个僵死 listener", foreground="#28a745")
+            else:
+                self.lbl_slave_status.config(text="● 未检测到僵死 listener", foreground="#28a745")
+
+        threading.Thread(target=_worker, daemon=True).start()
+        self.after(30, _poll_result)
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_add_new_slave_instance]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -1117,51 +1141,62 @@ class SlavePanel(ttk.Frame):
 
         # 在 [_apply_batch_point_property] 中更新局部变量 [count]：为后续协议编码、服务调度或界面渲染准备中间状态
         count = 0
-        # 在 [_apply_batch_point_property] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
         for dev in target_devices:
-            # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
             if not dev:
                 continue
-            # 在 [_apply_batch_point_property] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
-            for point in dev.points.values():
-                # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
+            # 使用列表快照遍历：当批量切换为 BOOL 触发存储区迁移并重设 dev.points 主键时，避免迭代期改字典大小报错
+            for point in list(dev.points.values()):
                 if selected_addrs and (point.area.friendly_name, point.address) not in selected_addrs:
                     continue
 
-                # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if prop_name == "sim_rule":
-                    # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                     point.sim_rule = SimRule.normalize(prop_val)
-                # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 elif prop_name == "byte_order":
-                    # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                     point.byte_order = ByteOrder.normalize(prop_val)
                     PointService.re_encode_point(point)
-                # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 elif prop_name == "data_type":
+                    old_area = point.area
                     ok, new_pt, _ = PointService.validate_and_build_point(
-                        point.address, point.description, point.area, prop_val, point.byte_order, point.value, point.sim_rule
+                        point.address,
+                        point.description,
+                        point.area,
+                        prop_val,
+                        point.byte_order,
+                        point.value,
+                        point.sim_rule,
+                        string_length=point.string_length,
+                        field_name=point.field_name,
+                        scale=point.scale,
+                        unit=point.unit,
                     )
-                    # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if ok and new_pt:
-                        # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
+                        if new_pt.area != old_area:
+                            # 区域随类型自动对齐（如 4x -> 0x BOOL），同步迁移 dev.points 复合主键与运行中引擎旧键
+                            dev.remove_point(old_area, point.address)
+                            self.app.slave_service.remove_point_from_runtime(dev.id, old_area, point.address)
+                            point.area = new_pt.area
+                            dev.add_point(point)
                         point.data_type = new_pt.data_type
-                        # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                         point.value = new_pt.value
-                        # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                         point.raw_hex = new_pt.raw_hex
                     else:
                         continue
-                # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 elif prop_name == "value":
                     ok, new_pt, _ = PointService.validate_and_build_point(
-                        point.address, point.description, point.area, point.data_type, point.byte_order, prop_val, point.sim_rule
+                        point.address,
+                        point.description,
+                        point.area,
+                        point.data_type,
+                        point.byte_order,
+                        prop_val,
+                        point.sim_rule,
+                        string_length=point.string_length,
+                        field_name=point.field_name,
+                        scale=point.scale,
+                        unit=point.unit,
                     )
-                    # 在 [_apply_batch_point_property] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if ok and new_pt:
-                        # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                         point.value = new_pt.value
-                        # 在 [_apply_batch_point_property] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
                         point.raw_hex = new_pt.raw_hex
 
                 self.app.slave_service.sync_point_to_runtime(dev.id, point)

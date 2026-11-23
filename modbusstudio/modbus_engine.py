@@ -738,8 +738,8 @@ class ModbusTransportServer:
             # RTU 串口端点无法跨进程建立 TCP 回环自检，维持原有行为，不额外自检
             return True
         _, host, port = self.endpoint_key
-        # 回环自检：连接目标端点（非 127.0.0.1 时连 127.0.0.1，保证本地可测通）
-        probe_host = "127.0.0.1"
+        # 回环自检：0.0.0.0/通配绑定探 127.0.0.1，显式绑定具体本机网卡 IP 时探测该真实 IP
+        probe_host = "127.0.0.1" if str(host).strip() in ("0.0.0.0", "", "*") else str(host).strip()
         try:
             with socket.create_connection((probe_host, port), timeout=1.0):
                 reachable = True

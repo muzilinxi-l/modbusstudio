@@ -85,9 +85,15 @@ class MainWindow(ttk.Frame):
 
     def _init_window(self) -> None:
         """设置主窗口标题、初始几何尺寸 (1240x840)、最小缩放边界及窗口图标。"""
-        # 设定默认窗口大小 1240x840 与最小宽高 1020x640，防止小屏缩放时顶部工具栏按钮被挤压截断
+        # 若调用方（如 app.main）已计算屏幕居中尺寸则予以保留，仅在未初始化时设置默认 1240x840
         self.root.title("Modbus Studio - 业务配置与变位仿真调试工作站")
-        self.root.geometry("1240x840")
+        try:
+            self.root.update_idletasks()
+            curr_geom = self.root.geometry()
+            if not curr_geom or curr_geom.startswith("1x1"):
+                self.root.geometry("1240x840")
+        except Exception:
+            self.root.geometry("1240x840")
         self.root.minsize(1020, 640)
 
         # 锁定恢复专属图标，替换 Tkinter / ttkbootstrap 默认羽毛或水滴图标
@@ -410,6 +416,8 @@ class MainWindow(ttk.Frame):
         )
         self.log_text.pack(side="left", fill="both", expand=True)
         self.log_scroll.config(command=self.log_text.yview)
+        # 日志视窗保持只读，防止用户误敲键盘篡改报文记录（仍支持选中与复制）
+        self.log_text.config(state="disabled")
 
         # 配置四类日志方向颜色高亮标签：系统通知浅蓝、接收浅绿、发送浅黄、异常警告红色
         self.log_text.tag_config("SYS", foreground="#61afef")      # 浅蓝
@@ -462,17 +470,19 @@ class MainWindow(ttk.Frame):
                 except Exception:
                     pass
 
-                # 仅在勾选“自动滚屏”时将视口滚动到底部，方便用户取消勾选后静态悬停查看历史某帧报文
-                # 在 [_flush_log_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                 if self.auto_scroll_var.get():
                     self.log_text.see("end")
 
-                self.log_text.config(state="normal")
-        except Exception as e:
+                self.log_text.config(state="disabled")
+        except Exception:
             pass
         finally:
-            # 持续周期循环，保持 80ms 刷新率
-            self.root.after(80, self._flush_log_loop)
+            # 仅在窗口与组件仍然存活时续挂 80ms 定时循环，防止窗口销毁后抛 TclError
+            try:
+                if hasattr(self, "winfo_exists") and self.winfo_exists() and self.root.winfo_exists():
+                    self.root.after(80, self._flush_log_loop)
+            except Exception:
+                pass
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_copy_log]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -511,7 +521,9 @@ class MainWindow(ttk.Frame):
     # ──────────────────────────────────────────────────────────────────
     def _clear_log(self) -> None:
         """清空当前屏幕日志视窗中的显示内容（不影响磁盘已持久化的 CSV 日志文件）。"""
+        self.log_text.config(state="normal")
         self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
 
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_open_log_dir]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
@@ -564,19 +576,20 @@ class MainWindow(ttk.Frame):
                 # 在 [_export_log_to_csv] 中更新局部变量 [writer]：为后续协议编码、服务调度或界面渲染准备中间状态
                 writer = csv.writer(f)
                 writer.writerow(["时间戳", "方向", "日志明细"])
-                # 在 [_export_log_to_csv] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
                 for line in content.splitlines():
-                    # 在 [_export_log_to_csv] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if line.strip():
-                        # 在 [_export_log_to_csv] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                         if line.startswith("[") and "]" in line:
-                            # 在 [_export_log_to_csv] 中更新局部变量 [bracket_end]：为后续协议编码、服务调度或界面渲染准备中间状态
                             bracket_end = line.find("]")
-                            # 在 [_export_log_to_csv] 中更新局部变量 [ts]：为后续协议编码、服务调度或界面渲染准备中间状态
                             ts = line[1:bracket_end]
-                            # 在 [_export_log_to_csv] 中更新局部变量 [detail]：为后续协议编码、服务调度或界面渲染准备中间状态
-                            detail = line[bracket_end + 1:].strip()
-                            writer.writerow([ts, "", detail])
+                            rest = line[bracket_end + 1:].strip()
+                            direction = ""
+                            detail = rest
+                            # 提取第二个方括号中的日志方向（如 [系统] / [错误] / [RX] / [TX]）
+                            if rest.startswith("[") and "]" in rest:
+                                dir_end = rest.find("]")
+                                direction = rest[1:dir_end]
+                                detail = rest[dir_end + 1:].strip()
+                            writer.writerow([ts, direction, detail])
                         else:
                             writer.writerow(["", "", line])
 

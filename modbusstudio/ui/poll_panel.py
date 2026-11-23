@@ -29,6 +29,7 @@ from ..models import (
     DataType,
     PollResult,
     PollTask,
+    _parse_int,
     _parse_port,
 )
 from ..services import PollService
@@ -81,6 +82,14 @@ class PollPanel(ttk.Frame):
 
         self._build_ui()
         self._refresh_poll_com_ports()
+
+    def destroy(self) -> None:
+        """销毁面板前回收后台轮询执行线程池，避免残留工作线程。"""
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        super().destroy()
 
     def _build_ui(self) -> None:
         """构建顶部两行连接与指令配置栏，以及下部 7 列寄存器多格式实时解算表格。"""
@@ -319,27 +328,25 @@ class PollPanel(ttk.Frame):
             parity_val = "O"
         else:
             parity_val = "N"
-        # 从 [_get_connection_config] 返回执行结果给调用方，结束当前处理分支
         return ConnectionConfig(
             comm_type=CommType.from_str(self.poll_comm_type_var.get()),
             host=self.entry_ip.get().strip() or "127.0.0.1",
             port=_parse_port(self.entry_port.get(), default=502),
             com_port=self.combo_com.get().strip() or "COM1",
-            baudrate=int(self.combo_baud.get().strip() or "9600"),
-            data_bits=int(self.combo_databit.get().strip() or "8") if hasattr(self, "combo_databit") else 8,
+            baudrate=_parse_int(self.combo_baud.get(), default=9600, min_val=1),
+            data_bits=_parse_int(self.combo_databit.get(), default=8, min_val=5, max_val=8) if hasattr(self, "combo_databit") else 8,
             parity=parity_val,
-            stop_bits=int(self.combo_stopbit.get().strip() or "1") if hasattr(self, "combo_stopbit") else 1,
-            unit_id=int(self.entry_unit_id.get().strip() or "1"),
+            stop_bits=_parse_int(self.combo_stopbit.get(), default=1, min_val=1, max_val=2) if hasattr(self, "combo_stopbit") else 1,
+            unit_id=_parse_int(self.entry_unit_id.get(), default=1, min_val=1, max_val=247),
         )
 
-    # ──────────────────────────────────────────────────────────────────
-    # 方法实现 [_toggle_connect]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-    # ──────────────────────────────────────────────────────────────────
     def _toggle_connect(self) -> None:
-        """切换主机通信连接状态（未连接时提交后台线程池异步建连，已连接时立即断开）。"""
-        # 在 [_toggle_connect] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
+        """切换主机通信连接状态（未连接时提交后台线程池异步建连，已连接时立即断开并同步复位轮询按钮）。"""
         if self.app.poll_service.is_connected:
             self.app.poll_service.disconnect()
+            if self._is_polling_loop:
+                self._is_polling_loop = False
+                self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton", state="normal")
             self.lbl_conn_status.config(text="● 已断开", foreground="#dc3545")
             self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
         else:
@@ -508,47 +515,51 @@ class PollPanel(ttk.Frame):
             # ──────────────────────────────────────────────────────────────────
             def _on_success_from_worker(fresh_dict: Dict[int, int]):
                 """接收后台轮询线程返回的最新寄存器字典并派发到主线程渲染。"""
-                # ──────────────────────────────────────────────────────────────────
-                # 方法实现 [_ui_update]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-                # ──────────────────────────────────────────────────────────────────
                 def _ui_update():
-                    """在 Tkinter 主线程累加接收计数并刷新寄存器表格。"""
-                    # 在 [_toggle_poll_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if hasattr(self, "winfo_exists") and self.winfo_exists():
+                        self._tx_count += 1
                         self._rx_count += 1
                         self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
                         self._update_from_regs(fresh_dict, start_addr, count)
                 self.after(0, _ui_update)
 
-            # ──────────────────────────────────────────────────────────────────
-            # 方法实现 [_on_error_from_worker]（入参: err_msg）：封装该操作的输入校验、状态转换与异常兜底逻辑
-            # ──────────────────────────────────────────────────────────────────
             def _on_error_from_worker(err_msg: str):
                 """接收后台轮询线程的异常消息并派发到主线程写入日志。"""
-                # ──────────────────────────────────────────────────────────────────
-                # 方法实现 [_ui_error]（无额外入参）：封装该操作的输入校验、状态转换与异常兜底逻辑
-                # ──────────────────────────────────────────────────────────────────
                 def _ui_error():
-                    """在 Tkinter 主线程将轮询异常投递至日志服务。"""
-                    # 在 [_toggle_poll_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
                     if hasattr(self, "winfo_exists") and self.winfo_exists():
+                        self._tx_count += 1
+                        self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
                         self.app.logging_service.post("ERROR", cfg.unit_id, f"轮询异常: {err_msg}")
                 self.after(0, _ui_error)
 
-            ok, msg = self.app.poll_service.start_continuous_polling(
-                task=task,
-                interval_ms=interval_ms,
-                on_success=_on_success_from_worker,
-                on_error=_on_error_from_worker,
-            )
-            # 在 [_toggle_poll_loop] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
-            if ok:
-                # 在 [_toggle_poll_loop] 中更新局部变量 [状态变量]：为后续协议编码、服务调度或界面渲染准备中间状态
-                self._is_polling_loop = True
-                self.btn_poll_loop.config(text="⏹ 停止轮询", style="danger.TButton")
-            else:
-                self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
-                messagebox.showerror("启动失败", msg)
+            # 将可能触发 2s TCP/RTU 建连的启动过程放入后台线程池，避免阻塞 Tkinter 主线程
+            self.btn_poll_loop.config(state="disabled", text="⏳ 启动中...")
+
+            def _do_start_loop():
+                ok, msg = self.app.poll_service.start_continuous_polling(
+                    task=task,
+                    interval_ms=interval_ms,
+                    on_success=_on_success_from_worker,
+                    on_error=_on_error_from_worker,
+                )
+
+                def _on_started():
+                    if not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                        return
+                    self.btn_poll_loop.config(state="normal")
+                    if ok:
+                        self._is_polling_loop = True
+                        self.btn_poll_loop.config(text="⏹ 停止轮询", style="danger.TButton")
+                        self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
+                        self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
+                    else:
+                        self._is_polling_loop = False
+                        self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
+                        messagebox.showerror("启动失败", msg)
+
+                self.after(0, _on_started)
+
+            self._executor.submit(_do_start_loop)
 
     # [POLL-CONFIG] 适配从局部有效寄存器字典渲染表格
     # ──────────────────────────────────────────────────────────────────
@@ -572,44 +583,41 @@ class PollPanel(ttk.Frame):
     # 方法实现 [_render_registers_to_tree]（入参: regs, start）：封装该操作的输入校验、状态转换与异常兜底逻辑
     # ──────────────────────────────────────────────────────────────────
     def _render_registers_to_tree(self, regs: List[int], start: int) -> None:
-        """将原始 16 位寄存器数组同时解算为 Hex、UINT16、INT16 及双字 FLOAT32 并渲染到 Treeview。"""
+        """将原始 16 位寄存器数组解算为 Hex、UINT16、INT16 及双字 FLOAT32（响应顶部变位下拉框）并渲染到 Treeview。"""
         from ..modbus_codec import decode_value
 
-        # 先清空旧行再插入最新读取结果
-        # 在 [_render_registers_to_tree] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
+        # 让顶部“变位”下拉框真实生效：默认第 5 列保持 ABCD、第 6 列随用户选择的变位模式（CDAB/BADC/DCBA）切换
+        selected_order = ByteOrder.normalize(self.combo_order.get()).value if hasattr(self, "combo_order") else "CDAB"
+        second_order = "CDAB" if selected_order == "ABCD" else selected_order
+        try:
+            self.tree.heading("f32_cdab", text=f"FLOAT32 ({second_order})")
+        except Exception:
+            pass
+
         for itm in self.tree.get_children():
             self.tree.delete(itm)
 
-        # 在 [_render_registers_to_tree] 中遍历集合元素：逐项执行校验、转换或状态同步，确保批量数据处理的完整性
+        def _fmt_float32(pair_regs: List[int], order_str: str) -> str:
+            try:
+                val_f = decode_value(pair_regs, "FLOAT32", order_str)
+                if isinstance(val_f, (int, float)):
+                    return f"{val_f:.4f}"
+                return str(val_f)
+            except Exception:
+                return "-"
+
         for i, val in enumerate(regs):
-            # 在 [_render_registers_to_tree] 中更新局部变量 [addr]：为后续协议编码、服务调度或界面渲染准备中间状态
             addr = start + i
-            # 在 [_render_registers_to_tree] 中更新局部变量 [hex_str]：为后续协议编码、服务调度或界面渲染准备中间状态
             hex_str = f"0x{val:04X}"
-            # 在 [_render_registers_to_tree] 中更新局部变量 [u16]：为后续协议编码、服务调度或界面渲染准备中间状态
             u16 = val
-            # 二进制补码转换：若无符号值 > 32767，减去 65536 得到对应的有符号 16 位整数
-            # 在 [_render_registers_to_tree] 中更新局部变量 [i16]：为后续协议编码、服务调度或界面渲染准备中间状态
             i16 = val - 65536 if val > 32767 else val
 
-            # 为什么对相邻两个寄存器 (regs[i], regs[i+1]) 预解算 ABCD 与 CDAB 两种 FLOAT32：
-            # 32 位浮点数跨越 2 个连续寄存器，只要当前不是最后一个寄存器，就自动组合下一字预览两种主流字节序的浮点值。
-            # 在 [_render_registers_to_tree] 中更新局部变量 [f32_abcd]：为后续协议编码、服务调度或界面渲染准备中间状态
             f32_abcd = "-"
-            # 在 [_render_registers_to_tree] 中更新局部变量 [f32_cdab]：为后续协议编码、服务调度或界面渲染准备中间状态
-            f32_cdab = "-"
-            # 在 [_render_registers_to_tree] 中执行前置条件分支判断：根据当前运行状态或参数类型走对应处理路径，避免非法状态穿透
+            f32_second = "-"
             if i + 1 < len(regs):
-                # 在 [_render_registers_to_tree] 中更新局部变量 [pair]：为后续协议编码、服务调度或界面渲染准备中间状态
                 pair = [regs[i], regs[i + 1]]
-                # 在 [_render_registers_to_tree] 中开启异常防护块：捕获潜在的 I/O、网络、SQLite 或格式转换异常，保障主流程与 GUI 不崩溃
-                try:
-                    # 在 [_render_registers_to_tree] 中更新局部变量 [f32_abcd]：为后续协议编码、服务调度或界面渲染准备中间状态
-                    f32_abcd = f"{decode_value(pair, 'FLOAT32', 'ABCD'):.4f}"
-                    # 在 [_render_registers_to_tree] 中更新局部变量 [f32_cdab]：为后续协议编码、服务调度或界面渲染准备中间状态
-                    f32_cdab = f"{decode_value(pair, 'FLOAT32', 'CDAB'):.4f}"
-                except Exception:
-                    pass
+                f32_abcd = _fmt_float32(pair, "ABCD")
+                f32_second = _fmt_float32(pair, second_order)
 
-            self.tree.insert("", "end", values=(addr, hex_str, u16, i16, f32_abcd, f32_cdab, "OK (200)"))
+            self.tree.insert("", "end", values=(addr, hex_str, u16, i16, f32_abcd, f32_second, "OK (200)"))
 
