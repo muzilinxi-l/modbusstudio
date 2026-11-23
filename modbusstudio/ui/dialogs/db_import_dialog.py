@@ -390,10 +390,20 @@ class DbImportDialog:
     # ──────────────────────────────────────────────────────────────────
     # 方法实现 [_on_rtu_rule_user_edited]（入参: event）：记录用户已手动修改 RTU 规则控件
     # ──────────────────────────────────────────────────────────────────
+    _NON_EDIT_KEYSYMS = frozenset({
+        "Tab", "ISO_Left_Tab", "Shift_L", "Shift_R", "Control_L", "Control_R",
+        "Alt_L", "Alt_R", "Meta_L", "Meta_R", "Super_L", "Super_R",
+        "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
+        "Escape", "Return", "KP_Enter", "Caps_Lock", "Num_Lock", "Scroll_Lock",
+    })
+
     def _on_rtu_rule_user_edited(self, event=None) -> None:
-        """当用户在导入规则区手动修改串口、波特率、数据位、校验位或停止位时，标记覆盖标志位。"""
-        if not getattr(self, "_syncing_rtu_ui", False):
-            self._rtu_user_overridden = True
+        """当用户在导入规则区手动修改串口、波特率、数据位、校验位或停止位时，标记覆盖标志位（忽略焦点切换与导航键）。"""
+        if getattr(self, "_syncing_rtu_ui", False):
+            return
+        if event is not None and getattr(event, "keysym", "") in self._NON_EDIT_KEYSYMS:
+            return
+        self._rtu_user_overridden = True
 
     def _filter_tree(self) -> None:
         """根据当前设备分类、顶部搜索词与规则区搜索词过滤刷新 Treeview，并在特定分类下智能预选或恢复勾选状态。"""
@@ -530,8 +540,7 @@ class DbImportDialog:
                     try:
                         if hasattr(self, "combo_slave_com"):
                             p_name = str(s_info.get("port_name", "") or "").strip()
-                            if p_name:
-                                self.combo_slave_com.set(p_name)
+                            self.combo_slave_com.set(p_name if p_name else "COM1")
                         if hasattr(self, "combo_slave_baud"):
                             b_val = str(s_info.get("baudrate", "9600") or "9600").strip()
                             self.combo_slave_baud.set(b_val)
@@ -658,6 +667,7 @@ class DbImportDialog:
                 return
 
         created_devices: List[SlaveDevice] = []
+        failed_devices: List[str] = []
         total_points_imported = 0
         existing_devices = slave_svc.get_devices()
         # [H2] 维护已占用的 TCP 端口集合（含已有从机与活跃 Hub 监听），从 502 起步探测避免撞车
@@ -681,6 +691,8 @@ class DbImportDialog:
 
         try:
             ui_baud = int(ui_baud_str or 9600)
+            if ui_baud <= 0:
+                ui_baud = 9600
         except Exception:
             ui_baud = 9600
         try:
@@ -765,25 +777,32 @@ class DbImportDialog:
 
             ep_key = com_name.upper().strip() if comm_mode == CommType.RTU else f"{ip_addr}:{port_num}"
 
-            # 站号分配：优先采用数据库中配置的真实从机站地址；若冲突或未指定，顺延分配当前端点下未被占用的站号
-            db_unit = getattr(sel_app, "slave_id", None)
+            # 站号分配：优先采用数据库中配置的合法从机站地址 (1~247)；若冲突或非法，顺延分配未占用的站号
+            db_unit_raw = getattr(sel_app, "slave_id", None)
+            db_unit: Optional[int] = None
+            try:
+                if db_unit_raw is not None and not isinstance(db_unit_raw, bool):
+                    cand_db_uid = int(str(db_unit_raw).strip())
+                    if 1 <= cand_db_uid <= 247:
+                        db_unit = cand_db_uid
+            except Exception:
+                db_unit = None
+
             if db_unit is not None and (ep_key, db_unit) not in used_endpoint_units:
                 unit_id = db_unit
             else:
                 cand = 1
-                while (ep_key, cand) in used_endpoint_units:
+                while cand <= 247 and (ep_key, cand) in used_endpoint_units:
                     cand += 1
+                if cand > 247:
+                    failed_devices.append(f"{sel_app.chinese_name or sel_app.english_name}: 端点 {ep_key} 站号 1~247 已耗尽")
+                    continue
                 unit_id = cand
-
-            # [H2] 检查端点与站号唯一性：(ep_key, unit_id) 完全相同才去重跳过，同端点不同 unit_id 不静默合并
-            if (ep_key, unit_id) in used_endpoint_units:
-                logger.warning(f"跳过重复端点从机: {ep_key} unit_id={unit_id}")
-                continue
 
             used_endpoint_units.add((ep_key, unit_id))
 
             disp_name = sel_app.chinese_name or sel_app.english_name
-            new_name = f"从机{unit_id} [{disp_name}]"
+            new_name = disp_name
             new_id = f"slave_{time.time_ns()}_{idx}"
 
             cfg = ConnectionConfig(
@@ -802,6 +821,7 @@ class DbImportDialog:
                 id=new_id,
                 name=new_name,
                 conn_config=cfg,
+                db_file=self.app.db_path,
                 db_device_id=sel_app.app_id,
                 db_device_name=disp_name,
             )
@@ -815,6 +835,7 @@ class DbImportDialog:
                 created_devices.append(device)
                 total_points_imported += len(device.points)
             else:
+                failed_devices.append(f"{new_name}: {err_msg}")
                 logger.error(f"注册从机实例失败 [{new_name}]: {err_msg}")
 
         self.dlg.destroy()
@@ -826,17 +847,25 @@ class DbImportDialog:
             created_tcp = sum(1 for d in created_devices if d.conn_config.comm_type == CommType.TCP)
             created_rtu = sum(1 for d in created_devices if d.conn_config.comm_type == CommType.RTU)
             summary_msg = (
-                f"批量导入成功完成！\n\n"
+                f"批量导入完成！\n\n"
                 f"已一次性创建 {len(created_devices)} 个独立从机服务实例：\n"
                 f"- Modbus TCP 实例: {created_tcp} 个 (当前总数: {slave_svc.count_devices_by_comm(CommType.TCP)}/{MAX_TCP_SLAVE_INSTANCES})\n"
                 f"- Modbus RTU 实例: {created_rtu} 个 (当前总数: {slave_svc.count_devices_by_comm(CommType.RTU)}/{MAX_RTU_SLAVE_INSTANCES})\n"
                 f"- 累计成功装载点位: {total_points_imported} 个"
             )
+            if failed_devices:
+                summary_msg += f"\n\n以下 {len(failed_devices)} 台设备未导入：\n" + "\n".join(failed_devices[:5])
             messagebox.showinfo("批量导入完成", summary_msg, parent=self.parent.winfo_toplevel())
             self.app.logging_service.post(
                 "SYS",
                 0,
                 f"批量导入完成: 一次性创建 {len(created_devices)} 个从机实例，累计装载 {total_points_imported} 个点位",
+            )
+        elif failed_devices:
+            messagebox.showerror(
+                "批量导入失败",
+                "未能创建任何从机实例：\n" + "\n".join(failed_devices[:5]),
+                parent=self.parent.winfo_toplevel(),
             )
 
     def _import_merge_to_current(
@@ -855,13 +884,17 @@ class DbImportDialog:
             messagebox.showerror("错误", f"未找到当前从机实例: {self.current_device_id}", parent=self.dlg)
             return
 
-        # 若为覆盖替换模式，先清空目标从机现有点表并按前 3 个导入设备名称自动更新从机显示名
+        # 若为覆盖替换模式，先校验所选设备至少包含 1 个待导入点位，避免空点表误清空现有点表
         if is_replace:
+            total_incoming = sum(len(points_data) for (_, points_data, _, _, _, _) in apps_data_list)
+            if total_incoming == 0:
+                messagebox.showwarning("提示", "所选设备无任何可导入点位，已取消覆盖替换以保护现有点表！", parent=self.dlg)
+                return
             target_dev.points.clear()
             slave_svc.clear_runtime_points(target_dev.id)
             names = [sel_app.chinese_name or sel_app.english_name for (sel_app, _, _, _, _, _) in apps_data_list]
             summary_name = " + ".join(names[:3]) + (f" 等{len(names)}个设备" if len(names) > 3 else "")
-            target_dev.name = f"从机{target_dev.conn_config.unit_id} [{summary_name}]"
+            target_dev.name = summary_name
 
         imported_cnt = 0
         for sel_app, points_data, role_tag, comm_str, pt_cnt_str, enable_tag in apps_data_list:

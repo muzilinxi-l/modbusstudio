@@ -491,7 +491,10 @@ class SlavePanel(ttk.Frame):
         从 `SlaveService` 获取最新注册的从机列表，刷新顶部实例选择下拉框并加载当前选中从机的配置与点表。
         """
         devices = self.app.slave_service.get_devices()
-        device_names = [f"从机{dev.conn_config.unit_id} [{dev.name}]" for dev in devices]
+        device_names = [
+            dev.name if str(dev.name).startswith(f"从机{dev.conn_config.unit_id}") else f"从机{dev.conn_config.unit_id} [{dev.name}]"
+            for dev in devices
+        ]
         self.combo_instances["values"] = device_names
         if devices:
             if not self._current_device_id or self._current_device_id not in [d.id for d in devices]:
@@ -681,7 +684,7 @@ class SlavePanel(ttk.Frame):
 
     def _toggle_current_slave_server(self) -> None:
         """
-        响应“启动服务 / 停止服务”切换按钮：将界面当前通信参数写回 `device.conn_config` 并调用 `SlaveService` 启动或停止。
+        响应“启动服务 / 停止服务”切换按钮：停止时不覆盖模型配置；启动前原子校验并应用通信参数且刷新下拉框。
         """
         if not self._current_device_id:
             return
@@ -689,32 +692,57 @@ class SlavePanel(ttk.Frame):
         if not device:
             return
 
-        # 同步界面当前输入的通信配置到模型
+        if device.is_running:
+            self.app.slave_service.stop_slave(device.id)
+            self._update_status_indicator(device)
+            save_session_state(self.app)
+            return
+
+        # 启动前先全部解析并严格校验参数边界到局部变量，校验失败绝不半污染 device.conn_config
         try:
-            device.conn_config.comm_type = CommType.from_str(self.slave_comm_type_var.get())
-            device.conn_config.host = self.entry_slave_ip.get().strip() or "127.0.0.1"
-            device.conn_config.port = int(self.entry_slave_port.get().strip() or "502")
-            device.conn_config.com_port = self.combo_slave_com.get().strip() or "COM1"
-            device.conn_config.baudrate = int(self.combo_slave_baud.get().strip() or "9600")
+            new_comm = CommType.from_str(self.slave_comm_type_var.get())
+            new_host = self.entry_slave_ip.get().strip() or "127.0.0.1"
+            new_port = int(self.entry_slave_port.get().strip() or "502")
+            if not (1 <= new_port <= 65535):
+                raise ValueError(f"TCP 端口超出范围 (1~65535): {new_port}")
+            new_com = self.combo_slave_com.get().strip() or "COM1"
+            new_baud = int(self.combo_slave_baud.get().strip() or "9600")
+            if new_baud <= 0:
+                raise ValueError(f"串口波特率必须大于 0: {new_baud}")
             parity_str = self.combo_slave_parity.get().strip()
-            device.conn_config.parity = "E" if "Even" in parity_str or "E" in parity_str else ("O" if "Odd" in parity_str or "O" in parity_str else "N")
-            device.conn_config.data_bits = int(self.combo_slave_databit.get().strip() or "8")
-            device.conn_config.stop_bits = int(self.combo_slave_stopbit.get().strip() or "1")
-            device.conn_config.unit_id = int(self.entry_slave_id.get().strip() or "1")
+            new_parity = "E" if "Even" in parity_str or "E" in parity_str else ("O" if "Odd" in parity_str or "O" in parity_str else "N")
+            new_dbits = int(self.combo_slave_databit.get().strip() or "8")
+            if new_dbits not in (5, 6, 7, 8):
+                raise ValueError(f"数据位须为 5/6/7/8: {new_dbits}")
+            new_sbits = int(self.combo_slave_stopbit.get().strip() or "1")
+            if new_sbits not in (1, 2):
+                raise ValueError(f"停止位须为 1 或 2: {new_sbits}")
+            new_uid = int(self.entry_slave_id.get().strip() or "1")
+            if not (1 <= new_uid <= 247):
+                raise ValueError(f"从机站号超出范围 (1~247): {new_uid}")
         except Exception as e:
             messagebox.showerror("配置错误", f"通信参数格式有误: {e}")
             return
 
-        # 界面把配置交给业务模块 SlaveService 调度
-        if not device.is_running:
-            ok, msg = self.app.slave_service.start_slave(device.id)
-            if not ok:
-                messagebox.showerror("启动从机失败", msg)
-        else:
-            ok, msg = self.app.slave_service.stop_slave(device.id)
+        old_uid = device.conn_config.unit_id
+        device.conn_config.comm_type = new_comm
+        device.conn_config.host = new_host
+        device.conn_config.port = new_port
+        device.conn_config.com_port = new_com
+        device.conn_config.baudrate = new_baud
+        device.conn_config.parity = new_parity
+        device.conn_config.data_bits = new_dbits
+        device.conn_config.stop_bits = new_sbits
+        device.conn_config.unit_id = new_uid
 
-        # 界面仅据此更新状态并持久化最新通信配置
-        self._update_status_indicator(device)
+        ok, msg = self.app.slave_service.start_slave(device.id)
+        if not ok:
+            messagebox.showerror("启动从机失败", msg)
+
+        if old_uid != new_uid:
+            self._update_instance_combobox()
+        else:
+            self._update_status_indicator(device)
         save_session_state(self.app)
 
     def _start_all_slaves(self) -> None:
@@ -819,6 +847,15 @@ class SlavePanel(ttk.Frame):
             else:
                 self.lbl_slave_status.config(text="● 未检测到僵死 listener", foreground="#28a745")
 
+            # 3 秒后还原当前选中从机的真实运行状态指示灯，避免“已停止”从机永久显示绿色误导
+            def _restore_real_status() -> None:
+                if self._current_device_id:
+                    cur_dev = self.app.slave_service.get_device(self._current_device_id)
+                    if cur_dev:
+                        self._update_status_indicator(cur_dev)
+
+            self._schedule_after(3000, _restore_real_status)
+
         threading.Thread(target=_worker, daemon=True).start()
         self._schedule_after(30, _poll_result)
 
@@ -830,10 +867,11 @@ class SlavePanel(ttk.Frame):
             return
 
         devices = self.app.slave_service.get_devices()
-        new_unit = len(devices) + 1
-        name = simpledialog.askstring("新建从机", "请输入从机服务名称:", initialvalue=f"从机{new_unit} [新建服务]")
-        if not name:
+        new_unit = min(247, len(devices) + 1)
+        name = simpledialog.askstring("新建从机", "请输入从机服务名称:", initialvalue=f"新建服务_{new_unit}")
+        if not name or not name.strip():
             return
+        name = name.strip()
         new_id = f"slave_{time.time_ns()}"
         # 自动探测从 502 起步的首个未占用 TCP 端口，避免与已有从机或活跃 Hub 端点冲突
         avail_port = self.app.slave_service.get_next_available_tcp_port(start_port=502)
@@ -872,14 +910,12 @@ class SlavePanel(ttk.Frame):
             save_session_state(self.app)
 
     def _select_all_points(self) -> None:
-        """全选当前点表 Treeview 中的所有点位行。"""
-        for item in self.tree.get_children():
-            self.tree.selection_add(item)
+        """全选当前点表 Treeview 中的所有点位行（单次批量 Tcl 调用防大表卡顿）。"""
+        self.tree.selection_set(self.tree.get_children())
 
     def _deselect_all_points(self) -> None:
         """取消当前点表 Treeview 中所有点位行的选中状态。"""
-        for item in self.tree.get_children():
-            self.tree.selection_remove(item)
+        self.tree.selection_set(())
 
     def _batch_delete_selected(self) -> None:
         """从当前从机实例中批量删除用户在点表 Treeview 中选中的点位行。"""
@@ -941,6 +977,7 @@ class SlavePanel(ttk.Frame):
                     selected_addrs.add((vals[2], int(vals[0])))
 
         count = 0
+        skipped = 0
         for dev in target_devices:
             if not dev:
                 continue
@@ -971,7 +1008,11 @@ class SlavePanel(ttk.Frame):
                     )
                     if ok and new_pt:
                         if new_pt.area != old_area:
-                            # 区域随类型自动对齐（如 4x -> 0x BOOL），同步迁移 dev.points 复合主键与运行中引擎旧键
+                            # 冲突防护：目标区已存在同地址点位时跳过迁移，避免静默覆盖丢失数据
+                            existing_target = dev.get_point(new_pt.area, point.address)
+                            if existing_target is not None and existing_target is not point:
+                                skipped += 1
+                                continue
                             dev.remove_point(old_area, point.address)
                             self.app.slave_service.remove_point_from_runtime(dev.id, old_area, point.address)
                             point.area = new_pt.area
@@ -980,6 +1021,7 @@ class SlavePanel(ttk.Frame):
                         point.value = new_pt.value
                         point.raw_hex = new_pt.raw_hex
                     else:
+                        skipped += 1
                         continue
                 elif prop_name == "value":
                     ok, new_pt, _ = PointService.validate_and_build_point(
@@ -998,6 +1040,9 @@ class SlavePanel(ttk.Frame):
                     if ok and new_pt:
                         point.value = new_pt.value
                         point.raw_hex = new_pt.raw_hex
+                    else:
+                        skipped += 1
+                        continue
 
                 self.app.slave_service.sync_point_to_runtime(dev.id, point)
                 count += 1
@@ -1007,12 +1052,17 @@ class SlavePanel(ttk.Frame):
             if dev:
                 self._refresh_tree(dev)
         save_session_state(self.app)
-        messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性")
+        if skipped > 0:
+            messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性，跳过 {skipped} 个校验失败或目标地址冲突的点位")
+        else:
+            messagebox.showinfo("批量操作完成", f"已成功更新 {count} 个点位属性")
 
     def _on_tree_double_click(self, event=None) -> None:
         """
         响应点表 Treeview 双击事件：弹出输入框允许用户即时修改双击行的工程数值，校验通过后同步至底层寄存器。
         """
+        if event is None:
+            return
         item = self.tree.identify_row(event.y)
         if not item or not self._current_device_id:
             return
@@ -1033,7 +1083,17 @@ class SlavePanel(ttk.Frame):
             return
 
         ok, updated_pt, err = PointService.validate_and_build_point(
-            addr, desc, point.area, point.data_type, point.byte_order, new_val, point.sim_rule
+            addr,
+            desc,
+            point.area,
+            point.data_type,
+            point.byte_order,
+            new_val,
+            point.sim_rule,
+            string_length=point.string_length,
+            field_name=point.field_name,
+            scale=point.scale,
+            unit=point.unit,
         )
         if not ok or not updated_pt:
             messagebox.showerror("修改失败", err)
@@ -1067,10 +1127,14 @@ class SlavePanel(ttk.Frame):
 
     def _open_batch_generate_dialog(self) -> None:
         """弹出批量规则点表生成对话框"""
+        if not self._current_device_id or not self.app.slave_service.get_device(self._current_device_id):
+            messagebox.showwarning("提示", "请先选择或新建一个从机服务实例")
+            return
+
         dlg = tk.Toplevel(self)
         dlg.title("批量输入规则生成点表")
         dlg.geometry("450x380")
-        dlg.transient(self)
+        dlg.transient(self.winfo_toplevel())
         dlg.grab_set()
 
         ttk.Label(dlg, text="批量点表规则生成向导", font=("Microsoft YaHei UI", 10, "bold")).pack(pady=8)
@@ -1127,19 +1191,32 @@ class SlavePanel(ttk.Frame):
 
             dt_enum = DataType.normalize(dt)
             step = dt_enum.register_count
+            if not (0 <= start_a <= 65535):
+                messagebox.showerror("参数错误", f"起始地址必须在 0~65535 之间: {start_a}", parent=dlg)
+                return
+            if not (1 <= count <= 2000):
+                messagebox.showerror("参数错误", f"单次批量生成数量必须在 1~2000 之间: {count}", parent=dlg)
+                return
+            end_a = start_a + (count - 1) * step
+            if end_a > 65535:
+                messagebox.showerror("参数错误", f"末点位地址 ({end_a}) 超出 65535 上限，请调小起始地址或数量", parent=dlg)
+                return
+
             cur_a = start_a
+            created_cnt = 0
             for i in range(count):
                 desc = f"AutoPoint_{cur_a}"
                 ok, pt, _ = PointService.validate_and_build_point(cur_a, desc, area, dt, bo, i + 1, sim)
                 if ok and pt:
                     device.add_point(pt)
                     self.app.slave_service.sync_point_to_runtime(device.id, pt)
+                    created_cnt += 1
                 cur_a += step
 
             self._refresh_tree(device)
             save_session_state(self.app)
             dlg.destroy()
-            messagebox.showinfo("生成成功", f"成功批量生成 {count} 个点位")
+            messagebox.showinfo("生成成功", f"成功批量生成 {created_cnt} 个点位")
 
         btn_box = ttk.Frame(dlg)
         btn_box.pack(fill="x", padx=16, pady=12)

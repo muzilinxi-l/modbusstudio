@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import tkinter as tk
 from tkinter import ttk, messagebox
-from typing import Any, List
+from typing import Any, List, Optional
 
 # 导入底层业务配对解析引擎与配对规则数据模型：
 # UI 层不直接编写 SQL 或解析 app.More JSON，而是委托 HemsPairingEngine 完成跨表配对构建。
@@ -151,54 +151,45 @@ class PairingDialog:
         # 2. 实例化 HemsPairingEngine(self.app.db_path) 并调用 load_rules() 获取全部配对；
         # 3. 更新底部状态栏统计文案并调用 _filter_rules() 执行首次表格渲染。
         self.rules: List[PairingRule] = []
-        # 为什么用 try/except 包裹配对引擎初始化：
-        # 1. 现场导入的 SQLite 文件可能损坏、被其他进程独占锁死，或并非标准 HEMS `.cdb` 结构（缺少 app 表）；
-        # 2. 捕获异常后弹出友好错误提示框，仍保留空表格界面而非直接令主程序未捕获异常退栈。
+        self._load_error: Optional[str] = None
         try:
             engine = HemsPairingEngine(self.app.db_path)
             self.rules = engine.load_rules()
         except Exception as e:
+            self._load_error = str(e)
             messagebox.showerror("加载配对规则失败", f"无法解析配对规则: {e}", parent=self.dlg)
 
-        # 更新底部汇总标签并触发首次全量表格渲染
-        self.lbl_info.config(
-            text=f"共解析出 {len(self.rules)} 条端到端映射配对规则 (当南向采集点位更新时，自动路由映射到北向寄存器)"
-        )
         self._filter_rules()
 
     def _filter_rules(self) -> None:
-        """根据搜索框关键字过滤配对规则列表并重新渲染 Treeview 行。"""
-        # 步骤拆解：
-        # 1. 遍历清空 Treeview 当前所有子节点；
-        # 2. 提取搜索框关键字并转为小写；
-        # 3. 遍历 self.rules 执行子串匹配，将命中的配对规则格式化插入 Treeview。
-        # 先清空表格中所有已渲染行，准备按最新关键字重绘
+        """根据搜索框关键字过滤配对规则列表（支持序号 R_001、rule_id、设备名、变量名、地址与类型）并刷新计数。"""
         for item in self.tree_pair.get_children():
             self.tree_pair.delete(item)
 
         kw = self.search_var.get().strip().lower()
-        # 为什么将 rule_id、target_app_name、src_app_name、src_var_name 拼接为统一小写检索串：
-        # 1. 允许工程师直接输入规则号（如 R_30）、北向服务名（如 North）、南向设备名（如 PCS）或具体信号名快速定位；
-        # 2. 统一转小写实现大小写不敏感模糊搜索，提升现场排障效率。
+        shown_count = 0
         for i, r in enumerate(self.rules):
-            search_haystack = f"{r.rule_id} {r.target_app_name} {r.src_app_name} {r.src_var_name}".lower()
+            display_no = f"R_{i+1:03d}"
+            src_addr_txt = str(r.src_address) if r.src_address is not None else ""
+            search_haystack = (
+                f"{display_no} {r.rule_id} {r.target_app_name} {r.target_register} "
+                f"fc:{r.target_fc} {r.target_slave_id} {r.src_app_name} {r.src_var_name} "
+                f"{src_addr_txt} {r.data_type.value} {r.byte_order.value}"
+            ).lower()
             if kw and kw not in search_haystack:
                 continue
 
-            # 组装目标北向寄存器信息（含寄存器地址、功能码与从机站号）
             target_reg_str = f"{r.target_register} (FC:{r.target_fc}, 站号:{r.target_slave_id})"
-            # 若南向源变量无物理寄存器地址（如系统内部计算量），显式标注“(内部)”以区分硬件采集点位
             src_var_str = (
                 f"{r.src_var_name} [Addr:{r.src_address}]"
                 if r.src_address is not None
                 else f"{r.src_var_name} (内部)"
             )
-            # 按 7 列顺序插入行数据，首列采用连续序号 R_001, R_002... 保持视觉整齐
             self.tree_pair.insert(
                 "",
                 "end",
                 values=(
-                    f"R_{i+1:03d}",
+                    display_no,
                     r.target_app_name,
                     target_reg_str,
                     r.src_app_name,
@@ -207,5 +198,13 @@ class PairingDialog:
                     r.byte_order.value,
                 ),
             )
+            shown_count += 1
+
+        if getattr(self, "_load_error", None):
+            self.lbl_info.config(text=f"加载配对规则失败: {self._load_error}")
+        elif kw:
+            self.lbl_info.config(text=f"当前筛选显示 {shown_count} / 共 {len(self.rules)} 条端到端映射配对规则（静态拓扑视图）")
+        else:
+            self.lbl_info.config(text=f"共解析出 {len(self.rules)} 条端到端映射配对规则（静态拓扑视图）")
 
 

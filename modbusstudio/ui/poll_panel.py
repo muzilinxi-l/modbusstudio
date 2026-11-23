@@ -404,6 +404,18 @@ class PollPanel(ttk.Frame):
                 self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
                 messagebox.showerror("连接失败", str(ex))
 
+    @staticmethod
+    def _validate_poll_range(area_enum: AreaType, start_addr: int, count: int) -> Optional[str]:
+        """校验主机读取起始地址与连续数量是否符合 Modbus 协议帧上限，非法返回错误原因。"""
+        if not (0 <= start_addr <= 65535):
+            return f"起始地址必须在 0~65535 之间: {start_addr}"
+        max_count = 2000 if area_enum in (AreaType.COIL, AreaType.DISCRETE) else 125
+        if not (1 <= count <= max_count):
+            return f"读取数量超出协议单帧上限 (1~{max_count}): {count}"
+        if start_addr + count > 65536:
+            return f"读取地址范围越界 ({start_addr} + {count} > 65536)"
+        return None
+
     def _poll_once(self) -> None:
         """异步执行单次寄存器轮询读取，彻底解放 UI 主线程，杜绝网络超时引起的界面假死。"""
         # 若上一次单次读取尚未返回，直接丢弃本次点击以防请求队列积压
@@ -418,6 +430,10 @@ class PollPanel(ttk.Frame):
             bo_enum = ByteOrder.normalize(self.combo_order.get())
         except Exception as e:
             messagebox.showerror("参数错误", f"输入格式有误: {e}")
+            return
+        range_err = self._validate_poll_range(area_enum, start_addr, count)
+        if range_err:
+            messagebox.showerror("参数错误", range_err)
             return
 
         task = PollTask(
@@ -494,6 +510,10 @@ class PollPanel(ttk.Frame):
                 bo_enum = ByteOrder.normalize(self.combo_order.get())
             except Exception as e:
                 messagebox.showerror("参数错误", f"输入格式有误: {e}")
+                return
+            range_err = self._validate_poll_range(area_enum, start_addr, count)
+            if range_err:
+                messagebox.showerror("参数错误", range_err)
                 return
 
             try:
