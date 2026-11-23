@@ -251,6 +251,14 @@ class ModbusStudioAppCore:
             resolve_runtime_path("extra/hems.sqlite"),
             resolve_runtime_path("extra/hems.db"),
         ]
+        # 目录版发布（如 dist/ModbusStudio/ModbusStudio.exe）时，兼容探测上一级 dist/extra/ 目录中的现场库
+        parent_base = os.path.dirname(get_app_base_dir())
+        if parent_base:
+            candidates.extend([
+                os.path.join(parent_base, "extra", "hems.cdb"),
+                os.path.join(parent_base, "extra", "hems.sqlite"),
+                os.path.join(parent_base, "extra", "hems.db"),
+            ])
         # 遍历候选路径列表：只需命中第一个真实存在的物理文件即可短路返回
         for path in candidates:
             # 必须先用 os.path.exists 校验，防止 sqlite3.connect 自动在磁盘上创建出 0 字节空数据库文件

@@ -3,7 +3,15 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('app.ico', '.')]
 binaries = []
-hiddenimports = ['modbusstudio', 'modbusstudio.ui', 'modbusstudio.ui.dialogs', 'modbusstudio.services', 'modbusstudio.models']
+hiddenimports = [
+    'modbusstudio',
+    'modbusstudio.ui',
+    'modbusstudio.ui.dialogs',
+    'modbusstudio.services',
+    'modbusstudio.models',
+    'modbusstudio.ui.slave_panel',
+    'modbusstudio.ui.poll_panel',
+]
 tmp_ret = collect_all('pymodbus')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tb_ret = collect_all('ttkbootstrap')
@@ -19,25 +27,33 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'setuptools',
+        'wheel',
+        'pip',
+        'pytest',
+        'pydoc',
+        'doctest',
+        'unittest',
+        'tkinter.test',
+        'pymodbus.repl',
+    ],
     noarchive=False,
-    optimize=0,
+    optimize=1,
 )
 pyz = PYZ(a.pure)
 
+# 目录版 (--onedir)：免去每次双击全量解压至 %TEMP%\_MEI 与杀软重复查杀，冷启动提速显著
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='ModbusStudio',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=False,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -45,4 +61,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['app.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='ModbusStudio',
 )

@@ -1,10 +1,10 @@
 ========================================================================
 Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 ========================================================================
-生成时间    : 2026-11-23T17:14:33.309267+08:00
+生成时间    : 2026-11-23T17:37:15.659288+08:00
 仓库根目录  : F:\GitHub\python
 记忆目录    : F:\GitHub\python\memory
-总体结论    : PASS (错误: 0, 警告: 10)
+总体结论    : PASS (错误: 0, 警告: 9)
 重要声明    : 脚本通过 ≠ 语义正确。所有无法自动验证的语义判断均已标记为 needs_human_review。
 ------------------------------------------------------------------------
 【分项检查摘要】
@@ -30,16 +30,15 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
   [!] [Check 6] 记忆 MEM-0211 引用的代码 docs/Antigravity/11_SESSION_STATE_PERSISTENCE_REPORT.md 自 commit 73b0fd4 后有更新，需人工复核语义一致性
   [!] [Check 6] 记忆 MEM-0012-REVIEW 引用的代码 docs/Antigravity/TASK12_PHASE1_REVIEW_REPORT.md 自 commit d91a4f2 后有更新，需人工复核语义一致性
   [!] [Check 6] 记忆 MEM-0004 引用的代码 modbusstudio/services.py 自 commit 9bb9932 后有更新，需人工复核语义一致性
-  [!] [Check 7] 检测到工作区存在未提交的记忆文件改动: memory/verify-report.txt
 ------------------------------------------------------------------------
 【JSON 完整载荷】
 {
-  "timestamp": "2026-11-23T17:14:33.309267+08:00",
+  "timestamp": "2026-11-23T17:37:15.659288+08:00",
   "repo_root": "F:\\GitHub\\python",
   "memory_dir": "F:\\GitHub\\python\\memory",
   "overall_status": "PASS",
   "error_count": 0,
-  "warning_count": 10,
+  "warning_count": 9,
   "errors": [],
   "warnings": [
     "[Check 6] 记忆 MEM-0002 引用的代码 modbusstudio/app.py 自 commit 9bb9932 后有更新，需人工复核语义一致性",
@@ -50,8 +49,7 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
     "[Check 6] 记忆 MEM-0209 引用的代码 docs/Antigravity/09_REVIEW_FIX_REPORT.md 自 commit 46a7fdb 后有更新，需人工复核语义一致性",
     "[Check 6] 记忆 MEM-0211 引用的代码 docs/Antigravity/11_SESSION_STATE_PERSISTENCE_REPORT.md 自 commit 73b0fd4 后有更新，需人工复核语义一致性",
     "[Check 6] 记忆 MEM-0012-REVIEW 引用的代码 docs/Antigravity/TASK12_PHASE1_REVIEW_REPORT.md 自 commit d91a4f2 后有更新，需人工复核语义一致性",
-    "[Check 6] 记忆 MEM-0004 引用的代码 modbusstudio/services.py 自 commit 9bb9932 后有更新，需人工复核语义一致性",
-    "[Check 7] 检测到工作区存在未提交的记忆文件改动: memory/verify-report.txt"
+    "[Check 6] 记忆 MEM-0004 引用的代码 modbusstudio/services.py 自 commit 9bb9932 后有更新，需人工复核语义一致性"
   ],
   "checks": {
     "1_required_structure": {
@@ -104,15 +102,15 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
         "F:/GitHub/python-worktrees/task-1029-1423"
       ],
       "unmerged_conflicts": [],
-      "dirty_files_count": 7
+      "dirty_files_count": 6
     },
     "10_pytest_execution": {
       "status": "PASS",
       "command": "F:\\GitHub\\python\\.venv\\Scripts\\pytest.exe -q",
       "exit_code": 0,
       "passed": true,
-      "summary": "126 passed, 1 skipped in 41.46s",
-      "stdout_tail": "..............................s......................................... [ 56%]\n.......................................................                  [100%]\n126 passed, 1 skipped in 41.46s",
+      "summary": "127 passed in 36.20s",
+      "stdout_tail": "........................................................................ [ 56%]\n.......................................................                  [100%]\n127 passed in 36.20s",
       "stderr_tail": ""
     },
     "11_needs_human_review": {

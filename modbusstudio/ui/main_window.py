@@ -166,22 +166,42 @@ class MainWindow(ttk.Frame):
         self.notebook = ttk.Notebook(self.main_paned)
         self.main_paned.add(self.notebook, weight=7)
 
-        # 为什么在方法内延迟导入 SlavePanel 和 PollPanel：
-        # 缩短模块顶层导入链路，并避免子面板反向引用 get_app_icon_path 时出现未定义符号。
+        # 为什么在方法内延迟导入 SlavePanel 且懒加载 PollPanel：
+        # 启动首屏仅展示从机页签，PollPanel 延迟到首次切换页签或外部显式访问 win.poll_panel 时再实例化，
+        # 可直接缩短冷启动耗时且对所有现有调用与测试 100% 兼容。
         from .slave_panel import SlavePanel
-        from .poll_panel import PollPanel
 
         self.slave_panel = SlavePanel(self.notebook, self.app)
-        self.poll_panel = PollPanel(self.notebook, self.app)
+        self._poll_tab_host = ttk.Frame(self.notebook)
+        self._poll_panel = None
 
-        self.notebook.add(self.slave_panel, text="  💻 Modbus Slave 从机模拟器 (业务库导入与仿真)  ")
-        self.notebook.add(self.poll_panel, text="  🔍 Modbus Poll 主机轮询调试器 (业务规则导入)  ")
+        self.notebook.add(self.slave_panel, text="  Modbus Slave 从机模拟器 (业务库导入与仿真)  ")
+        self.notebook.add(self._poll_tab_host, text="  Modbus Poll 主机轮询调试器 (业务规则导入)  ")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         # 下半部分：高可靠性日志面板容器
         self.log_container = ttk.Frame(self.main_paned)
         self.main_paned.add(self.log_container, weight=3)
 
         self._build_log_viewer(self.log_container)
+
+    @property
+    def poll_panel(self):
+        """按需懒加载主机轮询面板（首次切到主机页签或测试/代码访问时创建）。"""
+        if self._poll_panel is None:
+            from .poll_panel import PollPanel
+            self._poll_panel = PollPanel(self._poll_tab_host, self.app)
+            self._poll_panel.pack(fill="both", expand=True)
+        return self._poll_panel
+
+    def _on_notebook_tab_changed(self, event=None) -> None:
+        """首次切换到主机轮询页签时触发 PollPanel 懒加载。"""
+        try:
+            current_tab = self.notebook.select()
+            if current_tab == str(self._poll_tab_host) and self._poll_panel is None:
+                _ = self.poll_panel
+        except Exception:
+            pass
 
     def _build_header_bar(self) -> None:
         """构建应用顶部品牌标语与实时明暗主题切换控制栏。"""
@@ -191,7 +211,7 @@ class MainWindow(ttk.Frame):
         # 左侧：品牌与版本标语
         lbl_brand = ttk.Label(
             header_bar,
-            text="⚡ Modbus Studio  ·  现代化多实例仿真与轮询调试平台",
+            text="Modbus Studio  ·  现代化多实例仿真与轮询调试平台",
             font=("Microsoft YaHei UI", 10, "bold"),
         )
         lbl_brand.pack(side="left", padx=2)
@@ -200,7 +220,7 @@ class MainWindow(ttk.Frame):
         theme_box = ttk.Frame(header_bar)
         theme_box.pack(side="right", padx=2)
 
-        lbl_theme = ttk.Label(theme_box, text="🎨 界面主题:")
+        lbl_theme = ttk.Label(theme_box, text="界面主题:")
         lbl_theme.pack(side="left", padx=(4, 2))
 
         # 探测当前 GUI 环境支持的主题列表；若探测为空则回退提供常用亮/暗主题列表
@@ -229,7 +249,7 @@ class MainWindow(ttk.Frame):
 
         btn_toggle = ttk.Button(
             theme_box,
-            text="🌓 明/暗快速切换",
+            text="明/暗切换",
             style="Small.TButton",
             command=self._toggle_light_dark,
         )
@@ -336,19 +356,19 @@ class MainWindow(ttk.Frame):
         tool_frame.pack(fill="x", padx=2, pady=1)
 
         # 按钮统一紧凑内边距，去除硬编码字符宽，自适应内容
-        btn_copy = ttk.Button(tool_frame, text="📋 复制", style="Small.TButton", command=self._copy_log)
+        btn_copy = ttk.Button(tool_frame, text="复制", style="Small.TButton", command=self._copy_log)
         btn_copy.pack(side="left", padx=2)
 
-        btn_select_all = ttk.Button(tool_frame, text="☑ 全选", style="Small.TButton", command=self._select_all_log)
+        btn_select_all = ttk.Button(tool_frame, text="全选", style="Small.TButton", command=self._select_all_log)
         btn_select_all.pack(side="left", padx=2)
 
-        btn_clear = ttk.Button(tool_frame, text="🧹 清空", style="Small.TButton", command=self._clear_log)
+        btn_clear = ttk.Button(tool_frame, text="清空", style="Small.TButton", command=self._clear_log)
         btn_clear.pack(side="left", padx=2)
 
-        btn_export = ttk.Button(tool_frame, text="💾 导出CSV", style="Small.TButton", command=self._export_log_to_csv)
+        btn_export = ttk.Button(tool_frame, text="导出CSV", style="Small.TButton", command=self._export_log_to_csv)
         btn_export.pack(side="left", padx=2)
 
-        btn_dir = ttk.Button(tool_frame, text="📂 日志目录", style="Small.TButton", command=self._open_log_dir)
+        btn_dir = ttk.Button(tool_frame, text="日志目录", style="Small.TButton", command=self._open_log_dir)
         btn_dir.pack(side="left", padx=2)
 
         self.auto_scroll_var = tk.BooleanVar(value=True)

@@ -180,7 +180,7 @@ class PollPanel(ttk.Frame):
         ttk.Label(self.rtu_frame, text="串口:").pack(side="left", padx=1)
         self.combo_com = ttk.Combobox(self.rtu_frame, width=8)
         self.combo_com.pack(side="left", padx=1)
-        btn_refresh = ttk.Button(self.rtu_frame, text="🔄", width=3, style="Small.TButton", command=self._refresh_poll_com_ports)
+        btn_refresh = ttk.Button(self.rtu_frame, text="刷新", width=4, style="Small.TButton", command=self._refresh_poll_com_ports)
         btn_refresh.pack(side="left", padx=1)
         ttk.Label(self.rtu_frame, text="波特率:").pack(side="left", padx=1)
         self.combo_baud = ttk.Combobox(self.rtu_frame, width=7, values=self.BAUDRATE_CHOICES)
@@ -208,7 +208,7 @@ class PollPanel(ttk.Frame):
         right0 = ttk.Frame(row0)
         right0.pack(side="right")
 
-        self.btn_connect = ttk.Button(right0, text="🔌 建立连接", style="primary.TButton", command=self._toggle_connect)
+        self.btn_connect = ttk.Button(right0, text="建立连接", style="primary.TButton", command=self._toggle_connect)
         self.btn_connect.pack(side="left", padx=3)
 
         self.lbl_conn_status = ttk.Label(right0, text="未连接", foreground="#6c757d", font=("Microsoft YaHei UI", 9, "bold"))
@@ -250,11 +250,11 @@ class PollPanel(ttk.Frame):
         self.entry_interval = ttk.Entry(left1, textvariable=self.poll_interval_var, width=6)
         self.entry_interval.pack(side="left", padx=1)
 
-        btn_poll_once = ttk.Button(left1, text="🔍 单次读取", style="info.TButton", command=self._poll_once)
+        btn_poll_once = ttk.Button(left1, text="单次读取", style="info.TButton", command=self._poll_once)
         btn_poll_once.pack(side="left", padx=(6, 2))
 
         # [POLL-CONFIG] 文案改为"连续轮询"，由用户输入的间隔(ms)动态驱动
-        self.btn_poll_loop = ttk.Button(left1, text="🔁 连续轮询", style="success.TButton", command=self._toggle_poll_loop)
+        self.btn_poll_loop = ttk.Button(left1, text="连续轮询", style="success.TButton", command=self._toggle_poll_loop)
         self.btn_poll_loop.pack(side="left", padx=2)
 
         right1 = ttk.Frame(row1)
@@ -355,9 +355,9 @@ class PollPanel(ttk.Frame):
             self.app.poll_service.request_stop_polling_nonblocking()
             if self._is_polling_loop:
                 self._is_polling_loop = False
-                self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton", state="normal")
+                self.btn_poll_loop.config(text="连续轮询", style="success.TButton", state="normal")
             self.lbl_conn_status.config(text="● 已断开", foreground="#dc3545")
-            self.btn_connect.config(text="🔌 建立连接", style="primary.TButton", state="normal")
+            self.btn_connect.config(text="建立连接", style="primary.TButton", state="normal")
 
             def do_disconnect():
                 try:
@@ -389,10 +389,10 @@ class PollPanel(ttk.Frame):
                     self.btn_connect.config(state="normal")
                     if ok:
                         self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
-                        self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
+                        self.btn_connect.config(text="断开连接", style="danger.TButton")
                     else:
                         self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
-                        self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
+                        self.btn_connect.config(text="建立连接", style="primary.TButton")
                         messagebox.showerror("连接失败", msg)
 
                 self._post_ui(on_done)
@@ -400,7 +400,7 @@ class PollPanel(ttk.Frame):
             try:
                 self._executor.submit(do_connect)
             except Exception as ex:
-                self.btn_connect.config(state="normal", text="🔌 建立连接", style="primary.TButton")
+                self.btn_connect.config(state="normal", text="建立连接", style="primary.TButton")
                 self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
                 messagebox.showerror("连接失败", str(ex))
 
@@ -467,7 +467,7 @@ class PollPanel(ttk.Frame):
                     return
                 if self.app.poll_service.is_connected:
                     self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
-                    self.btn_connect.config(text="🔌 断开连接", style="danger.TButton", state="normal")
+                    self.btn_connect.config(text="断开连接", style="danger.TButton", state="normal")
                 if res.success:
                     self._rx_count += 1
                     self._update_result_tree(res)
@@ -489,7 +489,7 @@ class PollPanel(ttk.Frame):
         if self._is_polling_loop:
             self._is_polling_loop = False
             self.app.poll_service.request_stop_polling_nonblocking()
-            self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton", state="normal")
+            self.btn_poll_loop.config(text="连续轮询", style="success.TButton", state="normal")
 
             def _do_stop_loop():
                 try:
@@ -554,7 +554,7 @@ class PollPanel(ttk.Frame):
                 self._post_ui(_ui_error)
 
             # 将可能触发 2s TCP/RTU 建连的启动过程放入后台线程池，避免阻塞 Tkinter 主线程
-            self.btn_poll_loop.config(state="disabled", text="⏳ 启动中...")
+            self.btn_poll_loop.config(state="disabled", text="启动中...")
 
             def _do_start_loop():
                 ok, msg = False, "未知启动异常"
@@ -574,12 +574,12 @@ class PollPanel(ttk.Frame):
                     self.btn_poll_loop.config(state="normal")
                     if ok:
                         self._is_polling_loop = True
-                        self.btn_poll_loop.config(text="⏹ 停止轮询", style="danger.TButton")
+                        self.btn_poll_loop.config(text="停止轮询", style="danger.TButton")
                         self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
-                        self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
+                        self.btn_connect.config(text="断开连接", style="danger.TButton")
                     else:
                         self._is_polling_loop = False
-                        self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
+                        self.btn_poll_loop.config(text="连续轮询", style="success.TButton")
                         messagebox.showerror("启动失败", msg)
 
                 self._post_ui(_on_started)
@@ -588,7 +588,7 @@ class PollPanel(ttk.Frame):
                 self._executor.submit(_do_start_loop)
             except Exception as ex:
                 self._is_polling_loop = False
-                self.btn_poll_loop.config(state="normal", text="🔁 连续轮询", style="success.TButton")
+                self.btn_poll_loop.config(state="normal", text="连续轮询", style="success.TButton")
                 messagebox.showerror("启动失败", str(ex))
 
     # [POLL-CONFIG] 适配从局部有效寄存器字典渲染表格

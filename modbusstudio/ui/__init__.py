@@ -5,7 +5,15 @@ Modbus Studio UI Package
 """
 
 from .main_window import MainWindow
-from .slave_panel import SlavePanel
-from .poll_panel import PollPanel
 
 __all__ = ["MainWindow", "SlavePanel", "PollPanel"]
+
+
+def __getattr__(name: str):
+    if name == "SlavePanel":
+        from .slave_panel import SlavePanel
+        return SlavePanel
+    if name == "PollPanel":
+        from .poll_panel import PollPanel
+        return PollPanel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
