@@ -107,11 +107,45 @@ class SlavePanel(ttk.Frame):
         self._current_device_id: Optional[str] = None
         # [SLAVE-SPEED-4] 防止全部启动/全部停止/自动重连重复点击并发重入的守卫标志
         self._busy: Dict[str, bool] = {"start": False, "stop": False, "reconnect": False}
+        self._destroyed: bool = False
+        self._after_ids: set = set()
 
         self._build_ui()
         self._load_initial_data()
         # 延迟 1000ms 启动主线程定时刷新循环，将后台仿真线程产生的波形数值平滑同步到 Treeview 单元格
-        self.after(1000, self._start_runtime_sync_loop)
+        self._schedule_after(1000, self._start_runtime_sync_loop)
+
+    def _schedule_after(self, delay_ms: int, callback) -> Optional[str]:
+        """在主线程注册受追踪的 after 回调，destroy 时统一 after_cancel 避免销毁后 Tcl 竞态。"""
+        if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+            return None
+
+        aid_holder: List[Optional[str]] = [None]
+
+        def _wrapped():
+            if aid_holder[0] is not None:
+                self._after_ids.discard(aid_holder[0])
+            if not self._destroyed and hasattr(self, "winfo_exists") and self.winfo_exists():
+                callback()
+
+        try:
+            aid = self.after(delay_ms, _wrapped)
+            aid_holder[0] = aid
+            self._after_ids.add(aid)
+            return aid
+        except Exception:
+            return None
+
+    def destroy(self) -> None:
+        """销毁面板前显式取消所有已挂 after 定时器，杜绝销毁后 Tcl 回调竞态。"""
+        self._destroyed = True
+        for aid in list(self._after_ids):
+            try:
+                self.after_cancel(aid)
+            except Exception:
+                pass
+        self._after_ids.clear()
+        super().destroy()
 
     # =========================================================================
     # UI 布局构建 (采用两行配置栏与紧凑自适应排版，杜绝高 DPI 截断)
@@ -591,8 +625,8 @@ class SlavePanel(ttk.Frame):
         except Exception:
             pass
         finally:
-            if hasattr(self, "winfo_exists") and self.winfo_exists():
-                self.after(1000, self._start_runtime_sync_loop)
+            if not self._destroyed and hasattr(self, "winfo_exists") and self.winfo_exists():
+                self._schedule_after(1000, self._start_runtime_sync_loop)
 
     # =========================================================================
     # 核心业务操作入口：完全遵循用户指令设计
@@ -684,77 +718,74 @@ class SlavePanel(ttk.Frame):
         save_session_state(self.app)
 
     def _start_all_slaves(self) -> None:
-        """响应“全部启动”按钮：在后台守护线程中依次启动所有未运行的从机实例，完成后通过 `root.after(0, _on_done)` 切回主线程刷新 UI。"""
-        # 关键设计（为什么需要 `self._busy["start"]` + 后台线程 + `root.after(0, ...)`）：
-        # 1. 批量启动多台不同端口或串口的从机涉及底层线程拉起与端口绑定，若在主线程同步循环调用，会导致按钮卡住。
-        # 2. `self._busy["start"]` 防止用户在后台启动尚未结束时连续多次点击按钮，避免并发重入产生竞态冲突。
-        # 3. Tkinter 所有控件与 `messagebox` 必须在主线程调用，因此后台 `_worker` 结束时通过 `root.after(0, _on_done)` 安全投递回主线程。
+        """响应“全部启动”按钮：在后台守护线程依次启动所有未运行的从机，主线程轮询完成态刷新 UI（零跨线程 Tk 调用）。"""
         if self._busy.get("start"):
             return
         self._busy["start"] = True
         devices = list(self.app.slave_service.get_devices())
-        root = self.winfo_toplevel()
+        state: Dict[str, Any] = {"done": False, "fail_msgs": []}
 
         def _worker() -> None:
-            """后台批量启动工作函数：逐台启动未运行的从机并在 `finally` 中确保释放 `_busy["start"]` 守卫锁。"""
-            fail_msgs: List[str] = []
             try:
                 for dev in devices:
                     if not dev.is_running:
                         ok, msg = self.app.slave_service.start_slave(dev.id)
                         if not ok:
-                            fail_msgs.append(f"[{dev.name}]: {msg}")
+                            state["fail_msgs"].append(f"[{dev.name}]: {msg}")
+            except Exception as ex:
+                state["fail_msgs"].append(f"批量启动异常: {ex}")
             finally:
+                state["done"] = True
+
+        def _poll_done() -> None:
+            if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
                 self._busy["start"] = False
-
-            def _on_done() -> None:
-                """主线程完成回调：刷新当前从机运行状态指示灯，并在存在启动失败项时弹出汇总警告框。"""
-                if self._current_device_id:
-                    dev = self.app.slave_service.get_device(self._current_device_id)
-                    if dev:
-                        self._update_status_indicator(dev)
-                if fail_msgs:
-                    messagebox.showwarning("部分从机启动提示", "以下从机未能成功启动：\n" + "\n".join(fail_msgs[:5]))
-
-            try:
-                root.after(0, _on_done)
-            except Exception:
-                pass
+                return
+            if not state["done"]:
+                self._schedule_after(30, _poll_done)
+                return
+            self._busy["start"] = False
+            if self._current_device_id:
+                dev = self.app.slave_service.get_device(self._current_device_id)
+                if dev:
+                    self._update_status_indicator(dev)
+            if state["fail_msgs"]:
+                messagebox.showwarning("部分从机启动提示", "以下从机未能成功启动：\n" + "\n".join(state["fail_msgs"][:5]))
 
         threading.Thread(target=_worker, daemon=True).start()
+        self._schedule_after(30, _poll_done)
 
     def _stop_all_slaves(self) -> None:
-        """
-        响应“全部停止”按钮：在后台守护线程中依次停止所有运行中的从机实例，完成后切回主线程更新状态指示灯。
-        """
+        """响应“全部停止”按钮：在后台守护线程依次停止所有运行中的从机，主线程轮询完成态刷新 UI（零跨线程 Tk 调用）。"""
         if self._busy.get("stop"):
             return
         self._busy["stop"] = True
         devices = list(self.app.slave_service.get_devices())
-        root = self.winfo_toplevel()
+        state: Dict[str, Any] = {"done": False}
 
         def _worker() -> None:
-            """后台批量停止工作函数：逐台停止运行中的从机并在 `finally` 中重置 `_busy["stop"]` 标志。"""
             try:
                 for dev in devices:
                     if dev.is_running:
                         self.app.slave_service.stop_slave(dev.id)
             finally:
+                state["done"] = True
+
+        def _poll_done() -> None:
+            if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
                 self._busy["stop"] = False
-
-            def _on_done() -> None:
-                """主线程完成回调：刷新当前选中从机的停止状态指示灯与按钮样式。"""
-                if self._current_device_id:
-                    dev = self.app.slave_service.get_device(self._current_device_id)
-                    if dev:
-                        self._update_status_indicator(dev)
-
-            try:
-                root.after(0, _on_done)
-            except Exception:
-                pass
+                return
+            if not state["done"]:
+                self._schedule_after(30, _poll_done)
+                return
+            self._busy["stop"] = False
+            if self._current_device_id:
+                dev = self.app.slave_service.get_device(self._current_device_id)
+                if dev:
+                    self._update_status_indicator(dev)
 
         threading.Thread(target=_worker, daemon=True).start()
+        self._schedule_after(30, _poll_done)
 
     # [SLAVE-RECONNECT] 自动重连按钮回调：触发底层僵死 listener 探活自愈重建
     def _on_auto_reconnect(self) -> None:
@@ -774,11 +805,11 @@ class SlavePanel(ttk.Frame):
                 result["done"] = True
 
         def _poll_result() -> None:
-            if not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+            if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
                 self._busy["reconnect"] = False
                 return
             if not result["done"]:
-                self.after(30, _poll_result)
+                self._schedule_after(30, _poll_result)
                 return
             self._busy["reconnect"] = False
             if result["err"]:
@@ -789,7 +820,7 @@ class SlavePanel(ttk.Frame):
                 self.lbl_slave_status.config(text="● 未检测到僵死 listener", foreground="#28a745")
 
         threading.Thread(target=_worker, daemon=True).start()
-        self.after(30, _poll_result)
+        self._schedule_after(30, _poll_result)
 
     def _add_new_slave_instance(self) -> None:
         """手动添加并配置新的 Modbus 从机服务实例（受 100 实例容量配额限制）"""

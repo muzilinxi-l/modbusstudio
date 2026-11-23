@@ -128,21 +128,36 @@ TYPE_RANGES: Dict[ModbusDataType, Tuple[Union[int, float], Union[int, float], ty
 }
 
 
+def parse_bool_value(val: Any) -> bool:
+    """将任意输入安全解析为布尔值（显式识别 false/off/no/0/0.0/NaN，杜绝非空字符串误判为 True）。"""
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return False
+    if isinstance(val, (int, float)):
+        if isinstance(val, float) and math.isnan(val):
+            return False
+        return val != 0
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off", ""):
+        return False
+    try:
+        f = float(s)
+        return (not math.isnan(f)) and (f != 0.0)
+    except Exception:
+        return False
+
+
 def clamp_value_to_type(val: Any, data_type: ModbusDataType) -> Any:
     """根据数据类型严格钳位合法数值范围，防止无符号整型下溢变成 65535 或有符号整型越界引发 struct.error。
     参数：val（待校验输入值 Any）、data_type（目标数据类型 ModbusDataType）。返回：Any，钳位后的安全值。
     步骤：1.BOOL 归一化为 0/1；2.文本与十六进制原样放行；3.查表获取上下限并用 max/min 夹逼；4.异常输入兜底归零。副作用：无。
     """
-    # 针对布尔类型做特殊处理：将 True/非零整数统一转为 1，False/0/非法字符串统一转为 0
+    # 针对布尔类型做特殊处理：统一识别 bool、数值与中英文真假字符串，归一化为 0 或 1
     if data_type == ModbusDataType.BOOL:
-        if isinstance(val, bool):
-            return 1 if val else 0
-        try:
-            # 支持字符串如 "1"、"-1" 转为真（1），"0" 转为假（0）
-            return 1 if int(val) != 0 else 0
-        except Exception:
-            # 转换失败（如空串）时安全回退为 0
-            return 0
+        return 1 if parse_bool_value(val) else 0
 
     # 字符串与十六进制/二进制位串不走十进制数值上下限夹逼，交由后续专用分支解析
     if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):

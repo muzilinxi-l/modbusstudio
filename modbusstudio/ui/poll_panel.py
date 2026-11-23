@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
+import queue
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
-from typing import TYPE_CHECKING, Dict, List, Optional
+from tkinter import messagebox, ttk
+from typing import TYPE_CHECKING, Callable, Dict, List
 
 # 为什么用 try/except 导入 pyserial 的串口枚举工具：
 # 允许在未安装 pyserial 或无硬件串口驱动的机器上正常打开界面并回退使用预设 COM1~COM4 列表。
@@ -67,24 +68,69 @@ class PollPanel(ttk.Frame):
         super().__init__(parent)
         # 保存全局应用核心容器引用，用于访问 app.poll_service 与 app.logging_service
         self.app = app
-        # 连续轮询运行状态标志与定时器句柄
+        # 连续轮询运行状态标志
         self._is_polling_loop = False
-        self._poll_timer_id = None
+        self._destroyed = False
+        # 主线程安全 UI 回调队列与定时泵句柄（后台线程只入队，彻底实现零跨线程 Tk 调用）
+        self._ui_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._ui_pump_after_id = None
         # 主机发送与成功接收计数统计，实时显示在右上角状态标签
         self._tx_count = 0
         self._rx_count = 0
         # 单次读取防重入忙标志，防止用户在网络超时等待期间连续狂点“单次读取”堆积请求
         self._is_poll_busy = False
         # 为什么使用 max_workers=1 的 ThreadPoolExecutor：
-        # 1. 将耗时的 TCP 握手或串口打开/单次读取移出 Tkinter 主线程，彻底杜绝界面卡死；
+        # 1. 将耗时的 TCP 握手或串口打开/单次读取/断开移出 Tkinter 主线程，彻底杜绝界面卡死；
         # 2. 限制单工作线程可保证同一串口或 TCP 连接上的主机请求严格串行化，不会发生并发抢占锁冲突。
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="PollWorker")
 
         self._build_ui()
         self._refresh_poll_com_ports()
+        self._ui_pump_after_id = self.after(30, self._drain_ui_queue)
+
+    def _post_ui(self, fn: Callable[[], None]) -> None:
+        """供后台工作线程将 UI 更新闭包安全入队，严禁后台线程直接调用任何 Tk API。"""
+        if not self._destroyed:
+            self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self) -> None:
+        """主线程每 30ms 消费后台投递的 UI 更新回调，面板销毁后自动停止。"""
+        if self._destroyed:
+            return
+        try:
+            if not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                self._destroyed = True
+                return
+            for _ in range(50):
+                try:
+                    cb = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    cb()
+                except Exception:
+                    pass
+        finally:
+            if not self._destroyed and hasattr(self, "winfo_exists") and self.winfo_exists():
+                try:
+                    self._ui_pump_after_id = self.after(30, self._drain_ui_queue)
+                except Exception:
+                    self._ui_pump_after_id = None
 
     def destroy(self) -> None:
-        """销毁面板前回收后台轮询执行线程池，避免残留工作线程。"""
+        """销毁面板前取消定时泵、非阻塞停止后台连续轮询并回收执行线程池，避免残留线程访问已销毁控件。"""
+        self._destroyed = True
+        self._is_polling_loop = False
+        if self._ui_pump_after_id is not None:
+            try:
+                self.after_cancel(self._ui_pump_after_id)
+            except Exception:
+                pass
+            self._ui_pump_after_id = None
+        try:
+            self.app.poll_service.request_stop_polling_nonblocking()
+        except Exception:
+            pass
         try:
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
@@ -303,14 +349,26 @@ class PollPanel(ttk.Frame):
         )
 
     def _toggle_connect(self) -> None:
-        """切换主机通信连接状态（未连接时提交后台线程池异步建连，已连接时立即断开并同步复位轮询按钮）。"""
+        """切换主机通信连接状态（连接/断开均交由单线程后台执行器串行处理，零跨线程 Tk 调用且不阻塞主线程）。"""
         if self.app.poll_service.is_connected:
-            self.app.poll_service.disconnect()
+            # 立即响应 UI 复位并非阻塞通知轮询线程退出，避免 stop_polling().join(2s) 阻塞主线程
+            self.app.poll_service.request_stop_polling_nonblocking()
             if self._is_polling_loop:
                 self._is_polling_loop = False
                 self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton", state="normal")
             self.lbl_conn_status.config(text="● 已断开", foreground="#dc3545")
-            self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
+            self.btn_connect.config(text="🔌 建立连接", style="primary.TButton", state="normal")
+
+            def do_disconnect():
+                try:
+                    self.app.poll_service.disconnect()
+                except Exception:
+                    pass
+
+            try:
+                self._executor.submit(do_disconnect)
+            except Exception:
+                do_disconnect()
         else:
             cfg = self._get_connection_config()
             # 建连期间先将状态置为黄色“连接中...”并禁用按钮，防止重复点击触发并发连接
@@ -318,23 +376,33 @@ class PollPanel(ttk.Frame):
             self.btn_connect.config(state="disabled")
 
             def do_connect():
-                """在后台工作线程执行阻塞式 TCP/RTU 连接握手，完成后调度回主线程更新状态。"""
-                ok, msg = self.app.poll_service.connect(cfg)
-                def on_done():
-                    """在 Tkinter 主线程恢复连接按钮并更新连接状态指示灯。"""
-                    # 为什么检查 winfo_exists()：防止用户在连接超时等待期间关闭了窗口导致控件已销毁报错
-                    if hasattr(self, "winfo_exists") and self.winfo_exists():
-                        self.btn_connect.config(state="normal")
-                        if ok:
-                            self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
-                            self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
-                        else:
-                            self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
-                            self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
-                            messagebox.showerror("连接失败", msg)
-                self.after(0, on_done)
+                """在后台工作线程执行阻塞式 TCP/RTU 连接握手，异常必兜底并入队回主线程更新状态。"""
+                ok, msg = False, "未知连接异常"
+                try:
+                    ok, msg = self.app.poll_service.connect(cfg)
+                except Exception as ex:
+                    ok, msg = False, f"连接异常: {ex}"
 
-            self._executor.submit(do_connect)
+                def on_done():
+                    if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                        return
+                    self.btn_connect.config(state="normal")
+                    if ok:
+                        self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
+                        self.btn_connect.config(text="🔌 断开连接", style="danger.TButton")
+                    else:
+                        self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
+                        self.btn_connect.config(text="🔌 建立连接", style="primary.TButton")
+                        messagebox.showerror("连接失败", msg)
+
+                self._post_ui(on_done)
+
+            try:
+                self._executor.submit(do_connect)
+            except Exception as ex:
+                self.btn_connect.config(state="normal", text="🔌 建立连接", style="primary.TButton")
+                self.lbl_conn_status.config(text="● 连接失败", foreground="#dc3545")
+                messagebox.showerror("连接失败", str(ex))
 
     def _poll_once(self) -> None:
         """异步执行单次寄存器轮询读取，彻底解放 UI 主线程，杜绝网络超时引起的界面假死。"""
@@ -365,30 +433,58 @@ class PollPanel(ttk.Frame):
         self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
 
         def do_read():
-            """在后台线程调用 PollService 读取寄存器块，并将结果通过 after(0) 投递回主线程。"""
-            res: PollResult = self.app.poll_service.read_registers(task)
+            """在后台线程调用 PollService 读取寄存器块，异常必兜底并经主线程安全队列回传结果。"""
+            try:
+                res: PollResult = self.app.poll_service.read_registers(task)
+            except Exception as ex:
+                res = PollResult(
+                    success=False,
+                    area=task.area,
+                    start_address=task.start_address,
+                    count=task.count,
+                    error_msg=f"读取异常: {ex}",
+                )
+
             def on_done():
-                """在主线程清除忙标志、更新接收统计并渲染读取到的寄存器表格。"""
                 self._is_poll_busy = False
-                if not hasattr(self, "winfo_exists") or not self.winfo_exists():
+                if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
                     return
+                if self.app.poll_service.is_connected:
+                    self.lbl_conn_status.config(text="● 已连接", foreground="#28a745")
+                    self.btn_connect.config(text="🔌 断开连接", style="danger.TButton", state="normal")
                 if res.success:
                     self._rx_count += 1
                     self._update_result_tree(res)
                 else:
                     self.app.logging_service.post("ERROR", cfg.unit_id, f"读取失败: {res.error_msg}")
                 self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
-            self.after(0, on_done)
 
-        self._executor.submit(do_read)
+            self._post_ui(on_done)
+
+        try:
+            self._executor.submit(do_read)
+        except Exception as ex:
+            self._is_poll_busy = False
+            self.app.logging_service.post("ERROR", cfg.unit_id, f"提交读取任务失败: {ex}")
 
     # [POLL-CONFIG] 连续轮询控制：调用 PollService.start_continuous_polling，支持用户自定义间隔
     def _toggle_poll_loop(self) -> None:
         """启动或停止后台连续定时轮询任务，支持 100~60000ms 自定义轮询周期。"""
         if self._is_polling_loop:
             self._is_polling_loop = False
-            self.app.poll_service.stop_continuous_polling()
-            self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
+            self.app.poll_service.request_stop_polling_nonblocking()
+            self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton", state="normal")
+
+            def _do_stop_loop():
+                try:
+                    self.app.poll_service.stop_continuous_polling()
+                except Exception:
+                    pass
+
+            try:
+                self._executor.submit(_do_stop_loop)
+            except Exception:
+                pass
         else:
             cfg = self._get_connection_config()
             try:
@@ -400,8 +496,6 @@ class PollPanel(ttk.Frame):
                 messagebox.showerror("参数错误", f"输入格式有误: {e}")
                 return
 
-            # 为什么将轮询间隔钳位在 100ms ~ 60000ms 之间并回写输入框：
-            # 防止用户输入 0ms 或负数引发后台死循环打满 CPU 和串口带宽，同时将修正后的实际生效值直观反馈到界面。
             try:
                 raw_interval = int(self.poll_interval_var.get())
             except Exception:
@@ -419,41 +513,43 @@ class PollPanel(ttk.Frame):
                 interval_ms=interval_ms,
             )
 
-            # 为什么在 _on_success_from_worker 与 _on_error_from_worker 内部必须套一层 self.after(0, ...)：
-            # 底层 ModbusPollEngine 的轮询回调是在后台 daemon 线程中直接触发的，而 Tkinter 控件与 Treeview
-            # 不是线程安全的；通过 after(0) 将 UI 更新派发给主事件循环，彻底杜绝跨线程操作 Tcl 解释器导致的闪退。
+            # 后台轮询回调只写入线程安全队列，由主线程定时泵消费，彻底实现零跨线程 Tk 调用
             def _on_success_from_worker(fresh_dict: Dict[int, int]):
-                """接收后台轮询线程返回的最新寄存器字典并派发到主线程渲染。"""
                 def _ui_update():
-                    if hasattr(self, "winfo_exists") and self.winfo_exists():
-                        self._tx_count += 1
-                        self._rx_count += 1
-                        self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
-                        self._update_from_regs(fresh_dict, start_addr, count)
-                self.after(0, _ui_update)
+                    if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                        return
+                    self._tx_count += 1
+                    self._rx_count += 1
+                    self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
+                    self._update_from_regs(fresh_dict, start_addr, count)
+                self._post_ui(_ui_update)
 
             def _on_error_from_worker(err_msg: str):
-                """接收后台轮询线程的异常消息并派发到主线程写入日志。"""
                 def _ui_error():
-                    if hasattr(self, "winfo_exists") and self.winfo_exists():
-                        self._tx_count += 1
-                        self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
-                        self.app.logging_service.post("ERROR", cfg.unit_id, f"轮询异常: {err_msg}")
-                self.after(0, _ui_error)
+                    if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                        return
+                    self._tx_count += 1
+                    self.lbl_stats.config(text=f"Tx: {self._tx_count} | Rx: {self._rx_count}")
+                    self.app.logging_service.post("ERROR", cfg.unit_id, f"轮询异常: {err_msg}")
+                self._post_ui(_ui_error)
 
             # 将可能触发 2s TCP/RTU 建连的启动过程放入后台线程池，避免阻塞 Tkinter 主线程
             self.btn_poll_loop.config(state="disabled", text="⏳ 启动中...")
 
             def _do_start_loop():
-                ok, msg = self.app.poll_service.start_continuous_polling(
-                    task=task,
-                    interval_ms=interval_ms,
-                    on_success=_on_success_from_worker,
-                    on_error=_on_error_from_worker,
-                )
+                ok, msg = False, "未知启动异常"
+                try:
+                    ok, msg = self.app.poll_service.start_continuous_polling(
+                        task=task,
+                        interval_ms=interval_ms,
+                        on_success=_on_success_from_worker,
+                        on_error=_on_error_from_worker,
+                    )
+                except Exception as ex:
+                    ok, msg = False, f"启动轮询异常: {ex}"
 
                 def _on_started():
-                    if not (hasattr(self, "winfo_exists") and self.winfo_exists()):
+                    if self._destroyed or not (hasattr(self, "winfo_exists") and self.winfo_exists()):
                         return
                     self.btn_poll_loop.config(state="normal")
                     if ok:
@@ -466,9 +562,14 @@ class PollPanel(ttk.Frame):
                         self.btn_poll_loop.config(text="🔁 连续轮询", style="success.TButton")
                         messagebox.showerror("启动失败", msg)
 
-                self.after(0, _on_started)
+                self._post_ui(_on_started)
 
-            self._executor.submit(_do_start_loop)
+            try:
+                self._executor.submit(_do_start_loop)
+            except Exception as ex:
+                self._is_polling_loop = False
+                self.btn_poll_loop.config(state="normal", text="🔁 连续轮询", style="success.TButton")
+                messagebox.showerror("启动失败", str(ex))
 
     # [POLL-CONFIG] 适配从局部有效寄存器字典渲染表格
     def _update_from_regs(self, regs_dict: Dict[int, int], start_addr: int, count: int) -> None:

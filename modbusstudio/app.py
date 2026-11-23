@@ -64,12 +64,19 @@ def resolve_runtime_path(relative_or_abs: str) -> str:
     return os.path.join(get_app_base_dir(), relative_or_abs)
 
 
+def _session_backup_path(target_path: str) -> str:
+    """将历史会话备份收拢至同级 logs/ 下的 .backup.json 文件，避免在工程/发布根目录产生 .bak 残留。"""
+    parent_dir = os.path.dirname(target_path) or get_app_base_dir()
+    stem, _ext = os.path.splitext(os.path.basename(target_path))
+    return os.path.join(parent_dir, "logs", f"{stem}.backup.json")
+
+
 def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> bool:
     """将应用当前会话状态（业务数据库路径、所有从机配置及点表动态模拟状态）原子持久化至 JSON 文件。
     参数：app（ModbusStudioAppCore 实例）、path（可选文件路径，默认为应用基准目录下的 session_state.json）。
     返回：bool（保存是否成功）。
-    步骤：1.解析绝对路径；2.先写入同目录临时文件并 fsync；3.若原文件存在则备份为 .bak；4.原子 os.replace 替换目标文件。
-    副作用：在磁盘上原子写入 session_state.json 及备份 session_state.json.bak。
+    步骤：1.解析绝对路径；2.先写入同目录临时文件并 fsync；3.若原文件存在则归档备份至 logs/<stem>.backup.json；4.原子 os.replace 替换目标文件。
+    副作用：在磁盘上原子写入 session_state.json 及 logs/session_state.backup.json（不产生 .bak 文件）。
     """
     target_path = os.path.abspath(path) if path else resolve_runtime_path(SAVE_FILENAME)
     tmp_path = target_path + ".tmp"
@@ -95,7 +102,12 @@ def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> 
                 pass
 
         if os.path.exists(target_path):
-            shutil.copy2(target_path, target_path + ".bak")
+            backup_path = _session_backup_path(target_path)
+            try:
+                os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+                shutil.copy2(target_path, backup_path)
+            except Exception as be:
+                logging.getLogger("App").warning(f"归档会话备份失败（不影响主存档写入）: {be}")
 
         os.replace(tmp_path, target_path)
         return True
@@ -124,21 +136,21 @@ def _read_session_json(file_path: str) -> Optional[Dict[str, Any]]:
 
 
 def load_session_state(path: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """从磁盘读取并解析会话状态 JSON 文件；若主文件损坏或缺失，自动尝试从 .bak 备份恢复。
+    """从磁盘读取并解析会话状态 JSON 文件；若主文件损坏或缺失，自动尝试从 logs 备份或历史 .bak 恢复。
     参数：path（可选文件路径，默认为 session_state.json）。
     返回：Optional[Dict[str, Any]]，成功读取且 schema_version 匹配时返回字典，否则返回 None。
-    副作用：从 .bak 恢复时记录一条告警日志。
+    副作用：从备份恢复时记录一条告警日志。
     """
     target_path = os.path.abspath(path) if path else resolve_runtime_path(SAVE_FILENAME)
     data = _read_session_json(target_path)
     if data is not None:
         return data
 
-    bak_path = target_path + ".bak"
-    bak_data = _read_session_json(bak_path)
-    if bak_data is not None:
-        logging.getLogger("App").warning(f"主会话存档损坏或缺失，已自动回退恢复备份: {bak_path}")
-        return bak_data
+    for backup_candidate in (_session_backup_path(target_path), target_path + ".bak"):
+        bak_data = _read_session_json(backup_candidate)
+        if bak_data is not None:
+            logging.getLogger("App").warning(f"主会话存档损坏或缺失，已自动回退恢复备份: {backup_candidate}")
+            return bak_data
     return None
 
 

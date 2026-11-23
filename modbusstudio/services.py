@@ -560,6 +560,9 @@ class SlaveService:
                         return False, f"站地址冲突：{proto_name} [{ep_desc}] 下已存在站地址为 {cfg.unit_id} 的运行中从机 [{other_dev.name}]！"
 
         try:
+            # 当从机点表包含 0 号协议地址（如 extra/hems.cdb 0-based 点表）时自动使用 address_base=0，
+            # 防止 0 号寄存器计算出 start_idx=-1 被静默丢弃；纯 >=1 地址点表保持默认 1-based 兼容。
+            has_zero_address = any(pt.address == 0 for pt in device.points.values())
             engine = ModbusSlaveEngine(
                 comm_type=cfg.comm_type.value,
                 host=cfg.host,
@@ -570,6 +573,7 @@ class SlaveService:
                 parity=cfg.parity,
                 stopbits=cfg.stop_bits,
                 slave_id=cfg.unit_id,
+                address_base=0 if has_zero_address else 1,
             )
 
             # 注册报文日志回调：根据报文前缀中的 RX/TX 标记自动归类日志方向并投递至 LoggingService
@@ -727,90 +731,129 @@ class PollService:
     def __init__(self, logging_service: LoggingService):
         """初始化主机轮询服务，绑定日志分发器并初始化底层引擎与连接状态变量。"""
         self.logging_service = logging_service
+        self._lock = threading.RLock()
         self._engine: Optional[ModbusPollEngine] = None
         self._is_connected: bool = False
         self._current_config: Optional[ConnectionConfig] = None
 
+    @staticmethod
+    def _is_same_endpoint(a: Optional[ConnectionConfig], b: Optional[ConnectionConfig]) -> bool:
+        """比较两次连接配置是否指向同一物理端点（不包含站号 unit_id）。"""
+        if not a or not b or a.comm_type != b.comm_type:
+            return False
+        if a.comm_type == CommType.RTU:
+            return (
+                a.com_port.strip().upper() == b.com_port.strip().upper()
+                and a.baudrate == b.baudrate
+                and a.data_bits == b.data_bits
+                and a.parity == b.parity
+                and a.stop_bits == b.stop_bits
+            )
+        return a.host.strip() == b.host.strip() and a.port == b.port
+
     @property
     def is_connected(self) -> bool:
         """返回当前主机客户端是否已与目标从机建立物理连接。"""
-        return self._is_connected
+        with self._lock:
+            return self._is_connected
 
     def connect(self, cfg: ConnectionConfig) -> Tuple[bool, str]:
         """根据 ConnectionConfig 建立 Modbus TCP 或 RTU 主机连接，并挂载报文跟踪日志回调。"""
-        # 若已有旧连接处于活跃状态，先安全断开并释放旧套接字/串口句柄
-        if self._is_connected and self._engine:
-            self.disconnect()
+        with self._lock:
+            # 若已有旧连接处于活跃状态，先安全断开并释放旧套接字/串口句柄
+            if self._is_connected and self._engine:
+                self.disconnect()
 
-        try:
-            self._engine = ModbusPollEngine(
-                host=cfg.host,
-                port=cfg.port,
-                slave_id=cfg.unit_id,
-            )
-            self._engine.on_packet_log = lambda msg, level: self.logging_service.post(
-                "RX" if "RX" in msg else ("TX" if "TX" in msg else "SYS"),
-                self._engine.slave_id if self._engine else cfg.unit_id,
-                msg,
-            )
-
-            if cfg.comm_type == CommType.RTU:
-                ok = self._engine.connect_rtu(
-                    serial_port=cfg.com_port,
-                    baudrate=cfg.baudrate,
-                    bytesize=cfg.data_bits,
-                    parity=cfg.parity,
-                    stopbits=cfg.stop_bits,
-                )
-            else:
-                ok = self._engine.connect_tcp(
+            try:
+                engine = ModbusPollEngine(
                     host=cfg.host,
                     port=cfg.port,
+                    slave_id=cfg.unit_id,
+                )
+                engine.on_packet_log = lambda msg, level, eng=engine: self.logging_service.post(
+                    "RX" if "RX" in msg else ("TX" if "TX" in msg else "SYS"),
+                    eng.slave_id,
+                    msg,
                 )
 
-            if ok:
-                self._is_connected = True
-                self._current_config = cfg
-                self.logging_service.post("SYS", cfg.unit_id, f"主机客户端连接成功: {cfg.summary}")
-                return True, "连接成功"
-            else:
+                if cfg.comm_type == CommType.RTU:
+                    ok = engine.connect_rtu(
+                        serial_port=cfg.com_port,
+                        baudrate=cfg.baudrate,
+                        bytesize=cfg.data_bits,
+                        parity=cfg.parity,
+                        stopbits=cfg.stop_bits,
+                    )
+                else:
+                    ok = engine.connect_tcp(
+                        host=cfg.host,
+                        port=cfg.port,
+                    )
+
+                if ok:
+                    self._engine = engine
+                    self._is_connected = True
+                    self._current_config = cfg
+                    self.logging_service.post("SYS", cfg.unit_id, f"主机客户端连接成功: {cfg.summary}")
+                    return True, "连接成功"
+                else:
+                    self._engine = None
+                    self._is_connected = False
+                    return False, "无法建立连接"
+            except Exception as e:
+                self._engine = None
                 self._is_connected = False
-                return False, "无法建立连接"
-        except Exception as e:
-            self._is_connected = False
-            return False, f"连接异常: {e}"
+                return False, f"连接异常: {e}"
 
     def disconnect(self) -> Tuple[bool, str]:
         """停止可能正在运行的后台连续轮询，并断开主机通信连接。"""
-        if self._engine:
+        with self._lock:
+            engine = self._engine
+            self._engine = None
+            self._is_connected = False
+            self._current_config = None
+        if engine:
             try:
-                self._engine.disconnect()
+                engine.disconnect()
             except Exception:
                 pass
-            self._engine = None
-        self._is_connected = False
         return True, "已断开连接"
 
     def read_registers(self, task: PollTask) -> PollResult:
-        """执行单次寄存器/线圈块读取（若尚未连接则自动按 task.conn_config 尝试建连），返回强类型 PollResult。"""
+        """执行单次寄存器/线圈块读取（若尚未连接或目标端点变化则自动建连），返回强类型 PollResult。"""
         t0 = time.time()
-        # 为什么在未连接时自动调用 self.connect(task.conn_config)：
-        # 允许用户打开主机面板后无需先手动点“建立连接”，直接点击“单次读取”即可一键完成建连与问询。
-        if not self._is_connected or not self._engine:
-            ok, msg = self.connect(task.conn_config)
-            if not ok:
-                return PollResult(
-                    success=False,
-                    area=task.area,
-                    start_address=task.start_address,
-                    count=task.count,
-                    error_msg=f"未连接或连接失败: {msg}",
-                    elapsed_ms=(time.time() - t0) * 1000,
-                )
+        with self._lock:
+            need_connect = (
+                not self._is_connected
+                or not self._engine
+                or (self._current_config is not None and not self._is_same_endpoint(self._current_config, task.conn_config))
+            )
+            if need_connect:
+                ok, msg = self.connect(task.conn_config)
+                if not ok:
+                    return PollResult(
+                        success=False,
+                        area=task.area,
+                        start_address=task.start_address,
+                        count=task.count,
+                        error_msg=f"未连接或连接失败: {msg}",
+                        elapsed_ms=(time.time() - t0) * 1000,
+                    )
+            engine = self._engine
+
+        if not engine:
+            return PollResult(
+                success=False,
+                area=task.area,
+                start_address=task.start_address,
+                count=task.count,
+                error_msg="连接已断开",
+                elapsed_ms=(time.time() - t0) * 1000,
+            )
 
         try:
-            self._engine.slave_id = task.conn_config.unit_id
-            ok, values, err_msg = self._engine.read_block(
+            engine.slave_id = task.conn_config.unit_id
+            ok, values, err_msg = engine.read_block(
                 area=task.area.value,
                 start_addr=task.start_address,
                 count=task.count,
@@ -853,34 +896,52 @@ class PollService:
         on_error: Optional[Callable[[str], None]] = None,
     ) -> Tuple[bool, str]:
         """启动后台连续定时轮询（间隔 interval_ms 毫秒），自动确保已建立连接并绑定成功/失败回调。"""
-        # 1. 若尚未连接，先按任务配置自动建立物理连接
-        if not self._is_connected or not self._engine:
-            ok, msg = self.connect(task.conn_config)
-            if not ok:
-                return False, f"建立连接失败: {msg}"
+        with self._lock:
+            need_connect = (
+                not self._is_connected
+                or not self._engine
+                or (self._current_config is not None and not self._is_same_endpoint(self._current_config, task.conn_config))
+            )
+            if need_connect:
+                ok, msg = self.connect(task.conn_config)
+                if not ok:
+                    return False, f"建立连接失败: {msg}"
 
-        # 2. 防重入保护：若底层引擎已在轮询中则拒绝重复启动
-        if self._engine.is_polling:
-            return False, "轮询已在运行中"
+            engine = self._engine
+            if not engine:
+                return False, "建立连接失败: 引擎未就绪"
 
-        # 3. 绑定成功与错误回调（注意：回调在后台 worker 线程触发，UI 调用方须通过 after(0) 切回主线程）
-        if on_success:
-            self._engine.on_poll_success = on_success
-        if on_error:
-            self._engine.on_poll_error = on_error
+            # 2. 防重入保护：若底层引擎已在轮询中则拒绝重复启动
+            if engine.is_polling:
+                return False, "轮询已在运行中"
 
-        self._engine.slave_id = task.conn_config.unit_id
-        self._engine.start_polling(
-            area=task.area.value,
-            start_addr=task.start_address,
-            count=task.count,
-            interval_ms=interval_ms,
-        )
-        return True, "轮询已启动"
+            # 3. 绑定成功与错误回调（注意：回调在后台 worker 线程触发，UI 调用方须通过主线程安全队列消费）
+            if on_success:
+                engine.on_poll_success = on_success
+            if on_error:
+                engine.on_poll_error = on_error
+
+            engine.slave_id = task.conn_config.unit_id
+            engine.start_polling(
+                area=task.area.value,
+                start_addr=task.start_address,
+                count=task.count,
+                interval_ms=interval_ms,
+            )
+            return True, "轮询已启动"
+
+    def request_stop_polling_nonblocking(self) -> None:
+        """非阻塞通知后台连续轮询线程尽快退出（供 UI 销毁路径调用，不阻塞主线程）。"""
+        with self._lock:
+            engine = self._engine
+        if engine:
+            engine.request_stop_polling()
 
     def stop_continuous_polling(self) -> None:
         """安全停止后台连续轮询任务并唤醒等待中的轮询线程退出。"""
-        if self._engine:
-            self._engine.stop_polling()
+        with self._lock:
+            engine = self._engine
+        if engine:
+            engine.stop_polling()
 
 

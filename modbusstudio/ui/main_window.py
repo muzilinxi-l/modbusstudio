@@ -73,6 +73,9 @@ class MainWindow(ttk.Frame):
         self.root = root
         self.app = app
 
+        self._destroyed = False
+        self._log_after_id = None
+
         # 依次执行窗口标题/尺寸初始化、全局字体与控件样式配置、上下分割窗格构建
         self._init_window()
         self._init_style()
@@ -81,7 +84,18 @@ class MainWindow(ttk.Frame):
         # 为什么使用 80ms (~12.5 FPS) 定时批量刷新而非每收到一帧报文就写一次 Text 控件：
         # 当几十台从机并发响应或主机 100ms 高频轮询时，后台每秒可产生数百条报文；
         # 若每次直接调用 Text.insert + Text.see("end")，Tkinter 重排与滚屏会瞬间占满主线程导致界面“未响应”。
-        self.root.after(80, self._flush_log_loop)
+        self._log_after_id = self.root.after(80, self._flush_log_loop)
+
+    def destroy(self) -> None:
+        """销毁主窗口容器前取消日志定时刷新句柄，防止销毁竞态与 Tcl 报错。"""
+        self._destroyed = True
+        if self._log_after_id is not None:
+            try:
+                self.root.after_cancel(self._log_after_id)
+            except Exception:
+                pass
+            self._log_after_id = None
+        super().destroy()
 
     def _init_window(self) -> None:
         """设置主窗口标题、初始几何尺寸 (1240x840)、最小缩放边界及窗口图标。"""
@@ -382,43 +396,49 @@ class MainWindow(ttk.Frame):
 
     def _flush_log_loop(self) -> None:
         """主线程定时（每 80ms）从日志队列批量拉取最多 200 条记录合并写入文本框并执行超限裁剪。"""
-        # 为什么整个方法体包裹在 try...finally 并确保 finally 中重挂 `self.root.after(80, ...)`：
-        # 即使某次单批日志渲染遇到罕见编码或控件状态异常，定时刷新链路也绝不能中断。
+        self._log_after_id = None
+        if self._destroyed:
+            return
         try:
             entries: List[LogEntry] = self.app.logging_service.drain_batch(max_count=200)
             if entries:
                 show_traffic = self.show_traffic_var.get()
                 self.log_text.config(state="normal")
-
-                # 批量遍历插入：若用户取消勾选“显示问询与响应报文”，则跳过 RX/TX 仅显示 SYS/ERROR
-                for entry in entries:
-                    if not show_traffic and entry.direction in ("RX", "TX"):
-                        continue
-                    line_str = entry.format_line()
-                    self.log_text.insert("end", line_str, entry.direction)
-
-                # 行数超限清理：当总行数超过 _max_log_lines (1500) 时，一次性删除头部最旧的溢出行
                 try:
-                    num_lines = int(float(self.log_text.index("end-1c")))
-                    if num_lines > self._max_log_lines:
-                        trim_to = num_lines - self._max_log_lines
-                        self.log_text.delete("1.0", f"{trim_to}.0")
-                except Exception:
-                    pass
+                    # 批量遍历插入：若用户取消勾选“显示问询与响应报文”，则跳过 RX/TX 仅显示 SYS/ERROR
+                    for entry in entries:
+                        if not show_traffic and entry.direction in ("RX", "TX"):
+                            continue
+                        line_str = entry.format_line()
+                        self.log_text.insert("end", line_str, entry.direction)
 
-                if self.auto_scroll_var.get():
-                    self.log_text.see("end")
+                    # 行数超限清理：当总行数超过 _max_log_lines (1500) 时，一次性删除头部最旧的溢出行
+                    try:
+                        num_lines = int(float(self.log_text.index("end-1c")))
+                        if num_lines > self._max_log_lines:
+                            trim_to = num_lines - self._max_log_lines
+                            self.log_text.delete("1.0", f"{trim_to + 1}.0")
+                    except Exception:
+                        pass
 
-                self.log_text.config(state="disabled")
+                    if self.auto_scroll_var.get():
+                        self.log_text.see("end")
+                finally:
+                    try:
+                        if self.log_text.winfo_exists():
+                            self.log_text.config(state="disabled")
+                    except Exception:
+                        pass
         except Exception:
             pass
         finally:
             # 仅在窗口与组件仍然存活时续挂 80ms 定时循环，防止窗口销毁后抛 TclError
-            try:
-                if hasattr(self, "winfo_exists") and self.winfo_exists() and self.root.winfo_exists():
-                    self.root.after(80, self._flush_log_loop)
-            except Exception:
-                pass
+            if not self._destroyed:
+                try:
+                    if hasattr(self, "winfo_exists") and self.winfo_exists() and self.root.winfo_exists():
+                        self._log_after_id = self.root.after(80, self._flush_log_loop)
+                except Exception:
+                    self._log_after_id = None
 
     def _copy_log(self) -> None:
         """将当前选中的日志文本（若未选中则复制全部视窗日志）写入系统剪贴板。"""

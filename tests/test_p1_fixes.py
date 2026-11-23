@@ -267,17 +267,18 @@ def test_p1_5_codec_nan_string_length_and_point_clamping():
 
 
 def test_p1_6_atomic_session_save_bak_fallback_and_dirty_from_dict(tmp_path):
-    """P1-6：验证会话原子写入、主文件损坏自动回退 .bak、以及脏字段反序列化容错。"""
+    """P1-6：验证会话原子写入（无 .bak 残留，备份归档至 logs/*.backup.json）、主文件损坏自动回退恢复、以及脏字段反序列化容错。"""
     state_file = str(tmp_path / "session_state.json")
     app = ModbusStudioAppCore(restore_session=False, session_path=state_file)
     try:
         assert app.save_session_state() is True
-        # 二次保存生成 .bak 备份
+        # 二次保存将旧版归档到 logs/session_state.backup.json，不在根目录产生 .bak 文件
         assert app.save_session_state() is True
-        assert (tmp_path / "session_state.json.bak").exists()
+        assert not (tmp_path / "session_state.json.bak").exists()
+        assert (tmp_path / "logs" / "session_state.backup.json").exists()
         assert not (tmp_path / "session_state.json.tmp").exists()
 
-        # 破坏主存档文件，验证 load_session_state 自动从 .bak 恢复
+        # 破坏主存档文件，验证 load_session_state 自动从 logs 备份恢复
         with open(state_file, "w", encoding="utf-8") as f:
             f.write("{truncated_json")
 

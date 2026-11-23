@@ -130,10 +130,11 @@ def test_app_core_save_and_load_session_state(tmp_path):
     assert save_ok is True
     assert os.path.exists(state_file)
 
-    # 再次保存，验证 .bak 备份机制生成
+    # 再次保存，验证无 .bak 残留且备份归档至 logs/*.backup.json
     save_ok2 = app.save_session_state(path=state_file)
     assert save_ok2 is True
-    assert os.path.exists(state_file + ".bak")
+    assert not os.path.exists(state_file + ".bak")
+    assert os.path.exists(os.path.join(str(tmp_path), "logs", "test_session_state.backup.json"))
 
     # 启动第二个 AppCore 实例并指向该文件进行恢复
     app2 = ModbusStudioAppCore(restore_session=True, session_path=state_file)

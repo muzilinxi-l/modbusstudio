@@ -591,43 +591,77 @@ class HemsDatabase:
         return dt_str
 
     def save_app_points(self, app_id: int, points: List[Dict[str, Any]]) -> bool:
-        """将软件中调整好的点表与变位信息反向序列化更新回 SQLite app 表的 More 字段。"""
+        """将软件中调整好的点表与变位信息无损反向序列化更新回 SQLite app 表的 More 字段。"""
         if not os.path.exists(self.db_path):
             return False
 
         conn = sqlite3.connect(self.db_path, timeout=5.0)
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT More FROM app WHERE Id = ?;", (app_id,))
+            cursor.execute("SELECT Type, More FROM app WHERE Id = ?;", (app_id,))
             row = cursor.fetchone()
             if not row:
                 return False
 
-            more_raw = row[0]
-            more = {}
-            if isinstance(more_raw, bytes):
+            app_type, more_raw = row[0], row[1]
+            more: Dict[str, Any] = {}
+            if more_raw is not None and more_raw != b"" and more_raw != "":
                 try:
-                    more = json.loads(more_raw.decode("utf-8"))
-                except Exception:
-                    pass
-            elif isinstance(more_raw, str):
-                try:
-                    more = json.loads(more_raw)
-                except Exception:
-                    pass
+                    if isinstance(more_raw, bytes):
+                        parsed = json.loads(more_raw.rstrip(b"\x00").decode("utf-8"))
+                    elif isinstance(more_raw, str):
+                        parsed = json.loads(more_raw)
+                    else:
+                        logger.error(f"save_app_points 终止: app_id={app_id} More 列类型不受支持 ({type(more_raw)})")
+                        return False
+                    if not isinstance(parsed, dict):
+                        logger.error(f"save_app_points 终止: app_id={app_id} More JSON 顶层非对象，拒绝覆盖")
+                        return False
+                    more = parsed
+                except Exception as e:
+                    logger.error(f"save_app_points 终止: app_id={app_id} 原 More JSON 解析失败，拒绝清空配置: {e}")
+                    return False
 
-            var_key = "Realtime Variables" if "Realtime Variables" in more else "Referred Variables"
-            existing_by_addr: Dict[str, Dict[str, Any]] = {}
-            for old_item in more.get(var_key, []):
-                if isinstance(old_item, dict):
+            # 依据 app.Type 优先确定变量键（Type=2 北向从机使用 Referred Variables，其余南向采集使用 Realtime Variables）
+            if app_type == 2:
+                var_key = "Referred Variables" if ("Referred Variables" in more or "Realtime Variables" not in more) else "Realtime Variables"
+            else:
+                var_key = "Realtime Variables" if ("Realtime Variables" in more or "Referred Variables" not in more) else "Referred Variables"
+
+            def _fc_group(raw_fc: Any) -> str:
+                s = str(raw_fc or "").strip().upper()
+                if s in ("2", "02", "FC02", "1X", "DISCRETE"):
+                    return "2"
+                if s in ("1", "01", "5", "05", "15", "FC01", "FC05", "FC15", "0X", "COIL"):
+                    return "1"
+                if s in ("4", "04", "FC04", "3X", "INPUT"):
+                    return "4"
+                return "3"
+
+            existing_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+            existing_by_addr: Dict[str, List[Dict[str, Any]]] = {}
+            virtual_vars: List[Dict[str, Any]] = []
+            raw_existing_vars = more.get(var_key)
+            if isinstance(raw_existing_vars, list):
+                for old_item in raw_existing_vars:
+                    if not isinstance(old_item, dict):
+                        continue
                     old_addr = old_item.get("Register Start Address")
                     if old_addr is None or str(old_addr).strip() == "":
                         old_addr = old_item.get("Register Address")
-                    if old_addr is not None and str(old_addr).strip() != "":
-                        existing_by_addr[str(old_addr).strip()] = old_item
+                    if old_addr is None or str(old_addr).strip() == "":
+                        # 保留数据库中无物理寄存器地址的虚点/计算点，防止回写时永久丢失
+                        virtual_vars.append(old_item)
+                        continue
+                    addr_norm = str(old_addr).strip()
+                    fc_norm = _fc_group(old_item.get("Function Code"))
+                    existing_by_key[(fc_norm, addr_norm)] = old_item
+                    existing_by_addr.setdefault(addr_norm, []).append(old_item)
 
-            db_vars = []
+            db_vars: List[Dict[str, Any]] = []
             for p in points:
+                if p.get("address") is None or str(p.get("address")).strip() == "":
+                    continue
                 area_raw = str(p.get("area", ""))
                 area_str = area_raw.upper()
                 if "1X" in area_str or "DISCRETE" in area_str or "离散" in area_raw:
@@ -639,11 +673,21 @@ class HemsDatabase:
                 else:
                     fc = "3"
 
-                addr_key = str(p.get("address"))
-                base_item = dict(existing_by_addr.get(addr_key, {}))
-                eng_name = p.get("field_name") or base_item.get("English Name") or p.get("desc")
+                addr_key = str(p.get("address")).strip()
+                matched = existing_by_key.get((fc, addr_key))
+                if matched is None:
+                    addr_candidates = existing_by_addr.get(addr_key, [])
+                    if len(addr_candidates) == 1:
+                        matched = addr_candidates[0]
+                base_item = dict(matched) if matched else {}
+
+                eng_name = p.get("field_name") or base_item.get("English Name") or p.get("desc") or ""
                 chn_name = p.get("desc") or base_item.get("Chinese Name") or eng_name
                 hems_fmt = self._to_hems_transfer_format(p.get("data_type"), p.get("byte_order"))
+                scale_raw = p.get("scale", 1)
+                scale_str = "1" if scale_raw is None else str(scale_raw)
+                bo_raw = p.get("byte_order")
+                bo_str = bo_raw.value if hasattr(bo_raw, "value") else (str(bo_raw) if bo_raw is not None else "ABCD")
 
                 base_item.update({
                     "English Name": eng_name,
@@ -651,13 +695,18 @@ class HemsDatabase:
                     "Function Code": fc,
                     "Register Start Address": addr_key,
                     "Variable Transfer Format": hems_fmt,
-                    "Scale Factor": str(p.get("scale", 1)),
-                    "Byte Order": p.get("byte_order").value if hasattr(p.get("byte_order"), "value") else str(p.get("byte_order")),
+                    "Scale Factor": scale_str,
+                    "Byte Order": bo_str,
                 })
-                if p.get("unit"):
-                    base_item["Unit"] = str(p.get("unit"))
+                if "unit" in p:
+                    unit_val = str(p.get("unit") or "")
+                    if unit_val:
+                        base_item["Unit"] = unit_val
+                    else:
+                        base_item.pop("Unit", None)
                 db_vars.append(base_item)
-            more[var_key] = db_vars
+
+            more[var_key] = db_vars + virtual_vars
 
             new_more_json = json.dumps(more, ensure_ascii=False)
             cursor.execute("UPDATE app SET More = ? WHERE Id = ?;", (new_more_json, app_id))

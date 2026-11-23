@@ -1,6 +1,7 @@
 """P2 UI 阻塞异步化、空转控件接通、日志/布局修正与探活/对账边界回归测试。"""
 
 import csv
+import gc
 import json
 import time
 import tkinter as tk
@@ -25,9 +26,18 @@ from modbusstudio.ui.main_window import MainWindow
 
 
 def _make_hidden_root():
-    root = tk.Tk()
-    root.withdraw()
-    return root
+    gc.collect()
+    last_err = None
+    for _ in range(3):
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            return root
+        except tk.TclError as ex:
+            last_err = ex
+            gc.collect()
+            time.sleep(0.05)
+    raise last_err
 
 
 def test_p2_slave_panel_async_reconnect_and_batch_type_area_migration(tmp_path):
