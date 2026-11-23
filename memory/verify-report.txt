@@ -1,7 +1,7 @@
 ========================================================================
 Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 ========================================================================
-生成时间    : 2026-11-23T15:28:38.119501+08:00
+生成时间    : 2026-11-23T15:49:08.548797+08:00
 仓库根目录  : F:\GitHub\python
 记忆目录    : F:\GitHub\python\memory
 总体结论    : PASS (错误: 0, 警告: 10)
@@ -34,7 +34,7 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
 ------------------------------------------------------------------------
 【JSON 完整载荷】
 {
-  "timestamp": "2026-11-23T15:28:38.119501+08:00",
+  "timestamp": "2026-11-23T15:49:08.548797+08:00",
   "repo_root": "F:\\GitHub\\python",
   "memory_dir": "F:\\GitHub\\python\\memory",
   "overall_status": "PASS",
@@ -104,15 +104,15 @@ Memorix 共享记忆防失真自动验证报告 (memory/verify.py)
         "F:/GitHub/python-worktrees/task-1029-1423"
       ],
       "unmerged_conflicts": [],
-      "dirty_files_count": 13
+      "dirty_files_count": 9
     },
     "10_pytest_execution": {
       "status": "PASS",
       "command": "F:\\GitHub\\python\\.venv\\Scripts\\pytest.exe -q",
       "exit_code": 0,
       "passed": true,
-      "summary": "114 passed, 3 warnings in 31.14s",
-      "stdout_tail": "tests/test_ui_theme.py::test_main_window_theme_switching\n  F:\\GitHub\\python\\.venv\\Lib\\site-packages\\_pytest\\unraisableexception.py:67: PytestUnraisableExceptionWarning: Exception ignored in: <function Variable.__del__ at 0x000001C9C61F16C0>\n  \n  Traceback (most recent call last):\n    File \"C:\\Users\\123\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\tkinter\\__init__.py\", line 414, in __del__\n      if self._tk.getboolean(self._tk.call(\"info\", \"exists\", self._name)):\n                             ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  RuntimeError: main thread is not in main loop\n  \n  Enable tracemalloc to get traceback where the object was allocated.\n  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.\n    warnings.warn(pytest.PytestUnraisableExceptionWarning(msg))\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n114 passed, 3 warnings in 31.14s",
+      "summary": "119 passed in 34.18s",
+      "stdout_tail": "........................................................................ [ 60%]\n...............................................                          [100%]\n119 passed in 34.18s",
       "stderr_tail": ""
     },
     "11_needs_human_review": {

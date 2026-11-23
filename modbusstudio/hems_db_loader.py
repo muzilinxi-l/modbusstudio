@@ -45,9 +45,15 @@ def map_db_format_to_data_type(fmt_str: Optional[Any]) -> ModbusDataType:
     parsed = parse_hems_type(fmt_str)
     if parsed:
         return parsed[0]
-    # 若遇到手工编辑或旧版固件的非标格式字符串，通过小写子串启发式兜底识别
+    # 若遇到手工编辑或旧版固件的非标格式字符串，按位宽从高到低启发式兜底识别（先 64 位再 32 位再 16 位）
     s = str(fmt_str).lower().strip()
-    if "unsigned short" in s or "uint16" in s:
+    if "double" in s or "float64" in s:
+        return ModbusDataType.DOUBLE64
+    elif "uint64" in s or "unsigned int64" in s:
+        return ModbusDataType.UINT64
+    elif "int64" in s or "signed int64" in s:
+        return ModbusDataType.INT64
+    elif "unsigned short" in s or "uint16" in s:
         return ModbusDataType.UINT16
     elif "signed short" in s or "int16" in s:
         return ModbusDataType.INT16
@@ -57,8 +63,6 @@ def map_db_format_to_data_type(fmt_str: Optional[Any]) -> ModbusDataType:
         return ModbusDataType.INT32
     elif "float" in s:
         return ModbusDataType.FLOAT32
-    elif "double" in s:
-        return ModbusDataType.DOUBLE64
     elif "bool" in s or "bit" in s or "比特" in s:
         return ModbusDataType.BOOL
     elif "string" in s:
@@ -130,19 +134,18 @@ class HemsAppModel:
         self.model_name = model_name
         self.controller_lib = controller_lib
         self.enable = enable
-        self.raw_more = raw_more
-        self.local_params: Dict[str, Any] = local_params or {}
+        raw_more_dict = raw_more if isinstance(raw_more, dict) else {}
+        self.raw_more = raw_more_dict
+        self.local_params: Dict[str, Any] = local_params if isinstance(local_params, dict) else {}
 
-        # 为什么 points 同时兼容 Realtime Variables 与 Referred Variables：
-        # 1. 南向物理采集设备 (Type=1) 的点表存放在 `More["Realtime Variables"]` 中；
-        # 2. 北向对外转发从机 (Type=2) 的点表存放在 `More["Referred Variables"]` 中；
-        # 3. 统一收敛到 `self.points` 属性后，上层提取点表时无需区分南北向 JSON 结构差异。
-        self.pollings: List[Dict[str, Any]] = raw_more.get("Pollings", [])
-        self.points: List[Dict[str, Any]] = (
-            raw_more.get("Realtime Variables", [])
-            or raw_more.get("Referred Variables", [])
-        )
-        self.orders: List[Dict[str, Any]] = raw_more.get("Local Orders", [])
+        raw_pollings = raw_more_dict.get("Pollings")
+        self.pollings: List[Dict[str, Any]] = [x for x in raw_pollings if isinstance(x, dict)] if isinstance(raw_pollings, list) else []
+        raw_rt = raw_more_dict.get("Realtime Variables")
+        raw_ref = raw_more_dict.get("Referred Variables")
+        chosen_pts = raw_rt if (isinstance(raw_rt, list) and len(raw_rt) > 0) else (raw_ref if isinstance(raw_ref, list) else [])
+        self.points: List[Dict[str, Any]] = [x for x in chosen_pts if isinstance(x, dict)]
+        raw_orders = raw_more_dict.get("Local Orders")
+        self.orders: List[Dict[str, Any]] = [x for x in raw_orders if isinstance(x, dict)] if isinstance(raw_orders, list) else []
 
         # 自动解析通信方式（TCP/RTU）、网络地址（IP/Port）与从机站号（Unit ID）
         self.comm_type, self.serial_info = self._parse_comm_mode()
@@ -325,6 +328,8 @@ class HemsAppModel:
         # 4. 提取初始值并设置默认动态模拟规则。
         result = []
         for p in self.points:
+            if not isinstance(p, dict):
+                continue
             # 显式区分 None/空串与合法的 0 号地址，避免 `0 or ...` 误将地址 0 跳过
             addr_str = p.get("Register Start Address")
             if addr_str is None or str(addr_str).strip() == "":
@@ -337,8 +342,10 @@ class HemsAppModel:
             except (ValueError, TypeError):
                 continue
 
-            eng_name = p.get("English Name", f"Point_{addr}")
-            chn_name = p.get("Chinese Name", eng_name)
+            eng_raw = p.get("English Name")
+            eng_name = str(eng_raw).strip() if eng_raw not in (None, "") else f"Point_{addr}"
+            chn_raw = p.get("Chinese Name")
+            chn_name = str(chn_raw).strip() if chn_raw not in (None, "") else eng_name
             desc = chn_name if chn_name and chn_name != eng_name else eng_name
 
             fmt_str = p.get("Variable Transfer Format")
@@ -418,19 +425,25 @@ class HemsAppModel:
                     db_val = p.get(key)
                     break
 
-            # 将字符串初始值安全转换为与 dtype 匹配的 Python 标量（int 或 float）
+            # 将字符串初始值安全转换为与 dtype 匹配的 Python 标量（STRING 保留原文本，64 位整型优先直转 int 防 float 丢精度）
             if db_val is not None:
                 try:
                     if dtype == ModbusDataType.BOOL:
                         current_val = 1 if str(db_val).strip().lower() in ("1", "true", "yes", "on") else 0
+                    elif dtype == ModbusDataType.STRING:
+                        current_val = str(db_val)
                     elif dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64):
                         current_val = float(db_val)
                     else:
-                        current_val = int(float(str(db_val).strip()))
+                        s_num = str(db_val).strip()
+                        try:
+                            current_val = int(s_num)
+                        except ValueError:
+                            current_val = int(float(s_num))
                 except Exception:
-                    current_val = 0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0
+                    current_val = "" if dtype == ModbusDataType.STRING else (0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0)
             else:
-                current_val = 0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0
+                current_val = "" if dtype == ModbusDataType.STRING else (0.0 if dtype in (ModbusDataType.FLOAT32, ModbusDataType.DOUBLE64) else 0)
 
             # 组装标准点位字典：数值型默认开启“随机波动”以便导入后启动从机即可观察实时动态波形
             result.append({
@@ -496,16 +509,23 @@ class HemsDatabase:
 
             for r in rows:
                 row_keys = set(r.keys())
-                more_raw = r["More"]
+                more_raw = r["More"] if "More" in row_keys else None
                 more = {}
                 if isinstance(more_raw, bytes):
-                    try:
-                        more = json.loads(more_raw.decode("utf-8"))
-                    except Exception:
-                        pass
+                    raw_b = more_raw.rstrip(b"\x00")
+                    for enc in ("utf-8", "gb18030"):
+                        try:
+                            parsed_m = json.loads(raw_b.decode(enc))
+                            if isinstance(parsed_m, dict):
+                                more = parsed_m
+                            break
+                        except Exception:
+                            continue
                 elif isinstance(more_raw, str) and more_raw.strip().startswith("{"):
                     try:
-                        more = json.loads(more_raw)
+                        parsed_m = json.loads(more_raw)
+                        if isinstance(parsed_m, dict):
+                            more = parsed_m
                     except Exception:
                         pass
 
@@ -513,7 +533,7 @@ class HemsDatabase:
                     if var_col in row_keys and r[var_col] and isinstance(more.get(var_col), list):
                         try:
                             col_raw = r[var_col]
-                            col_list = json.loads(col_raw.decode("utf-8") if isinstance(col_raw, bytes) else col_raw)
+                            col_list = json.loads(col_raw.rstrip(b"\x00").decode("utf-8") if isinstance(col_raw, bytes) else col_raw)
                             if isinstance(col_list, list):
                                 chn_lookup = {
                                     str(item.get("English Name", "")).strip(): str(item.get("Chinese Name", "")).strip()
@@ -528,37 +548,45 @@ class HemsDatabase:
                         except Exception:
                             pass
 
-                lp_raw = r["Local Parameters"]
+                lp_raw = r["Local Parameters"] if "Local Parameters" in row_keys else None
                 local_params = {}
                 if isinstance(lp_raw, bytes):
                     try:
-                        lp_list = json.loads(lp_raw.decode("utf-8"))
+                        lp_list = json.loads(lp_raw.rstrip(b"\x00").decode("utf-8"))
                         if isinstance(lp_list, list):
                             local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
+                        elif isinstance(lp_list, dict):
+                            local_params = lp_list
                     except Exception:
                         pass
-                elif isinstance(lp_raw, str) and lp_raw.strip().startswith("["):
+                elif isinstance(lp_raw, str) and lp_raw.strip().startswith(("[", "{")):
                     try:
                         lp_list = json.loads(lp_raw)
                         if isinstance(lp_list, list):
                             local_params = {item.get("English Name"): item.get("Value") for item in lp_list if isinstance(item, dict)}
+                        elif isinstance(lp_list, dict):
+                            local_params = lp_list
                     except Exception:
                         pass
 
-                ctrl = str(r["Controller Library"])
-                has_polls = len(more.get("Pollings", [])) > 0
-                has_vars = len(more.get("Realtime Variables", [])) > 0 or len(more.get("Referred Variables", [])) > 0
-                is_modbus = "Mb" in ctrl or has_polls or has_vars or r["Type"] in (1, 2)
+                ctrl = str(r["Controller Library"]) if "Controller Library" in row_keys else ""
+                has_polls = isinstance(more.get("Pollings"), list) and len(more["Pollings"]) > 0
+                has_vars = (
+                    (isinstance(more.get("Realtime Variables"), list) and len(more["Realtime Variables"]) > 0)
+                    or (isinstance(more.get("Referred Variables"), list) and len(more["Referred Variables"]) > 0)
+                )
+                app_type_val = r["Type"] if "Type" in row_keys else 0
+                is_modbus = "Mb" in ctrl or has_polls or has_vars or app_type_val in (1, 2)
 
                 if is_modbus:
                     app_obj = HemsAppModel(
                         app_id=r["Id"],
-                        app_type=r["Type"],
-                        english_name=r["English Name"] or "",
-                        chinese_name=r["Chinese Name"] or "",
-                        model_name=r["Referred Model"] or "",
+                        app_type=app_type_val,
+                        english_name=(r["English Name"] if "English Name" in row_keys else "") or "",
+                        chinese_name=(r["Chinese Name"] if "Chinese Name" in row_keys else "") or "",
+                        model_name=(r["Referred Model"] if "Referred Model" in row_keys else "") or "",
                         controller_lib=ctrl,
-                        enable=r["enable"],
+                        enable=(r["enable"] if "enable" in row_keys else 1),
                         raw_more=more,
                         local_params=local_params,
                     )

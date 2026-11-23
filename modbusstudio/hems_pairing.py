@@ -95,10 +95,8 @@ class PairingRule:
 
     @property
     def rule_id(self) -> str:
-        """生成当前配对规则的唯一可读编号（格式 R_<target_app_id>_<target_register>）。"""
-        # 为什么用 target_app_id + target_register 组合作为规则 ID：
-        # 同一北向转发服务下每个目标寄存器地址只能绑定唯一数据源，因此该组合天然具备唯一性且支持按关键字检索。
-        return f"R_{self.target_app_id}_{self.target_register}"
+        """生成当前配对规则的唯一可读编号（格式 R_<target_app_id>_FC<target_fc>_<target_register>）。"""
+        return f"R_{self.target_app_id}_FC{self.target_fc}_{self.target_register}"
 
     @property
     def rule_type(self) -> str:
@@ -187,28 +185,36 @@ class HemsPairingEngine:
         #    `(中文设备名, 中文变量名)` 全部转为小写写入字典，可将后续数千个点位的关联查找从 O(N*M) 降至 O(1)。
         south_index: Dict[Tuple[str, str], Tuple[HemsAppModel, Dict[str, Any]]] = {}
         for a in self.apps:
-            eng_lower = a.english_name.lower().strip()
-            chn_lower = a.chinese_name.lower().strip()
-            for v in a.points:
-                v_eng = (v.get("English Name") or "").lower().strip()
-                v_chn = (v.get("Chinese Name") or "").lower().strip()
-                # 注册英文变量名的中英文设备组合键
+            # 跳过北向转发服务自身，防止北向引用点反向污染南向源点位索引
+            if a.is_north_slave:
+                continue
+            eng_lower = str(a.english_name or "").lower().strip()
+            chn_lower = str(a.chinese_name or "").lower().strip()
+            for v in (a.points or []):
+                if not isinstance(v, dict):
+                    continue
+                v_eng = str(v.get("English Name") or "").lower().strip()
+                v_chn = str(v.get("Chinese Name") or "").lower().strip()
+                # 仅在设备名非空时写入索引，避免空设备名 "" 产生误匹配与互相覆盖
                 if v_eng:
-                    south_index[(eng_lower, v_eng)] = (a, v)
-                    south_index[(chn_lower, v_eng)] = (a, v)
-                # 注册中文变量名的中英文设备组合键
+                    if eng_lower:
+                        south_index[(eng_lower, v_eng)] = (a, v)
+                    if chn_lower:
+                        south_index[(chn_lower, v_eng)] = (a, v)
                 if v_chn:
-                    south_index[(eng_lower, v_chn)] = (a, v)
-                    south_index[(chn_lower, v_chn)] = (a, v)
+                    if eng_lower:
+                        south_index[(eng_lower, v_chn)] = (a, v)
+                    if chn_lower:
+                        south_index[(chn_lower, v_chn)] = (a, v)
 
-        # 为什么遍历所有应用检查 Referred Variables：
-        # 一体机北向转发服务（如 [North]30）通过在 app.More.Referred Variables 中声明引用的南向点位，
-        # 将不同 BMS/PCS 南向设备的实时采集数据汇聚映射到北向从机的连续寄存器空间。
         for target_app in self.apps:
-            more = target_app.raw_more
-            ref_vars = more.get("Referred Variables", [])
+            more = target_app.raw_more if isinstance(target_app.raw_more, dict) else {}
+            raw_ref_vars = more.get("Referred Variables")
+            ref_vars = raw_ref_vars if isinstance(raw_ref_vars, list) else []
             for rv in ref_vars:
-                full_eng = rv.get("English Name", "")
+                if not isinstance(rv, dict):
+                    continue
+                full_eng = str(rv.get("English Name") or "")
                 # 兼容不同固件版本 JSON 字段命名，且显式保留合法的 0 号寄存器地址
                 reg_addr_str = rv.get("Register Address")
                 if reg_addr_str is None or str(reg_addr_str).strip() == "":
@@ -222,16 +228,22 @@ class HemsPairingEngine:
                 except (ValueError, TypeError):
                     continue
 
-                # 使用统一归一化解析功能码（兼容 "FC03"/"0x03"/3/None）与站号，避免脏值中断加载
+                # 使用统一归一化解析功能码（兼容 "FC03"/"0x03"/3/None）与站号，缺省回退 target_app.slave_id
                 fc = HemsAppModel._normalize_function_code(rv.get("Function Code"))
                 if fc is None:
                     fc = 4
+                default_sid = target_app.slave_id if (isinstance(target_app.slave_id, int) and 1 <= target_app.slave_id <= 247) else 1
+                raw_sid = rv.get("Slave Id")
+                if raw_sid in (None, ""):
+                    raw_sid = rv.get("Slave ID")
+                if raw_sid in (None, ""):
+                    raw_sid = rv.get("Unit ID")
                 try:
-                    raw_sid = rv.get("Slave Id", 1)
-                    slave_id = int(raw_sid) if raw_sid not in (None, "") else 1
+                    parsed_sid = int(str(raw_sid).strip()) if raw_sid not in (None, "") else default_sid
+                    slave_id = parsed_sid if 1 <= parsed_sid <= 247 else default_sid
                 except (ValueError, TypeError):
-                    slave_id = 1
-                fmt = rv.get("Variable Transfer Format") or ""
+                    slave_id = default_sid
+                fmt = str(rv.get("Variable Transfer Format") or "")
 
                 # 默认回退值：当引用名未包含 "|" 或未命中南向索引时，仍保留原始标识供排障
                 src_app_name = "未知设备"

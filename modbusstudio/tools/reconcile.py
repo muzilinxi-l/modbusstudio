@@ -50,9 +50,15 @@ def load_slaves(session_path: str) -> Tuple[List[SlaveDevice], List[str]]:
     except (OSError, json.JSONDecodeError) as e:
         return [], [f"读取存档失败 ({session_path}): {e}"]
 
+    if not isinstance(payload, dict):
+        return [], [f"存档格式非法 ({session_path}): 顶层必须是 JSON 对象"]
+
     slaves: List[SlaveDevice] = []
     warnings: List[str] = []
-    for item in payload.get("slaves", []):
+    raw_slaves = payload.get("slaves", [])
+    if not isinstance(raw_slaves, list):
+        return [], [f"存档格式非法 ({session_path}): slaves 字段必须是数组"]
+    for item in raw_slaves:
         if not isinstance(item, dict):
             warnings.append("无效的从机项 (非字典)，跳过")
             continue

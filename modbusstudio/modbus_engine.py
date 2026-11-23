@@ -610,6 +610,8 @@ class ModbusTransportServer:
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
         # [SLAVE-RECONNECT] 记录 start() 时刻，供 is_healthy() 做 0.3s 启动宽限判断
         self._start_ts: float = time.time()
+        # 记录最近一次启动监听失败原因，供 register_and_start_slave 精确拒绝假成功
+        self._start_error: Optional[str] = None
         # [SLAVE-SPEED-1] 启动就绪事件：替代 30×0.03s 固定盲等循环
         self._ready = threading.Event()
 
@@ -719,27 +721,32 @@ class ModbusTransportServer:
             # stop 后 _is_running 已清、_loop/_server/_thread 已置 None
             self.start()
         # 锁外做重建后自检与日志回传，避免长时间持锁阻塞 UI
-        # start 后 5 个已注册的从机（_server_context._slaves）仍需保持挂载，
-        # 因为 _server_context 是 self 的属性，未被 stop 清除；
-        # 新起的 TCP server 仍用同一个 context，路由表保留，从机数据块保留。
-        # [SLAVE-RECONNECT-10] 重建后主动验证一次"是否真的能收报文"（TCP 走回环真实往返；RTU 串口
-        # 无网络回环，跳过），并向 UI 日志面板回传结果，使"自动重连"按钮能明确告知用户
-        # "已重建且监听已恢复 / 已重建但端口仍不可用（请检查端口占用或网络）"，避免重建失败时静默假恢复。
-        self._log_rebuild_outcome()
-        return True
+        return self._log_rebuild_outcome()
+
+    def _emit_transport_log(self, message: str, level: str) -> None:
+        """将传输层告警/重建自检日志投递给 on_packet_log；若未绑定则广播给当前挂载从机的日志回调。"""
+        if self.on_packet_log:
+            try:
+                self.on_packet_log(message, level)
+                return
+            except Exception:
+                pass
+        with self._server_context._lock:
+            slaves = list(self._server_context._slaves.values())
+        for eng in slaves:
+            cb = getattr(eng, "on_packet_log", None)
+            if cb:
+                try:
+                    cb(message, level)
+                    return
+                except Exception:
+                    pass
 
     def _log_rebuild_outcome(self) -> bool:
-        """[SLAVE-RECONNECT-10] 重建后做一次轻量"真实可达"自检并回传结果日志。
-
-        为什么必须做：`restart_if_broken()` 的 `start()` 内部在 1s 内未就绪时**只 `logger.warning`
-        不抛错**（`_ready.wait(timeout=1.0)` 超时即返回），若端口恰好被占用（`Address already in use`），
-        重建会**静默失败**——此时 UI 侧"自动重连"按钮仍显示"已重建 N 个"，但实际收不到报文，
-        正是本次现场"自动重连无效"问题的另一半根因。故重建后对 TCP 端点做一次回环 socket 往返自检，
-        把真实结果（成功/失败）显式回传到 `on_packet_log`，让操作者能在日志面板直接看到监听是否真的恢复。
-        """
+        """[SLAVE-RECONNECT-10] 重建后做一次轻量"真实可达"自检并回传结果日志。"""
         if self.comm_type != "TCP":
-            # RTU 串口端点无法跨进程建立 TCP 回环自检，维持原有行为，不额外自检
-            return True
+            # RTU 串口端点无法跨进程建立 TCP 回环自检，依赖 is_healthy() 判断是否启动成功
+            return self.is_healthy()
         _, host, port = self.endpoint_key
         # 回环自检：0.0.0.0/通配绑定探 127.0.0.1，显式绑定具体本机网卡 IP 时探测该真实 IP
         probe_host = "127.0.0.1" if str(host).strip() in ("0.0.0.0", "", "*") else str(host).strip()
@@ -748,26 +755,19 @@ class ModbusTransportServer:
                 reachable = True
         except Exception:
             reachable = False
-        if self.on_packet_log:
-            if reachable:
-                self.on_packet_log(
-                    f"[自动重连] 端点 {self.endpoint_key} 重建成功，监听已恢复（回环自检通过）", "SYS"
-                )
-            else:
-                self.on_packet_log(
-                    f"[自动重连] 端点 {self.endpoint_key} 重建后监听仍未就绪（回环自检失败，"
-                    f"请检查端口 {port} 是否被占用或网络异常）", "ERROR"
-                )
+        if reachable:
+            self._emit_transport_log(
+                f"[自动重连] 端点 {self.endpoint_key} 重建成功，监听已恢复（回环自检通过）", "SYS"
+            )
+        else:
+            self._emit_transport_log(
+                f"[自动重连] 端点 {self.endpoint_key} 重建后监听仍未就绪（回环自检失败，"
+                f"请检查端口 {port} 是否被占用或网络异常）", "ERROR"
+            )
         return reachable
 
     def start(self) -> None:
         """启动底层物理端点监听线程，并使用事件驱动机制等待 `self._server` 就绪。"""
-        # 关键步骤（为什么使用 `self._ready.wait(timeout=1.0)` 替代盲等循环）：
-        # - 旧实现使用 `for _ in range(30): time.sleep(0.03)`，若后台线程在极短时间（如 2ms）内完成初始化，
-        # 主调线程仍可能白白等待至少一个 `0.03s` 粒度；若端口绑定失败立即抛错，更会盲等满 `30 × 0.03s = 0.9s`！
-        # - 改为 `threading.Event` 后，一旦 `_serve()` 创建好 `_server_task`（或异常进入 `except`/`finally`）立即调用 `_ready.set()`，
-        # 正常启动仅耗时 1~5ms，异常端口占用也能在几毫秒内立即唤醒返回。
-        # [SLAVE-RECONNECT] 已在健康运行 → 直接返回
         if self.is_healthy():
             return
         with self._rebuild_lock:
@@ -777,86 +777,93 @@ class ModbusTransportServer:
             if self._is_running:
                 logger.warning(f"[SLAVE-RESTART] {self.endpoint_key} 检测到半死状态，强制重建 listener")
                 self.stop()
-            # 启动前先复位就绪信号量
+            # 启动前先复位就绪信号量与错误状态
             self._ready.clear()
+            self._start_error = None
             self._is_running = True
             self._start_ts = time.time()
             self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
             self._thread.start()
-            # [SLAVE-SPEED-1] 事件驱动等待后台 listener 绑定就绪，取代 30×0.03s 固定盲等
-            self._ready.wait(timeout=1.0)
-            if not self._server:
-                logger.warning(f"ModbusTransportServer {self.endpoint_key} 1s 内未就绪")
+            # [SLAVE-SPEED-1] 事件驱动等待后台 listener 绑定就绪（正常 1~5ms 立即唤醒，2.0s 上限防重负载/GC 抖动误超时）
+            self._ready.wait(timeout=2.0)
+            if not self._server or self._start_error:
+                logger.warning(f"ModbusTransportServer {self.endpoint_key} 未就绪: {self._start_error or '2s 超时'}")
 
     # [REVIEW-FIX-3] 完善 stop() 资源彻底回收：取消 task 并在事件循环中安全 await shutdown()，避免 socket 与 loop 句柄泄漏
     # [SLAVE-SPEED-2] 将清理与线程 join 超时上限从 2.0s+3.0s 压缩至 1.0s+1.0s
     def stop(self) -> None:
-        """优雅停止物理传输层监听服务，安全释放底层 TCP socket 或串口句柄及事件循环。"""
-        # 关键步骤（为什么必须通过 `run_coroutine_threadsafe` 跨线程调度 `_cleanup`）：
-        # - `self._server` 和 `self._server_task` 绑定在后台子线程的 `self._loop` 事件循环上。
-        # - asyncio 的协程对象和 Task 绝不能在外部线程直接调用 `cancel()` 或 `shutdown()`，必须通过
-        # `asyncio.run_coroutine_threadsafe(_cleanup(), self._loop)` 投递回子线程事件循环内部安全执行，
-        # 才能彻底释放操作系统端口句柄，保证紧接着再次启动同一端口不会报 `Address already in use`。
-        self._is_running = False
-        if self._loop and self._loop.is_running():
-            async def _cleanup():
-                """在后台事件循环线程内部执行的异步清理协程：先关闭底层 server 监听，再取消常驻任务。"""
-                if self._server:
+        """优雅停止物理传输层监听服务，在单端点重建锁保护下安全释放底层 TCP socket 或串口句柄及事件循环。"""
+        with self._rebuild_lock:
+            self._is_running = False
+            loop = self._loop
+            server = self._server
+            server_task = self._server_task
+            serve_task = self._serve_task
+            thread = self._thread
+
+            if loop and loop.is_running():
+                async def _cleanup():
+                    """在后台事件循环线程内部执行的异步清理协程：先关闭底层 server 监听，再取消常驻任务。"""
+                    if server:
+                        try:
+                            await server.shutdown()
+                        except Exception as ex:
+                            logger.debug(f"ModbusTransportServer shutdown 异常: {ex}")
+                    if server_task and not server_task.done():
+                        server_task.cancel()
+                        try:
+                            await server_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as ex:
+                            logger.debug(f"等待 server_task 取消异常: {ex}")
+                    if serve_task and not serve_task.done() and serve_task is not server_task:
+                        serve_task.cancel()
+                        try:
+                            await serve_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as ex:
+                            logger.debug(f"等待 serve_task 取消异常: {ex}")
+
+                coro = _cleanup()
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                    fut.result(timeout=1.0)
+                except Exception as e:
                     try:
-                        await self._server.shutdown()
-                    except Exception as ex:
-                        logger.debug(f"ModbusTransportServer shutdown 异常: {ex}")
-                if self._server_task and not self._server_task.done():
-                    self._server_task.cancel()
-                    try:
-                        await self._server_task
-                    except asyncio.CancelledError:
+                        coro.close()
+                    except Exception:
                         pass
-                    except Exception as ex:
-                        logger.debug(f"等待 server_task 取消异常: {ex}")
-                if self._serve_task and not self._serve_task.done() and self._serve_task is not self._server_task:
-                    self._serve_task.cancel()
+                    logger.debug(f"stop() 通知 loop 清理超时或异常: {e}")
 
-            try:
-                # 跨线程向子线程事件循环投递清理协程，最多等待 1.0 秒
-                fut = asyncio.run_coroutine_threadsafe(_cleanup(), self._loop)
-                fut.result(timeout=1.0)
-            except Exception as e:
-                logger.debug(f"stop() 通知 loop 清理超时或异常: {e}")
+            # 等待后台监听线程彻底退出
+            if thread and thread.is_alive():
+                thread.join(timeout=1.0)
+                if thread.is_alive():
+                    logger.warning(f"ModbusTransportServer 后台服务线程 join 超时 ({self.endpoint_key})")
 
-        # 等待后台监听线程彻底退出
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
-            if self._thread.is_alive():
-                logger.warning(f"ModbusTransportServer 后台服务线程 join 超时 ({self.endpoint_key})")
-
-        # 确保全部引用彻底重置为 None，防止残留半清理状态
-        self._thread = None
-        self._loop = None
-        self._server = None
-        self._server_task = None
-        self._serve_task = None
-        self._ready.clear()
+            # 确保全部引用彻底重置为 None，防止残留半清理状态
+            self._thread = None
+            self._loop = None
+            self._server = None
+            self._server_task = None
+            self._serve_task = None
+            self._ready.clear()
 
     def _run_server_loop(self) -> None:
-        """后台守护线程主入口：创建独立 asyncio 事件循环并运行 pymodbus 服务端监听协程。"""
-        # 关键步骤（为什么在正常分支、`CancelledError`、`Exception` 和 `finally` 四处都调用 `self._ready.set()`）：
-        # - 主调线程在 `start()` 中阻塞在 `self._ready.wait(timeout=1.0)`。
-        # - 正常情况下，创建 `_server_task` 后立即 `set()` 唤醒主调线程。
-        # - 但如果构造 `ModbusTcpServer`/`ModbusSerialServer` 时立刻抛出异常（例如串口不存在或权限不足），
-        # 代码会直接跳入 `except` 与 `finally`。在所有退出口兜底调用 `self._ready.set()`，可确保主调线程
-        # 在失败场景下也无需干等 1.0 秒超时，实现毫秒级快速失败返回。
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
+        """后台守护线程主入口：创建独立局部 asyncio 事件循环并运行 pymodbus 服务端监听协程。"""
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
 
         async def _serve():
             """实例化 pymodbus 服务端并完成真实端口绑定后再唤醒 start()，避免紧接 stop() 触发启停竞态。"""
             self._serve_task = asyncio.current_task()
             try:
                 if self.comm_type == "RTU":
-                    # ("RTU", serial_port, baudrate, bytesize, parity, stopbits)
                     _, s_port, baud, bsize, parity, stopb = self.endpoint_key
-                    self._server = ModbusSerialServer(
+                    srv = ModbusSerialServer(
                         context=self._server_context,
                         port=s_port,
                         baudrate=baud,
@@ -866,19 +873,18 @@ class ModbusTransportServer:
                         trace_packet=self._on_trace_packet,
                     )
                 else:
-                    # ("TCP", host, port)
                     _, host, port = self.endpoint_key
-                    self._server = ModbusTcpServer(
+                    srv = ModbusTcpServer(
                         context=self._server_context,
                         address=(host, port),
                         trace_packet=self._on_trace_packet,
                     )
-                # 先完成底层 listen() 绑定再置位 _ready，避免 start() 刚返回就调用 stop() 时
-                # shutdown() 早于 listen() 执行导致 serving 永久悬挂与 2s join 超时
-                await self._server.serve_forever(background=True)
+                # 先完成底层 listen() 绑定再赋值 self._server 并置位 _ready，防止启动失败被误判为已就绪
+                await srv.serve_forever(background=True)
+                self._server = srv
 
                 async def _wait_serving():
-                    await self._server.serving
+                    await srv.serving
 
                 self._server_task = asyncio.create_task(_wait_serving())
                 self._ready.set()
@@ -886,26 +892,28 @@ class ModbusTransportServer:
             except asyncio.CancelledError:
                 self._ready.set()
             except Exception as e:
+                self._start_error = str(e)
+                self._server = None
                 self._ready.set()
                 logger.error(f"ModbusTransportServer 运行异常 ({self.endpoint_key}): {e}")
-                if self.on_packet_log:
-                    self.on_packet_log(f"[服务异常崩溃] 无法监听 {self.endpoint_key}: {e}", "ERROR")
+                self._emit_transport_log(f"[服务异常崩溃] 无法监听 {self.endpoint_key}: {e}", "ERROR")
 
         try:
-            self._loop.run_until_complete(_serve())
+            loop.run_until_complete(_serve())
         finally:
             self._ready.set()
-            # [REVIEW-FIX-3] 确保在子线程结束时关闭事件循环，无 loop 句柄泄漏
+            # 始终关闭本次线程创建的局部 loop，绝不因主线程置 self._loop=None 而泄漏句柄
             try:
-                self._loop.close()
+                loop.close()
             except Exception:
                 pass
-            self._is_running = False
-            # [SLAVE-RECONNECT] 异常退出时显式提醒，便于日志排查；下次 start() 将自动重建
-            if self._server:
-                logger.warning(
-                    f"ModbusTransportServer listener 已退出 ({self.endpoint_key})，下次 start() 将自动重建"
-                )
+            # 仅当当前实例仍指向本次 loop 时更新状态，防止旧线程延迟退出误伤新重启的实例
+            if self._loop is loop:
+                self._is_running = False
+                if self._server:
+                    logger.warning(
+                        f"ModbusTransportServer listener 已退出 ({self.endpoint_key})，下次 start() 将自动重建"
+                    )
 
 
 # =====================================================================
@@ -992,28 +1000,53 @@ class ModbusServerHub:
                 stopbits=engine.stopbits,
             )
             server = self._servers.get(key)
-            # 若未精确命中但属于 TCP 模式，检查是否存在同端口且包含 0.0.0.0 通配绑定的可复用服务
+            # 1. TCP 通配复用校验：仅允许已有 0.0.0.0 监听被具体本机 IP 复用；
+            #    若已有具体 IP（如 127.0.0.1:502）再注册 0.0.0.0:502，不能误复用窄监听，应报端口冲突
             if server is None and key[0] == "TCP":
                 for s_key, s in self._servers.items():
-                    if len(s_key) == 3 and s_key[0] == "TCP":
-                        if s_key[2] == key[2] and (s_key[1] == "0.0.0.0" or key[1] == "0.0.0.0" or s_key[1] == key[1]):
+                    if len(s_key) == 3 and s_key[0] == "TCP" and s_key[2] == key[2]:
+                        if s_key[1] == "0.0.0.0" or s_key[1] == key[1]:
                             server = s
                             key = s_key
                             break
+                        if key[1] == "0.0.0.0" and s.is_healthy():
+                            return False, f"端口 {key[2]} 已被监听地址 {s_key[1]} 占用，无法同时绑定全网卡 0.0.0.0"
 
-            # [SLAVE-RECONNECT-3b] 复用前探活：僵死则丢弃并新建，避免复用已死的 listener
+            # 2. RTU 同串口不同参数冲突拦截：防止重复打开同一物理串口
+            if server is None and key[0] == "RTU":
+                for s_key, s in self._servers.items():
+                    if len(s_key) >= 2 and s_key[0] == "RTU" and s_key[1] == key[1] and s_key != key:
+                        if s.is_healthy():
+                            return False, f"串口 {key[1]} 已被参数 {s_key[2:]} 的运行中从机占用，请统一串口参数"
+
+            # [SLAVE-RECONNECT-3b] 复用前探活：原地 stop+start 重建原实例，保留同端口其余已挂载从机，杜绝失联与句柄泄漏
+            created_new = False
             if server and not server.is_healthy():
-                logger.warning(f"[SLAVE-RECONNECT-3b] {key} 已有僵死 listener，重建新实例")
-                server = None
-
-            # 若尚无可用传输服务，则新建并立即启动监听
-            if server is None:
-                server = ModbusTransportServer(key)
-                self._servers[key] = server
+                logger.warning(f"[SLAVE-RECONNECT-3b] {key} 已有僵死 listener，原地重建并保留同端点从机")
+                server.stop()
                 server.start()
+                if server._start_error or not server.is_healthy():
+                    err_detail = server._start_error or "listener 1s 内未就绪"
+                    if server.slave_count == 0:
+                        self._servers.pop(key, None)
+                    return False, f"物理端点 {key} 重建监听失败: {err_detail}"
+
+            # 若尚无可用传输服务，则新建并立即启动监听，严格核验监听是否真实就绪
+            if server is None:
+                created_new = True
+                server = ModbusTransportServer(key)
+                server.start()
+                if server._start_error or not server.is_healthy():
+                    err_detail = server._start_error or "端口可能被占用或串口不可用"
+                    server.stop()
+                    return False, f"物理端点 {key} 启动监听失败: {err_detail}"
+                self._servers[key] = server
 
             # [REVIEW-FIX-4] 站地址冲突检查：直接查询 server.get_slave，无需嵌套持有 server._lock
             if server.get_slave(engine.slave_id) is not None:
+                if created_new and server.slave_count == 0:
+                    self._servers.pop(key, None)
+                    server.stop()
                 return False, f"物理端点 {key} 下已存在站地址 {engine.slave_id} 的从机！"
 
             server.attach_slave(engine.slave_id, engine)
@@ -1181,8 +1214,9 @@ class ModbusSlaveEngine:
         # 保留单机上下文兼容已有属性
         self._server_context = ModbusServerContext(devices=self._device_context, single=True)
 
-        # 模拟点位配置表: address -> {type, mode, sim_rule, ...}
+        # 模拟点位配置表: address -> {type, mode, sim_rule, ...}，由 _points_lock 保护跨线程读写与快照迭代
         self.points: Dict[Union[int, Tuple[str, int]], Dict[str, Any]] = {}
+        self._points_lock = threading.RLock()
         self._sim_thread: Optional[threading.Thread] = None
         self._sim_running = False
         # [SLAVE-SPEED-3] 仿真线程可唤醒退出事件：取代固定 1s 睡眠盲等
@@ -1224,10 +1258,13 @@ class ModbusSlaveEngine:
 
         self._is_running = True
 
-        # 2. 启动模拟数据定时刷新线程（启动前先清除停止信号量 _sim_stop_evt）
-        self._sim_stop_evt.clear()
+        # 2. 启动模拟数据定时刷新线程（每次启动分配独立 stop_evt 防止快速停启出现双仿真线程）
+        stop_evt = threading.Event()
+        self._sim_stop_evt = stop_evt
         self._sim_running = True
-        self._sim_thread = threading.Thread(target=self._run_simulation_loop, daemon=True)
+        self._sim_thread = threading.Thread(
+            target=self._run_simulation_loop, args=(stop_evt,), daemon=True
+        )
         self._sim_thread.start()
 
     def stop(self) -> None:
@@ -1364,11 +1401,19 @@ class ModbusSlaveEngine:
         self,
         area: str,
         address: int,
-        data_type: ModbusDataType,
-        mode: ByteOrderMode = ByteOrderMode.ABCD,
+        data_type: Any,
+        mode: Any = ByteOrderMode.ABCD,
         string_length: int = 16,
     ) -> Any:
         """从本地数据块读取指定地址的连续寄存器，并按数据类型与字节序解码还原为工程数值。"""
+        if not isinstance(data_type, ModbusDataType):
+            dt_str = str(data_type.value if hasattr(data_type, "value") else data_type).strip().upper()
+            if dt_str == "FLOAT64":
+                dt_str = "DOUBLE64"
+            try:
+                data_type = ModbusDataType(dt_str)
+            except Exception:
+                data_type = ModbusDataType.INT16
         if data_type == ModbusDataType.STRING:
             count = max(1, (string_length + 1) // 2)
         else:
@@ -1380,11 +1425,14 @@ class ModbusSlaveEngine:
 
     def _notify_external_write(self, area_str: str, start_addr: int, count: int) -> None:
         """外部主站执行 FC05/06/15/16 写入后，反解受影响的点位并同步更新仿真点表与领域模型回调。"""
-        if count <= 0 or not self.points:
+        if count <= 0:
             return
+        with self._points_lock:
+            if not self.points:
+                return
+            items_snapshot = list(self.points.items())
         write_kind = _classify_area(area_str)
         write_end = start_addr + count
-        items_snapshot = list(self.points.items())
         has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
 
         for key, pt in items_snapshot:
@@ -1441,170 +1489,163 @@ class ModbusSlaveEngine:
                 except Exception:
                     pass
 
-    def _run_simulation_loop(self) -> None:
-        """后台动态波形模拟循环（1s 周期）：遍历 `self.points` 中非“固定”规则的点位，计算下一拍波形值并同步写入底层寄存器。"""
-        # 关键步骤（为什么这么写）：
-        # 1. **可唤醒等待（`self._sim_stop_evt.wait(1)`）**：替代阻塞式 `time.sleep(1)`。正常运行时每 1 秒推进一拍 `step`；
-        # 一旦调用 `stop()` 置位 `_sim_stop_evt`，线程立即跳出循环结束，绝不拖慢从机停止速度。
-        # 2. **字典快照（`list(self.points.items())`）**：UI 线程可能在运行期间动态增删点位或批量修改模拟规则，
-        # 先拷贝浅快照再遍历可彻底避免 `RuntimeError: dictionary changed size during iteration`。
-        # 3. **复合键去重（`has_composite`）**：支持 `(area, addr)` 复合键以区分不同存储区的同地址点位；
-        # 当存在复合键时自动跳过历史兼容留存的纯整型 `addr` 键，防止同一寄存器在一拍内被重复步进两次。
-        # 4. **地址相位偏移（`addr % 100`）**：正弦波与方波在计算相位时引入点位地址偏移，使点表中不同地址的曲线呈现错落有致的自然波浪，而非所有点位机械地同相涨跌。
+    def _run_simulation_loop(self, stop_evt: Optional[threading.Event] = None) -> None:
+        """后台动态波形模拟循环（1s 周期）：在 _points_lock 与异常保护下遍历点位并同步写入底层寄存器。"""
         step = 0
         import math
         import random
 
-        while self._sim_running and not self._sim_stop_evt.is_set():
+        evt = stop_evt or self._sim_stop_evt
+        while self._sim_running and not evt.is_set():
             # 等待 1 秒或直到收到停止信号；若返回 True 表示被 stop() 唤醒，立即终止循环
-            if self._sim_stop_evt.wait(1):
+            if evt.wait(1):
                 break
-            if not self._sim_running or self._sim_stop_evt.is_set():
+            if not self._sim_running or evt.is_set():
                 break
             step = (step + 1) % 100000
 
-            # 制作字典项安全快照，防止多线程迭代期间大小并发变动
-            items_snapshot = list(self.points.items())
-            has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
+            try:
+                # 在 _points_lock 下制作字典项安全快照，防止多线程迭代期间大小并发变动打死仿真线程
+                with self._points_lock:
+                    items_snapshot = list(self.points.items())
+                has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
 
-            for key, point in items_snapshot:
-                # 若存在复合键 (area, addr)，忽略历史单一整型 key 以避免重复模拟
-                if has_composite and not isinstance(key, tuple):
-                    continue
+                for key, point in items_snapshot:
+                    if evt.is_set() or not self._sim_running:
+                        break
+                    # 若存在复合键 (area, addr)，忽略历史单一整型 key 以避免重复模拟
+                    if has_composite and not isinstance(key, tuple):
+                        continue
 
-                if isinstance(key, tuple) and len(key) >= 2:
-                    k_area, addr = str(key[0]), int(key[1])
-                else:
-                    addr = int(key)
-                    k_area = point.get("area", AreaType.HOLDING_REGISTER)
-
-                sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
-                if sim_mode == "固定":
-                    continue
-
-                dt_raw = point.get("data_type") or point.get("type") or ModbusDataType.INT16
-                # 兼容领域层 FLOAT64 与编解码层 DOUBLE64 的命名差异，防止被静默降级为 INT16
-                try:
-                    if isinstance(dt_raw, ModbusDataType):
-                        data_type = dt_raw
+                    if isinstance(key, tuple) and len(key) >= 2:
+                        k_area, addr = str(key[0]), int(key[1])
                     else:
-                        dt_str = str(dt_raw.value if hasattr(dt_raw, "value") else dt_raw).strip().upper()
-                        if dt_str == "FLOAT64":
-                            dt_str = "DOUBLE64"
-                        data_type = ModbusDataType(dt_str)
-                except Exception:
-                    data_type = ModbusDataType.INT16
+                        addr = int(key)
+                        k_area = point.get("area", AreaType.HOLDING_REGISTER)
 
-                bo_raw = point.get("byte_order") or point.get("mode") or ByteOrderMode.ABCD
-                try:
-                    mode = bo_raw if isinstance(bo_raw, ByteOrderMode) else ByteOrderMode(str(bo_raw))
-                except Exception:
-                    mode = ByteOrderMode.ABCD
+                    sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
+                    if sim_mode == "固定":
+                        continue
 
-                area = point.get("area", AreaType.HOLDING_REGISTER)
-                curr = point.get("current_val", point.get("value", 0))
+                    dt_raw = point.get("data_type") or point.get("type") or ModbusDataType.INT16
+                    try:
+                        if isinstance(dt_raw, ModbusDataType):
+                            data_type = dt_raw
+                        else:
+                            dt_str = str(dt_raw.value if hasattr(dt_raw, "value") else dt_raw).strip().upper()
+                            if dt_str == "FLOAT64":
+                                dt_str = "DOUBLE64"
+                            data_type = ModbusDataType(dt_str)
+                    except Exception:
+                        data_type = ModbusDataType.INT16
 
-                # 功能码 01(线圈) 与 02(离散输入)：只要有模拟规则，数据就在 0 和 1 之间翻转变动
-                is_fc01_02 = (
-                    "0X" in str(area).upper()
-                    or "1X" in str(area).upper()
-                    or "COIL" in str(area).upper()
-                    or "DISCRETE" in str(area).upper()
-                    or point.get("fc") in (1, 2)
-                    or data_type == ModbusDataType.BOOL
-                )
-                if is_fc01_02:
-                    curr_bool_int = 1 if (curr is True or str(curr) in ("1", "True", "true")) else 0
-                    if sim_mode == "正弦波":
-                        # 正弦波对于布尔量：按时钟相位正负半周切换高低电平 (0/1)
-                        phase = (step * 0.35) + ((addr % 10) * 0.4)
-                        new_val = 1 if math.sin(phase) >= 0 else 0
-                    elif sim_mode == "方波":
-                        phase = (step + (addr % 5)) % 6
-                        new_val = 1 if phase >= 3 else 0
+                    bo_raw = point.get("byte_order") or point.get("mode") or ByteOrderMode.ABCD
+                    try:
+                        if isinstance(bo_raw, ByteOrderMode):
+                            mode = bo_raw
+                        else:
+                            bo_str = str(bo_raw.value if hasattr(bo_raw, "value") else bo_raw).strip().upper()
+                            if "." in bo_str:
+                                bo_str = bo_str.split(".")[-1]
+                            mode = ByteOrderMode(bo_str)
+                    except Exception:
+                        mode = ByteOrderMode.ABCD
+
+                    area = k_area or point.get("area", AreaType.HOLDING_REGISTER)
+                    curr = point.get("current_val", point.get("value", 0))
+
+                    # 功能码 01(线圈) 与 02(离散输入)：统一复用 _classify_area，支持中英文区名
+                    is_fc01_02 = (
+                        _classify_area(area) in ("COIL", "DISCRETE")
+                        or point.get("fc") in (1, 2)
+                        or data_type == ModbusDataType.BOOL
+                    )
+                    if is_fc01_02:
+                        curr_bool_int = 1 if (curr is True or str(curr) in ("1", "True", "true")) else 0
+                        if sim_mode == "正弦波":
+                            phase = (step * 0.35) + ((addr % 10) * 0.4)
+                            new_val = 1 if math.sin(phase) >= 0 else 0
+                        elif sim_mode == "方波":
+                            phase = (step + (addr % 5)) % 6
+                            new_val = 1 if phase >= 3 else 0
+                        elif sim_mode == "随机波动":
+                            new_val = random.choice([0, 1])
+                        else:
+                            new_val = 0 if curr_bool_int == 1 else 1
+
+                        point["current_val"] = new_val
+                        self.write_typed_value(area, addr, new_val, data_type, mode)
+                        if self.on_point_value_changed:
+                            try:
+                                self.on_point_value_changed(area, addr, new_val)
+                            except Exception:
+                                pass
+                        continue
+
+                    curr = clamp_value_to_type(curr, data_type)
+                    if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
+                        continue
+
+                    limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
+                    min_v, max_v, v_type = limits
+
+                    if sim_mode in ("累加递增", "步进递增"):
+                        if v_type is int:
+                            wrap_limit = min(max_v, 10000)
+                            # 回绕至 0（而非有符号最小负数 -9e18），保持正常工程步进循环
+                            new_val = (curr + 1) if curr < wrap_limit else 0
+                        else:
+                            new_val = round((curr + 0.5) % 1000.0, 2)
+
                     elif sim_mode == "随机波动":
-                        new_val = random.choice([0, 1])
+                        if v_type is int:
+                            delta = random.choice([-2, -1, 0, 1, 2])
+                            if min_v == 0 and curr <= 1:
+                                delta = random.choice([0, 1, 2, 3])
+                            new_val = int(max(min_v, min(max_v, curr + delta)))
+                        else:
+                            delta = random.uniform(-0.5, 0.5)
+                            new_val = round(max(min_v, min(max_v, curr + delta)), 2)
+
+                    elif sim_mode == "正弦波":
+                        phase = (step * 0.25) + ((addr % 100) * 0.15)
+                        sin_factor = math.sin(phase)
+                        if min_v == 0:
+                            base = 50.0 if (curr == 0) else max(25.0, float(curr))
+                            amp = min(25.0, base * 0.5)
+                            calc_val = base + amp * sin_factor
+                        else:
+                            base = 0.0 if (curr == 0) else float(curr)
+                            calc_val = base + 30.0 * sin_factor
+
+                        if v_type is int:
+                            new_val = int(max(min_v, min(max_v, round(calc_val))))
+                        else:
+                            new_val = round(max(min_v, min(max_v, calc_val)), 2)
+
+                    elif sim_mode == "方波":
+                        phase = (step + (addr % 10)) % 10
+                        high_val = 100 if min_v == 0 else 50
+                        low_val = 0 if min_v == 0 else -50
+                        val_out = high_val if phase >= 5 else low_val
+                        if v_type is int:
+                            new_val = int(max(min_v, min(max_v, val_out)))
+                        else:
+                            new_val = float(max(min_v, min(max_v, val_out)))
+
                     else:
-                        new_val = 0 if curr_bool_int == 1 else 1
+                        new_val = curr
 
                     point["current_val"] = new_val
                     self.write_typed_value(area, addr, new_val, data_type, mode)
+
                     if self.on_point_value_changed:
                         try:
                             self.on_point_value_changed(area, addr, new_val)
                         except Exception:
                             pass
-                    continue
-
-                # 功能码 03(保持寄存器) 与 04(输入寄存器)：受具体模拟规则算法与数据类型限制
-                # 1. 确保当前值在数据类型的合法范围内
-                curr = clamp_value_to_type(curr, data_type)
-
-                # 2. 字符/十六进制/二进制不自动波动
-                if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
-                    continue
-
-                # 3. 数值类型强类型模拟 (严格遵守上下限，无符号数绝不产生负数)
-                limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
-                min_v, max_v, v_type = limits
-
-                if sim_mode in ("累加递增", "步进递增"):
-                    if v_type is int:
-                        wrap_limit = min(max_v, 10000)
-                        new_val = (curr + 1) if curr < wrap_limit else min_v
-                    else:
-                        new_val = round((curr + 0.5) % 1000.0, 2)
-
-                elif sim_mode == "随机波动":
-                    if v_type is int:
-                        delta = random.choice([-2, -1, 0, 1, 2])
-                        if min_v == 0 and curr <= 1:
-                            delta = random.choice([0, 1, 2, 3])
-                        new_val = int(max(min_v, min(max_v, curr + delta)))
-                    else:
-                        delta = random.uniform(-0.5, 0.5)
-                        new_val = round(max(min_v, min(max_v, curr + delta)), 2)
-
-                elif sim_mode == "正弦波":
-                    # 正弦波算法：结合时钟 step 与点位地址 addr 相位偏移，生成丝滑不同步的正弦波浪
-                    phase = (step * 0.25) + ((addr % 100) * 0.15)
-                    sin_factor = math.sin(phase)
-                    if min_v == 0:  # 无符号整型 (如 UINT16: 0~65535)
-                        base = 50.0 if (curr == 0) else max(25.0, float(curr))
-                        amp = min(25.0, base * 0.5)
-                        calc_val = base + amp * sin_factor
-                    else:  # 有符号整型/浮点数 (如 INT16: -32768~32767)
-                        base = 0.0 if (curr == 0) else float(curr)
-                        calc_val = base + 30.0 * sin_factor
-
-                    if v_type is int:
-                        new_val = int(max(min_v, min(max_v, round(calc_val))))
-                    else:
-                        new_val = round(max(min_v, min(max_v, calc_val)), 2)
-
-                elif sim_mode == "方波":
-                    phase = (step + (addr % 10)) % 10
-                    high_val = 100 if min_v == 0 else 50
-                    low_val = 0 if min_v == 0 else -50
-                    val_out = high_val if phase >= 5 else low_val
-                    if v_type is int:
-                        new_val = int(max(min_v, min(max_v, val_out)))
-                    else:
-                        new_val = float(max(min_v, min(max_v, val_out)))
-
-                else:
-                    new_val = curr
-
-                # 保存并写入底层 Context
-                point["current_val"] = new_val
-                self.write_typed_value(area, addr, new_val, data_type, mode)
-
-                # 回调通知外部模型同步
-                if self.on_point_value_changed:
-                    try:
-                        self.on_point_value_changed(area, addr, new_val)
-                    except Exception:
-                        pass
+            except Exception as ex:
+                logger.warning(f"ModbusSlaveEngine 仿真单拍异常（已捕获防线程终止）: {ex}")
 
 
 # =====================================================================

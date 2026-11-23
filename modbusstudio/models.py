@@ -16,6 +16,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 # 导入 time：用于 PollResult 默认记录轮询结果产生的精确 Unix 纪元秒数
 import logging
+import math
 import time
 
 logger = logging.getLogger("ModbusStudioModels")
@@ -53,11 +54,14 @@ def _parse_int(val: Any, default: int, min_val: Optional[int] = None, max_val: O
 
 
 def _parse_float(val: Any, default: float) -> float:
-    """将输入安全转换为浮点数，遇到 None、bool 或非法字符串时回退 default。"""
+    """将输入安全转换为有限浮点数，遇到 None、bool、NaN/Inf 或非法字符串时回退 default。"""
     if val is None or isinstance(val, bool):
         return default
     try:
-        return float(str(val).strip())
+        v = float(str(val).strip())
+        if not math.isfinite(v):
+            return default
+        return v
     except (ValueError, TypeError):
         return default
 
@@ -661,16 +665,17 @@ class SlaveDevice:
             db_device_name=d.get("db_device_name"),
         )
         points_data = d.get("points", {})
-        for key_str, pt_dict in points_data.items():
-            if "|" in key_str:
-                area_raw, addr_raw = key_str.split("|", 1)
-                try:
-                    area_str = AreaType.normalize(area_raw).value
-                    addr = int(addr_raw)
-                    pt = ModbusPoint.from_dict(pt_dict)
-                    dev.points[(area_str, addr)] = pt
-                except Exception:
-                    continue
+        if isinstance(points_data, dict):
+            for key_str, pt_dict in points_data.items():
+                if "|" in key_str and isinstance(pt_dict, dict):
+                    area_raw, addr_raw = key_str.split("|", 1)
+                    try:
+                        area_str = AreaType.normalize(area_raw).value
+                        addr = int(addr_raw)
+                        pt = ModbusPoint.from_dict(pt_dict)
+                        dev.points[(area_str, addr)] = pt
+                    except Exception:
+                        continue
         return dev
 
 

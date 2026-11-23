@@ -320,24 +320,40 @@ class SlaveService:
     """从机实例生命周期与通信资源管理器（独占式统一启停、配额守卫与双向点表同步）。"""
 
     def __init__(self, logging_service: LoggingService):
-        """初始化从机服务管理器，绑定日志服务并创建设备字典与运行中引擎字典。"""
+        """初始化从机服务管理器，绑定日志服务并创建受锁保护的设备字典与运行中引擎字典。"""
         self.logging_service = logging_service
+        self._lock = threading.RLock()
         # _devices 保存所有已注册的从机配置与点表模型（含未启动和已启动）
         self._devices: Dict[str, SlaveDevice] = {}
         # _active_engines 仅保存当前处于启动运行状态的底层 ModbusSlaveEngine 实例
         self._active_engines: Dict[str, ModbusSlaveEngine] = {}
 
+    @staticmethod
+    def list_available_ports() -> List[str]:
+        """枚举当前操作系统可用物理串口列表，缺失 pyserial 或无硬件串口时回退预设 COM1~COM4。"""
+        try:
+            import serial.tools.list_ports
+            ports = [p.device for p in serial.tools.list_ports.comports() if getattr(p, "device", None)]
+            if ports:
+                return ports
+        except Exception:
+            pass
+        return ["COM1", "COM2", "COM3", "COM4"]
+
     def get_devices(self) -> List[SlaveDevice]:
         """获取当前已注册的所有从机设备实体列表。"""
-        return list(self._devices.values())
+        with self._lock:
+            return list(self._devices.values())
 
     def get_device(self, device_id: str) -> Optional[SlaveDevice]:
         """根据设备唯一标识 `device_id` 查询对应的 SlaveDevice 实体。"""
-        return self._devices.get(device_id)
+        with self._lock:
+            return self._devices.get(device_id)
 
     def count_devices_by_comm(self, comm_type: CommType) -> int:
         """按物理通信协议类型 (TCP 或 RTU) 统计当前已注册的从机实例数量。"""
-        return sum(1 for d in self._devices.values() if d.conn_config.comm_type == comm_type)
+        with self._lock:
+            return sum(1 for d in self._devices.values() if d.conn_config.comm_type == comm_type)
 
     def can_register_device(self, comm_type: CommType) -> Tuple[bool, str]:
         """检查指定通信协议下的从机实例数是否未超过系统配额上限（TCP/RTU 独立上限 100 个）。"""
@@ -352,13 +368,13 @@ class SlaveService:
 
     def register_device(self, device: SlaveDevice, check_quota: bool = True) -> Tuple[bool, str]:
         """注册或更新从机设备实例，对新增设备默认执行容量配额硬限制检查。"""
-        # 若是新设备 ID 且开启了配额检查，则先验证对应协议（TCP/RTU）剩余槽位
-        if check_quota and device.id not in self._devices:
-            ok, err = self.can_register_device(device.conn_config.comm_type)
-            if not ok:
-                return False, err
-        self._devices[device.id] = device
-        return True, "注册成功"
+        with self._lock:
+            if check_quota and device.id not in self._devices:
+                ok, err = self.can_register_device(device.conn_config.comm_type)
+                if not ok:
+                    return False, err
+            self._devices[device.id] = device
+            return True, "注册成功"
 
     def restore_devices(self, devices_list: List[dict]) -> Tuple[int, List[str]]:
         """从字典列表批量反序列化恢复从机设备实例模型与点表（用于会话状态恢复）。
@@ -481,27 +497,28 @@ class SlaveService:
 
     def remove_device(self, device_id: str) -> Tuple[bool, str]:
         """停止并从内存中移除指定 ID 的从机设备实例。"""
-        # 若该从机正在运行，先调用 stop_slave 安全注销底层监听与仿真线程，防止残留孤儿从机响应主站问询
-        if device_id in self._active_engines:
+        with self._lock:
+            in_active = device_id in self._active_engines
+        if in_active:
             self.stop_slave(device_id)
-        if device_id in self._devices:
-            del self._devices[device_id]
-            return True, f"成功移除从机 {device_id}"
+        with self._lock:
+            if device_id in self._devices:
+                del self._devices[device_id]
+                return True, f"成功移除从机 {device_id}"
         return False, "从机不存在"
 
     def clear_all_devices(self) -> int:
         """停止所有运行中的底层通信引擎，并彻底清空所有从机设备实例与点表（如切换数据库时调用）。"""
-        count = len(self._devices)
-        # 1. 逐个停止运行中的底层通信引擎并释放网络/串口资源
-        for device_id, engine in list(self._active_engines.items()):
+        with self._lock:
+            count = len(self._devices)
+            active_snapshot = list(self._active_engines.items())
+            self._active_engines.clear()
+            self._devices.clear()
+        for device_id, engine in active_snapshot:
             try:
                 engine.stop()
             except Exception as e:
                 logger.error(f"停止底层引擎异常 [{device_id}]: {e}")
-        self._active_engines.clear()
-
-        # 2. 清空所有内存设备实体并记录系统级审计日志
-        self._devices.clear()
         self.logging_service.post("SYS", 0, f"已安全停止底层通信并清空所有历史从机服务实例 (共 {count} 个)")
         return count
 
@@ -540,7 +557,9 @@ class SlaveService:
         # 检查通信资源冲突：标准 Modbus 规范下，同一物理端口允许挂载多个不同 Unit ID 的从机，
         # 仅当同一物理端点且从机站地址 (Unit ID) 完全相同时才判定为冲突。
         cfg = device.conn_config
-        for other_id, other_dev in self._devices.items():
+        with self._lock:
+            other_devices = list(self._devices.items())
+        for other_id, other_dev in other_devices:
             if other_id != device_id and other_dev.is_running:
                 other_cfg = other_dev.conn_config
                 if cfg.comm_type == other_cfg.comm_type:
@@ -548,10 +567,14 @@ class SlaveService:
                     if cfg.comm_type == CommType.RTU:
                         same_endpoint = (cfg.com_port.upper().strip() == other_cfg.com_port.upper().strip())
                     elif cfg.comm_type == CommType.TCP:
-                        # 0.0.0.0 通配监听与任意具体本地 IP 在同一端口上共享同一物理套接字
+                        # 0.0.0.0 / * / 空串通配监听与任意具体本地 IP 在同一端口上共享同一物理套接字
                         same_endpoint = (
                             cfg.port == other_cfg.port
-                            and (cfg.host == other_cfg.host or cfg.host in ("0.0.0.0", "") or other_cfg.host in ("0.0.0.0", ""))
+                            and (
+                                cfg.host == other_cfg.host
+                                or cfg.host in ("0.0.0.0", "", "*")
+                                or other_cfg.host in ("0.0.0.0", "", "*")
+                            )
                         )
 
                     if same_endpoint and cfg.unit_id == other_cfg.unit_id:
@@ -620,7 +643,8 @@ class SlaveService:
 
             # 启动底层从机引擎（挂载至 ModbusServerHub 并开启后台波形仿真线程）
             engine.start()
-            self._active_engines[device_id] = engine
+            with self._lock:
+                self._active_engines[device_id] = engine
             device.is_running = True
             device.runtime_info = f"运行中 ({cfg.summary})"
             self.logging_service.post("SYS", cfg.unit_id, f"从机服务 [{device.name}] 成功启动: {cfg.summary}")
@@ -648,7 +672,8 @@ class SlaveService:
         if not device:
             return False, "从机不存在"
 
-        engine = self._active_engines.pop(device_id, None)
+        with self._lock:
+            engine = self._active_engines.pop(device_id, None)
         if engine:
             try:
                 engine.stop()
@@ -671,7 +696,8 @@ class SlaveService:
 
     def sync_point_to_runtime(self, device_id: str, point: ModbusPoint) -> None:
         """当界面或业务运行期修改了点位数值、类型、变位或模拟规则时，实时热推入运行中的底层引擎。"""
-        engine = self._active_engines.get(device_id)
+        with self._lock:
+            engine = self._active_engines.get(device_id)
         if engine:
             try:
                 engine.write_typed_value(
@@ -696,27 +722,48 @@ class SlaveService:
                     "current_val": point.value,
                     "string_length": point.string_length,
                 }
-                engine.points[(point.area.value, point.address)] = pt_dict
-                engine.points[point.address] = pt_dict
+                pts_lock = getattr(engine, "_points_lock", None)
+                if pts_lock:
+                    with pts_lock:
+                        engine.points[(point.area.value, point.address)] = pt_dict
+                        engine.points[point.address] = pt_dict
+                else:
+                    engine.points[(point.area.value, point.address)] = pt_dict
+                    engine.points[point.address] = pt_dict
             except Exception as e:
                 logger.error(f"动态同步点位到底层失败: {e}")
 
     def remove_point_from_runtime(self, device_id: str, area: Union[str, AreaType], address: int) -> None:
         """从运行中的底层从机引擎点表字典中移除指定点位，防止已删除点位继续后台模拟。"""
-        engine = self._active_engines.get(device_id)
+        with self._lock:
+            engine = self._active_engines.get(device_id)
         if not engine:
             return
         area_str = AreaType.normalize(area).value
-        engine.points.pop((area_str, address), None)
-        legacy_pt = engine.points.get(address)
-        if isinstance(legacy_pt, dict) and AreaType.normalize(legacy_pt.get("area", "")).value == area_str:
-            engine.points.pop(address, None)
+        pts_lock = getattr(engine, "_points_lock", None)
+        if pts_lock:
+            with pts_lock:
+                engine.points.pop((area_str, address), None)
+                legacy_pt = engine.points.get(address)
+                if isinstance(legacy_pt, dict) and AreaType.normalize(legacy_pt.get("area", "")).value == area_str:
+                    engine.points.pop(address, None)
+        else:
+            engine.points.pop((area_str, address), None)
+            legacy_pt = engine.points.get(address)
+            if isinstance(legacy_pt, dict) and AreaType.normalize(legacy_pt.get("area", "")).value == area_str:
+                engine.points.pop(address, None)
 
     def clear_runtime_points(self, device_id: str) -> None:
         """清空运行中底层引擎的模拟点表字典（用于覆盖替换导入场景）。"""
-        engine = self._active_engines.get(device_id)
+        with self._lock:
+            engine = self._active_engines.get(device_id)
         if engine:
-            engine.points.clear()
+            pts_lock = getattr(engine, "_points_lock", None)
+            if pts_lock:
+                with pts_lock:
+                    engine.points.clear()
+            else:
+                engine.points.clear()
 
 
 # =====================================================================
