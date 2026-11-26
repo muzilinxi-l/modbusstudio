@@ -104,15 +104,16 @@ def test_p1_2_logging_service_concurrent_csv_writes_and_close_safety(tmp_path):
         t.join()
 
     assert not errors
-    csv_path = log_svc.csv_path
-    assert csv_path is not None
+    db_path = log_svc.db_path
+    assert db_path is not None
     log_svc.close()
     # close() 后后台残留线程再次投递不得报错
     log_svc.post("SYS", 0, "after-close-should-ignore")
 
-    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.reader(f))
-    assert len(rows) == 1 + 8 * 50
+    import sqlite3
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT ts, direction, slave_id, message, raw_frame_hex FROM traffic_logs").fetchall()
+    assert len(rows) == 8 * 50
     assert all(len(r) == 5 for r in rows)
 
 

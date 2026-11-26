@@ -5,11 +5,12 @@
 """
 
 from __future__ import annotations
-from datetime import datetime
-import csv
+from datetime import datetime, timedelta
 import logging
 import os
 import queue
+import re
+import sqlite3
 import threading
 import time
 
@@ -62,83 +63,277 @@ logger = logging.getLogger("ModbusStudioServices")
 # - 同时在 `post()` 内部实时将完整毫秒级时间戳与报文写入按日切分的 UTF-8 BOM CSV 文件。
 # =====================================================================
 class LoggingService:
-    """高吞吐线程安全日志分发与文件持久化服务（双缓冲节流设计，杜绝 UI 假死与闪退）。"""
+    """高吞吐线程安全日志分发与按日 SQLite(WAL) 批量持久化服务。
+    特点：
+    1. 后台每 2.5s 或满 200 条单事务 executemany 批量落盘，杜绝高频 flush 触发 Defender 与 CPU 飙高；
+    2. WAL 模式原生支持多进程并发安全写，按日分库 (modbus_traffic_YYYYMMDD.db) 启动时自动清理超期旧库；
+    3. 内置索引与参数化检索接口，支持几十万条报文毫秒级按从机/方向/关键字查询并按需导出小 CSV。
+    """
 
-    def __init__(self, log_dir: str = "logs"):
-        """初始化日志服务，创建日志归档目录、有界内存队列 (容量 20000) 并打开当日 CSV 文件句柄。"""
-        # 参数：log_dir（日志文件存储目录，默认相对路径 "logs"）。
-        # 副作用：在磁盘创建 `logs/` 目录及 `modbus_traffic_YYYYMMDD.csv` 文件。
+    _DB_FLUSH_INTERVAL_SEC = 2.5
+    _DB_FLUSH_BATCH_SIZE = 200
+    _DEFAULT_RETENTION_DAYS = 15
+    _DB_FILENAME_RE = re.compile(r"^modbus_traffic_(\d{8})\.db$")
+
+    def __init__(self, log_dir: str = "logs", retention_days: int = _DEFAULT_RETENTION_DAYS):
+        """初始化日志服务，创建日志归档目录、有界内存队列 (容量 3000) 并启动后台 SQLite 批量落盘线程。"""
         self.log_dir = os.path.abspath(log_dir)
         os.makedirs(self.log_dir, exist_ok=True)
-        # 为什么使用 maxsize=20000 的有界 Queue：
-        # 当主窗口最小化或被模态弹窗阻塞时，有界队列配合满队列淘汰旧项策略可防止后台持续收发报文撑爆内存。
-        self._queue: queue.Queue[LogEntry] = queue.Queue(maxsize=20000)
-        self._csv_lock = threading.Lock()
-        self._csv_date: str = ""
+        self.retention_days = max(1, int(retention_days))
+        # 收紧有界队列容量至 3000，防止多从机高并发或弹窗阻塞时积压过多 LogEntry 占用内存
+        self._queue: queue.Queue[LogEntry] = queue.Queue(maxsize=3000)
+        self._db_lock = threading.Lock()
+        self._db_date: str = ""
         self._closed: bool = False
-        self.csv_path: Optional[str] = None
-        self._csv_file = None
-        self._csv_writer = None
-        self._init_csv()
+        self.db_path: Optional[str] = None
+        self._conn: Optional[sqlite3.Connection] = None
 
-    def _init_csv(self, date_str: Optional[str] = None) -> None:
-        """创建或以追加模式打开当日通信报文 CSV 归档文件，并在新文件首行写入中文表头（调用方须持有 _csv_lock）。"""
-        today_str = date_str or time.strftime("%Y%m%d")
-        self.csv_path = os.path.join(self.log_dir, f"modbus_traffic_{today_str}.csv")
-        is_new = not os.path.exists(self.csv_path)
-        # 为什么使用 encoding="utf-8-sig"：写入 BOM 头使 Excel 直接双击打开时不出现中文乱码
+        # 报文显示与落盘动态开关：当两者均关闭时，引擎层可直接短路跳过 RX/TX 拼串与入队
+        self.ui_traffic_enabled: bool = True
+        self.db_traffic_enabled: bool = True
+
+        # 异步批量 SQLite 写盘缓冲区与后台刷盘线程
+        self._db_buffer: List[Tuple[str, str, str, int, str, str]] = []
+        self._db_wake_evt = threading.Event()
+
+        self._cleanup_expired_dbs()
+        with self._db_lock:
+            self._init_db()
+        self._db_flush_thread = threading.Thread(
+            target=self._db_flush_loop,
+            name="LoggingServiceSqliteFlush",
+            daemon=True,
+        )
+        self._db_flush_thread.start()
+
+    def set_traffic_options(
+        self,
+        ui_enabled: Optional[bool] = None,
+        db_enabled: Optional[bool] = None,
+    ) -> None:
+        """动态切换 RX/TX 报文的界面显示与 SQLite 落盘开关。"""
+        if ui_enabled is not None:
+            self.ui_traffic_enabled = bool(ui_enabled)
+        if db_enabled is not None:
+            self.db_traffic_enabled = bool(db_enabled)
+
+    def should_trace_traffic(self) -> bool:
+        """供底层引擎判断是否需要解析 RX/TX 报文；UI 显示与 DB 落盘均关闭时直接短路省 CPU。"""
+        return self.ui_traffic_enabled or self.db_traffic_enabled
+
+    def _cleanup_expired_dbs(self) -> None:
+        """启动时清理超过 retention_days 天的旧按日 SQLite 日志文件及其 WAL/SHM 附属文件。"""
+        cutoff = (datetime.now() - timedelta(days=self.retention_days)).strftime("%Y%m%d")
         try:
-            if self._csv_file:
+            for fname in os.listdir(self.log_dir):
+                m = self._DB_FILENAME_RE.match(fname)
+                if not m:
+                    continue
+                if m.group(1) < cutoff:
+                    base_path = os.path.join(self.log_dir, fname)
+                    for suffix in ("", "-wal", "-shm"):
+                        p = base_path + suffix
+                        if os.path.exists(p):
+                            try:
+                                os.remove(p)
+                            except OSError:
+                                pass
+        except Exception as e:
+            logger.debug(f"清理过期 SQLite 日志库异常: {e}")
+
+    def _init_db(self, date_str: Optional[str] = None) -> None:
+        """打开或创建当日 SQLite 日志库并配置 WAL 并发模式与联合索引（调用方须持有 _db_lock）。"""
+        today_str = date_str or time.strftime("%Y%m%d")
+        self.db_path = os.path.join(self.log_dir, f"modbus_traffic_{today_str}.db")
+        try:
+            if self._conn is not None:
                 try:
-                    self._csv_file.flush()
-                    self._csv_file.close()
+                    self._conn.commit()
+                    self._conn.close()
                 except Exception:
                     pass
-                self._csv_file = None
-                self._csv_writer = None
-            self._csv_file = open(self.csv_path, "a", newline="", encoding="utf-8-sig")
-            self._csv_writer = csv.writer(self._csv_file)
-            self._csv_date = today_str
-            if is_new:
-                self._csv_writer.writerow(["时间戳", "方向", "从机ID", "概要信息", "原始报文Hex"])
-                self._csv_file.flush()
+                self._conn = None
+            conn = sqlite3.connect(self.db_path, timeout=3.0, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=3000;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS traffic_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    slave_id INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    raw_frame_hex TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_traffic_logs_ts_sid_dir
+                ON traffic_logs (ts, slave_id, direction)
+                """
+            )
+            conn.commit()
+            self._conn = conn
+            self._db_date = today_str
         except Exception as e:
-            logger.error(f"创建日志 CSV 文件失败: {e}")
+            logger.error(f"初始化 SQLite 日志库失败: {e}")
+
+    def _flush_db_buffer_locked(self) -> None:
+        """将内存缓冲的待写日志按日期分组，以单事务 executemany 批量写入 SQLite（调用方须持有 _db_lock）。"""
+        if not self._db_buffer:
+            return
+        rows = self._db_buffer
+        self._db_buffer = []
+        try:
+            # 按日期分组（绝大多数情况下全部属于同一天，只需 1 次 executemany + 1 次 commit）
+            grouped: Dict[str, List[Tuple[str, str, int, str, str]]] = {}
+            for today_str, now_full_ms, direction, slave_id, message, raw_frame_hex in rows:
+                grouped.setdefault(today_str, []).append(
+                    (now_full_ms, direction, slave_id, message, raw_frame_hex)
+                )
+            for day_key, batch in grouped.items():
+                if day_key != self._db_date or self._conn is None:
+                    self._init_db(day_key)
+                if self._conn is not None:
+                    self._conn.executemany(
+                        "INSERT INTO traffic_logs (ts, direction, slave_id, message, raw_frame_hex) VALUES (?, ?, ?, ?, ?)",
+                        batch,
+                    )
+                    self._conn.commit()
+        except sqlite3.OperationalError as e:
+            # 极端多进程锁超时时保留最近 2000 条未落盘记录待下拍重试，防止静默丢日志且有界防膨胀
+            if not self._closed:
+                self._db_buffer = (rows + self._db_buffer)[-2000:]
+            logger.debug(f"SQLite 日志写入遇锁将重试: {e}")
+        except Exception as e:
+            logger.debug(f"批量写入 SQLite 日志失败: {e}")
+
+    def _db_flush_loop(self) -> None:
+        """后台定时批量刷盘线程：每 2.5s 或满 200 条集中提交一次事务，大幅降低 CPU/IO 与杀毒扫描开销。"""
+        while True:
+            self._db_wake_evt.wait(timeout=self._DB_FLUSH_INTERVAL_SEC)
+            self._db_wake_evt.clear()
+            with self._db_lock:
+                self._flush_db_buffer_locked()
+                if self._closed:
+                    break
+
+    def flush_db_now(self) -> None:
+        """立即将内存中的待写日志全部提交至 SQLite。"""
+        with self._db_lock:
+            self._flush_db_buffer_locked()
+
+    def list_log_dates(self) -> List[str]:
+        """扫描日志目录，倒序返回所有可用的按日 SQLite 日志日期列表（如 ['20261126', '20261125']）。"""
+        dates: List[str] = []
+        try:
+            for fname in os.listdir(self.log_dir):
+                m = self._DB_FILENAME_RE.match(fname)
+                if m:
+                    dates.append(m.group(1))
+        except Exception:
+            pass
+        dates.sort(reverse=True)
+        return dates
+
+    def query_logs(
+        self,
+        date_str: Optional[str] = None,
+        direction: Optional[str] = None,
+        slave_id: Optional[int] = None,
+        keyword: str = "",
+        limit: int = 2000,
+        offset: int = 0,
+    ) -> Tuple[int, List[Tuple[str, str, int, str, str]]]:
+        """按日期、方向、从机 ID 与关键字检索历史 SQLite 日志，返回 (总命中数, 当前页记录列表)。"""
+        target_date = date_str or self._db_date or time.strftime("%Y%m%d")
+        if target_date == self._db_date:
+            self.flush_db_now()
+
+        target_path = os.path.join(self.log_dir, f"modbus_traffic_{target_date}.db")
+        if not os.path.exists(target_path):
+            return 0, []
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if direction and direction.upper() != "ALL" and direction != "全部":
+            where_clauses.append("direction = ?")
+            params.append(direction.upper())
+        if slave_id is not None:
+            where_clauses.append("slave_id = ?")
+            params.append(int(slave_id))
+        kw = str(keyword or "").strip()
+        if kw:
+            where_clauses.append("(message LIKE ? OR raw_frame_hex LIKE ? OR ts LIKE ?)")
+            like_pat = f"%{kw}%"
+            params.extend([like_pat, like_pat, like_pat])
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        conn: Optional[sqlite3.Connection] = None
+        try:
+            conn = sqlite3.connect(target_path, timeout=3.0)
+            conn.execute("PRAGMA busy_timeout=3000;")
+            total = int(conn.execute(f"SELECT COUNT(*) FROM traffic_logs{where_sql}", params).fetchone()[0])
+            rows = conn.execute(
+                f"SELECT ts, direction, slave_id, message, raw_frame_hex "
+                f"FROM traffic_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?",
+                params + [int(limit), int(offset)],
+            ).fetchall()
+            return total, rows
+        except Exception as e:
+            logger.warning(f"查询历史 SQLite 日志失败 ({target_date}): {e}")
+            return 0, []
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def post(self, direction: str, slave_id: int, message: str, raw_frame_hex: str = "") -> None:
-        """供后台通信线程或主线程快速非阻塞投递一条日志记录，并在互斥锁保护下同步刷入按日切分的磁盘 CSV。"""
+        """供后台通信线程或主线程快速非阻塞投递一条日志记录，并写入异步批量 SQLite 缓冲区。"""
+        is_traffic = direction in ("RX", "TX")
+        need_ui = (not is_traffic) or self.ui_traffic_enabled
+        need_db = (not is_traffic) or self.db_traffic_enabled
+        if not need_ui and not need_db:
+            return
+
         now = datetime.now()
-        now_time_ms = now.strftime("%H:%M:%S.%f")[:-3]
-        now_full_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        today_str = now.strftime("%Y%m%d")
-
-        entry = LogEntry(
-            timestamp=now_time_ms,
-            direction=direction,
-            slave_id=slave_id,
-            message=message,
-            raw_frame_hex=raw_frame_hex,
-        )
-        try:
-            self._queue.put_nowait(entry)
-        except queue.Full:
+        if need_ui:
+            now_time_ms = now.strftime("%H:%M:%S.%f")[:-3]
+            entry = LogEntry(
+                timestamp=now_time_ms,
+                direction=direction,
+                slave_id=slave_id,
+                message=message,
+                raw_frame_hex=raw_frame_hex,
+            )
             try:
-                self._queue.get_nowait()
                 self._queue.put_nowait(entry)
-            except Exception:
-                pass
-
-        with self._csv_lock:
-            if self._closed:
-                return
-            if today_str != self._csv_date or not self._csv_writer or not self._csv_file:
-                self._init_csv(today_str)
-            if self._csv_writer and self._csv_file:
+            except queue.Full:
                 try:
-                    self._csv_writer.writerow([now_full_ms, direction, slave_id, message, raw_frame_hex])
-                    self._csv_file.flush()
+                    self._queue.get_nowait()
+                    self._queue.put_nowait(entry)
                 except Exception:
                     pass
+
+        if need_db:
+            now_full_ms = now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            today_str = now.strftime("%Y%m%d")
+            should_wake = False
+            with self._db_lock:
+                if self._closed:
+                    return
+                self._db_buffer.append((today_str, now_full_ms, direction, slave_id, message, raw_frame_hex))
+                # 系统级/错误日志或缓冲区满 200 条立即唤醒提交；高频 RX/TX 合并单事务批量落盘
+                if (not is_traffic) or len(self._db_buffer) >= self._DB_FLUSH_BATCH_SIZE:
+                    should_wake = True
+            if should_wake:
+                self._db_wake_evt.set()
 
     def drain_batch(self, max_count: int = 150) -> List[LogEntry]:
         """供 UI 主线程定时批量拉取队列中的日志条目（单次最多拉取 max_count 条）。"""
@@ -151,17 +346,20 @@ class LoggingService:
         return entries
 
     def close(self) -> None:
-        """安全刷新缓冲区并关闭磁盘 CSV 日志文件句柄（应用退出时由 ModbusStudioAppCore.shutdown 调用）。"""
-        with self._csv_lock:
+        """安全提交全部缓冲日志并关闭 SQLite 连接（应用退出时由 ModbusStudioAppCore.shutdown 调用）。"""
+        with self._db_lock:
             self._closed = True
-            if self._csv_file:
+            self._flush_db_buffer_locked()
+            if self._conn is not None:
                 try:
-                    self._csv_file.flush()
-                    self._csv_file.close()
+                    self._conn.commit()
+                    self._conn.close()
                 except Exception:
                     pass
-                self._csv_file = None
-                self._csv_writer = None
+                self._conn = None
+        self._db_wake_evt.set()
+        if self._db_flush_thread and self._db_flush_thread.is_alive():
+            self._db_flush_thread.join(timeout=1.0)
 
 
 
@@ -364,6 +562,27 @@ class SlaveService:
         self._devices: Dict[str, SlaveDevice] = {}
         # _active_engines 仅保存当前处于启动运行状态的底层 ModbusSlaveEngine 实例
         self._active_engines: Dict[str, ModbusSlaveEngine] = {}
+        # UI 当前正在展示的从机 ID：仅对该从机开启每拍 raw_hex 字符串拼装，其余后台从机跳过以大幅省 CPU
+        self._ui_active_device_id: Optional[str] = None
+
+    def set_ui_active_device(self, device_id: Optional[str]) -> None:
+        """告知服务层当前 UI 正在展示哪台从机：仅该从机实时拼装 raw_hex，其余后台从机跳过字符串开销。"""
+        with self._lock:
+            self._ui_active_device_id = device_id
+            for dev_id, eng in self._active_engines.items():
+                eng.sync_hex_enabled = (dev_id == device_id)
+
+    @staticmethod
+    def set_simulation_interval(seconds: float) -> None:
+        """动态调整全局动态波形仿真周期（秒）。"""
+        from .modbus_engine import _GlobalSimScheduler
+        _GlobalSimScheduler.get_instance().set_interval(seconds)
+
+    @staticmethod
+    def get_simulation_interval() -> float:
+        """获取当前全局动态波形仿真周期（秒）。"""
+        from .modbus_engine import _GlobalSimScheduler
+        return _GlobalSimScheduler.get_instance().get_interval()
 
     @staticmethod
     def list_available_ports() -> List[str]:
@@ -636,56 +855,38 @@ class SlaveService:
                 address_base=0 if has_zero_address else 1,
             )
 
-            # 注册报文日志回调：根据报文前缀中的 RX/TX 标记自动归类日志方向并投递至 LoggingService
+            # 注册报文日志回调与前置短路判断：当 UI 显示与 CSV 落盘均关闭时，底层直接跳过拼帧省 CPU
+            engine.should_trace_packet = self.logging_service.should_trace_traffic
             engine.on_packet_log = lambda msg, level: self.logging_service.post(
                 "RX" if "RX" in msg else ("TX" if "TX" in msg else "SYS"),
                 cfg.unit_id,
                 msg,
             )
 
-            # 注册动态模拟数值变动回调：实时将后台仿真产生的新值反向同步给领域模型 ModbusPoint
-            engine.on_point_value_changed = lambda area, addr, val: self._on_engine_point_value_changed(device_id, area, addr, val)
+            # 注册动态模拟数值变动回调：通过线程局部 _hex_tls 复用仿真刚编码的 Hex，网络线程外部写自动重编码
+            def _on_val_changed(area, addr, val, _dev_id=device_id, _eng=engine):
+                tls = getattr(_eng, "_hex_tls", None)
+                pre_hex = getattr(tls, "last_hex", None) if tls is not None else None
+                if tls is not None:
+                    tls.last_hex = None
+                self._on_engine_point_value_changed(_dev_id, area, addr, val, pre_hex)
 
-            # 同步所有已配置的点位到底层 DataBlock 及仿真点表字典：
-            # 为什么同时写入 `(point.area.value, point.address)` 复合键与 `point.address` 整数键：
-            # 复合键用于隔离不同存储区（如 3x 与 4x）的同号地址，整数键用于向下兼容旧版单键访问逻辑。
+            engine.on_point_value_changed = _on_val_changed
+
+            # 若已进入 UI 展示模式，仅当前 UI 选中的从机开启每拍 raw_hex 拼装，其余后台从机零字符串开销
+            if self._ui_active_device_id is not None:
+                engine.sync_hex_enabled = (device_id == self._ui_active_device_id)
+
+            # 将全部点位直接预编译为轻量 _CompiledSimPoint 写入底层紧凑 C 数组（不再创建 16-key dict 浪费内存）
             for point in device.points.values():
                 try:
-                    pt_scale, pt_offset = normalize_scale_offset(getattr(point, "scale", 1.0), getattr(point, "offset", 0.0))
-                    engine.write_typed_value(
-                        area=point.area.value,
-                        address=point.address,
-                        value=point.value,
-                        data_type=point.data_type.value,
-                        mode=point.byte_order.value,
-                        byte_order=point.byte_order.value,
-                        string_length=point.string_length,
-                        scale=pt_scale,
-                        offset=pt_offset,
-                    )
-                    pt_dict = {
-                        "address": point.address,
-                        "desc": point.description,
-                        "area": point.area.value,
-                        "data_type": point.data_type.value,
-                        "type": point.data_type.value,
-                        "byte_order": point.byte_order.value,
-                        "mode": point.byte_order.value,
-                        "sim_mode": point.sim_rule,
-                        "sim_rule": point.sim_rule,
-                        "current_val": point.value,
-                        "raw_val": eng_to_raw(point.value, point.data_type.value, pt_scale, pt_offset),
-                        "scale": pt_scale,
-                        "offset": pt_offset,
-                        "sim_min": getattr(point, "sim_min", -1000.0),
-                        "sim_max": getattr(point, "sim_max", 1000.0),
-                        "string_length": point.string_length,
-                    }
-                    engine.points[(point.area.value, point.address)] = pt_dict
-                    engine.points[point.address] = pt_dict
+                    engine.register_model_point(point)
                 except Exception as ex:
                     logger.warning(f"同步点位到底层失败 {point.address}: {ex}")
 
+            # 清理当前线程点表预热期间缓存的 Hex
+            if hasattr(engine, "_hex_tls"):
+                engine._hex_tls.last_hex = None
             # 启动底层从机引擎（挂载至 ModbusServerHub 并开启后台波形仿真线程）
             engine.start()
             with self._lock:
@@ -700,8 +901,15 @@ class SlaveService:
             self.logging_service.post("ERROR", cfg.unit_id, f"从机 [{device.name}] 启动失败: {e}")
             return False, f"启动异常: {e}"
 
-    def _on_engine_point_value_changed(self, device_id: str, area_str: str, address: int, new_val: Any) -> None:
-        """接收底层引擎波形仿真产生的新数值，反向更新 SlaveDevice 点位实体并重算十六进制表示。"""
+    def _on_engine_point_value_changed(
+        self,
+        device_id: str,
+        area_str: str,
+        address: int,
+        new_val: Any,
+        precomputed_raw_hex: Optional[str] = None,
+    ) -> None:
+        """接收底层引擎波形仿真产生的新数值，反向更新 SlaveDevice 点位实体（优先复用已编码 Hex 避免二次编码）。"""
         device = self.get_device(device_id)
         if not device:
             return
@@ -709,7 +917,10 @@ class SlaveService:
         point = device.get_point(area_enum, address)
         if point:
             point.value = new_val
-            PointService.re_encode_point(point)
+            if precomputed_raw_hex is not None:
+                point.raw_hex = precomputed_raw_hex
+            else:
+                PointService.re_encode_point(point)
 
     def stop_slave(self, device_id: str) -> Tuple[bool, str]:
         """统一停止指定从机服务，从物理传输中枢注销并释放串口/网络句柄（最后一台停止时关闭监听）。"""
@@ -745,44 +956,9 @@ class SlaveService:
             engine = self._active_engines.get(device_id)
         if engine:
             try:
-                pt_scale, pt_offset = normalize_scale_offset(getattr(point, "scale", 1.0), getattr(point, "offset", 0.0))
-                engine.write_typed_value(
-                    area=point.area.value,
-                    address=point.address,
-                    value=point.value,
-                    data_type=point.data_type.value,
-                    mode=point.byte_order.value,
-                    byte_order=point.byte_order.value,
-                    string_length=point.string_length,
-                    scale=pt_scale,
-                    offset=pt_offset,
-                )
-                pt_dict = {
-                    "address": point.address,
-                    "desc": point.description,
-                    "area": point.area.value,
-                    "data_type": point.data_type.value,
-                    "type": point.data_type.value,
-                    "byte_order": point.byte_order.value,
-                    "mode": point.byte_order.value,
-                    "sim_mode": point.sim_rule,
-                    "sim_rule": point.sim_rule,
-                    "current_val": point.value,
-                    "raw_val": eng_to_raw(point.value, point.data_type.value, pt_scale, pt_offset),
-                    "scale": pt_scale,
-                    "offset": pt_offset,
-                    "sim_min": getattr(point, "sim_min", -1000.0),
-                    "sim_max": getattr(point, "sim_max", 1000.0),
-                    "string_length": point.string_length,
-                }
-                pts_lock = getattr(engine, "_points_lock", None)
-                if pts_lock:
-                    with pts_lock:
-                        engine.points[(point.area.value, point.address)] = pt_dict
-                        engine.points[point.address] = pt_dict
-                else:
-                    engine.points[(point.area.value, point.address)] = pt_dict
-                    engine.points[point.address] = pt_dict
+                engine.register_model_point(point)
+                if hasattr(engine, "_hex_tls"):
+                    engine._hex_tls.last_hex = None
             except Exception as e:
                 logger.error(f"动态同步点位到底层失败: {e}")
 
@@ -793,6 +969,7 @@ class SlaveService:
         if not engine:
             return
         area_str = AreaType.normalize(area).value
+        engine.unregister_model_point(area_str, address)
         pts_lock = getattr(engine, "_points_lock", None)
         if pts_lock:
             with pts_lock:
@@ -811,6 +988,7 @@ class SlaveService:
         with self._lock:
             engine = self._active_engines.get(device_id)
         if engine:
+            engine.clear_model_points()
             pts_lock = getattr(engine, "_points_lock", None)
             if pts_lock:
                 with pts_lock:

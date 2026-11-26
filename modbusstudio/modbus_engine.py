@@ -33,8 +33,11 @@
 
 # 为什么导入 asyncio：pymodbus 3.x 的服务端（ModbusTcpServer / ModbusSerialServer）完全基于协程构建，
 # 需要在独立后台线程中创建专属 EventLoop 来运行异步监听任务
+from array import array as _c_array
 import asyncio
 import logging
+import math
+import random
 import socket
 # 为什么导入 threading：Tkinter GUI 主线程是单线程事件循环，耗时的网络/串口监听、波形仿真与定时轮询
 # 必须放在后台守护线程中运行，并通过 Lock 与 Event 实现跨线程安全同步
@@ -65,6 +68,10 @@ try:
         clamp_value_to_type,
         decode_value,
         encode_value,
+        eng_to_raw,
+        normalize_scale_offset,
+        parse_bool_value,
+        raw_to_eng,
     )
 except ImportError:
     from modbus_codec import (
@@ -75,7 +82,324 @@ except ImportError:
         clamp_value_to_type,
         decode_value,
         encode_value,
+        eng_to_raw,
+        normalize_scale_offset,
+        parse_bool_value,
+        raw_to_eng,
     )
+
+
+class _CompactBoolBuffer:
+    """基于 bytearray 的紧凑布尔数组视图：65536 位仅占 64 KB，索引读写严格返回/接受 True/False 单例。"""
+    __slots__ = ("_buf",)
+
+    def __init__(self, size: int):
+        self._buf = bytearray(size)
+
+    def __len__(self) -> int:
+        return len(self._buf)
+
+    def __getitem__(self, idx: int) -> bool:
+        return bool(self._buf[idx])
+
+    def __setitem__(self, idx: int, val: Any) -> None:
+        self._buf[idx] = 1 if val else 0
+
+
+class CompactModbusDataBlock(ModbusSequentialDataBlock):
+    """基于 C 紧凑数组 (bytearray / array('H')) 的 65536 容量 Modbus 数据块。
+    通过 1 元素基类构造兼容 pymodbus SimData 类型校验，再挂载固定 64KB/128KB C 数组，
+    单从机 4 个存储区内存从 2.1~6 MB 压缩至固定 384 KB，且永不分配多余 Python int 对象。
+    """
+
+    def __init__(self, address: int = 1, is_bit: bool = False, size: int = 65536):
+        super().__init__(address, [False if is_bit else 0])
+        self._is_bit = is_bit
+        self._compact_size = size
+        self._compact_buf: Union[_CompactBoolBuffer, _c_array] = (
+            _CompactBoolBuffer(size) if is_bit else (_c_array("H", [0]) * size)
+        )
+
+    def bind_compact_buffer(self) -> None:
+        """在 ModbusDeviceContext 完成 SimData 校验后挂载紧凑 C 数组到 simdata[0].values。"""
+        self.values = self._compact_buf
+        if getattr(self, "simdata", None):
+            self.simdata[0].values = self._compact_buf
+
+
+class _SharedAsyncioRuntime:
+    """全局共享单线程 asyncio 运行时：让多端口 ModbusTransportServer 共用 1 个事件循环线程。"""
+
+    _instance: Optional["_SharedAsyncioRuntime"] = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "_SharedAsyncioRuntime":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def __init__(self) -> None:
+        self._state_lock = threading.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._ready = threading.Event()
+
+    def ensure_started(self) -> Tuple[asyncio.AbstractEventLoop, threading.Thread]:
+        with self._state_lock:
+            if (
+                self._loop is not None
+                and self._loop.is_running()
+                and self._thread is not None
+                and self._thread.is_alive()
+            ):
+                return self._loop, self._thread
+            self._ready.clear()
+            t = threading.Thread(target=self._run, name="ModbusSharedAsyncioLoop", daemon=True)
+            self._thread = t
+            t.start()
+        self._ready.wait(timeout=2.0)
+        if self._loop is None or self._thread is None:
+            raise RuntimeError("共享 asyncio 事件循环初始化失败")
+        return self._loop, self._thread
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        # 在事件循环真正进入 run_forever() 后再置位 _ready，消除并发 ensure_started 看到 is_running()==False 的窗口
+        loop.call_soon(self._ready.set)
+        try:
+            loop.run_forever()
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+
+class _CompiledSimPoint:
+    """预编译的极简动态仿真点位对象（__slots__ 仅占 ~140 字节，比 16-key dict 省 85%+ 内存）。
+    在点位注册时一次性算好枚举、边界、缩放与底层 C 数组下标，热循环每拍零字典/枚举/锁解析。
+    """
+    __slots__ = (
+        "area",
+        "addr",
+        "sim_code",      # 0=固定, 1=步进递增, 2=随机波动, 3=正弦波, 4=方波
+        "is_bit",
+        "dt_code",       # 0=BOOL, 1=INT16, 2=UINT16, 3=INT32, 4=UINT32, 5=OTHER(FLOAT32/DOUBLE64/INT64/UINT64)
+        "data_type",
+        "bo_code",       # 0=ABCD, 1=CDAB, 2=BADC, 3=DCBA
+        "mode",
+        "scale",
+        "offset",
+        "is_identity",   # scale == 1.0 and offset == 0.0
+        "raw_lo",
+        "raw_hi",
+        "span",
+        "is_int",
+        "raw_val",
+        "buf",
+        "idx",
+        "buf_len",
+        "model_point",
+    )
+
+    def __init__(
+        self,
+        area: str,
+        addr: int,
+        sim_code: int,
+        is_bit: bool,
+        dt_code: int,
+        data_type: ModbusDataType,
+        bo_code: int,
+        mode: ByteOrderMode,
+        scale: float,
+        offset: float,
+        raw_lo: Union[int, float],
+        raw_hi: Union[int, float],
+        is_int: bool,
+        raw_val: Union[int, float],
+        buf: Any,
+        idx: int,
+        model_point: Any,
+    ):
+        self.area = area
+        self.addr = addr
+        self.sim_code = sim_code
+        self.is_bit = is_bit
+        self.dt_code = dt_code
+        self.data_type = data_type
+        self.bo_code = bo_code
+        self.mode = mode
+        self.scale = scale
+        self.offset = offset
+        self.is_identity = (scale == 1.0 and offset == 0.0)
+        self.raw_lo = raw_lo
+        self.raw_hi = raw_hi
+        self.span = raw_hi - raw_lo
+        self.is_int = is_int
+        self.raw_val = raw_val
+        self.buf = buf
+        self.idx = idx
+        self.buf_len = len(buf) if buf is not None else 0
+        self.model_point = model_point
+
+    def __getitem__(self, key: str) -> Any:
+        """向下兼容旧测试通过 dict 下标读取点位属性（如 engine.points[k]['data_type']）。"""
+        if key in ("data_type", "type"):
+            return self.data_type.value
+        if key in ("byte_order", "mode"):
+            return self.mode.value
+        if key == "area":
+            return self.area
+        if key == "address":
+            return self.addr
+        if key == "raw_val":
+            return self.raw_val
+        if key in ("current_val", "value"):
+            return self.model_point.value if self.model_point is not None else self.raw_val
+        if key == "scale":
+            return self.scale
+        if key == "offset":
+            return self.offset
+        if key in ("sim_rule", "sim_mode"):
+            return getattr(self.model_point, "sim_rule", "固定") if self.model_point is not None else "固定"
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+_SIM_MODE_TO_CODE = {
+    "累加递增": 1,
+    "步进递增": 1,
+    "随机波动": 2,
+    "正弦波": 3,
+    "方波": 4,
+}
+_BO_TO_CODE = {
+    ByteOrderMode.ABCD: 0,
+    ByteOrderMode.CDAB: 1,
+    ByteOrderMode.BADC: 2,
+    ByteOrderMode.DCBA: 3,
+}
+_DT_TO_CODE = {
+    ModbusDataType.BOOL: 0,
+    ModbusDataType.INT16: 1,
+    ModbusDataType.UINT16: 2,
+    ModbusDataType.INT32: 3,
+    ModbusDataType.UINT32: 4,
+}
+
+
+class _GlobalSimScheduler:
+    """全局单线程动态波形仿真调度器：所有运行中从机共享 1 个后台仿真线程，支持可调周期与多机错峰分片。"""
+
+    _instance: Optional["_GlobalSimScheduler"] = None
+    _lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "_GlobalSimScheduler":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def __init__(self) -> None:
+        self._eng_lock = threading.Lock()
+        self._engines: List["ModbusSlaveEngine"] = []
+        self._thread: Optional[threading.Thread] = None
+        self._step: int = 0
+        self._interval_sec: float = 1.0
+
+    def set_interval(self, seconds: float) -> None:
+        """动态设置全局仿真步进周期（限制在 0.5s ~ 60s 之间）。"""
+        try:
+            v = float(seconds)
+            if math.isfinite(v):
+                self._interval_sec = max(0.5, min(60.0, v))
+        except Exception:
+            pass
+
+    def get_interval(self) -> float:
+        return self._interval_sec
+
+    def register(self, engine: "ModbusSlaveEngine") -> threading.Thread:
+        with self._eng_lock:
+            if engine not in self._engines:
+                self._engines.append(engine)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(
+                    target=self._run_loop,
+                    name="ModbusGlobalSimScheduler",
+                    daemon=True,
+                )
+                self._thread.start()
+            return self._thread
+
+    def unregister(self, engine: "ModbusSlaveEngine") -> None:
+        with self._eng_lock:
+            try:
+                self._engines.remove(engine)
+            except ValueError:
+                pass
+
+    def _run_loop(self) -> None:
+        while True:
+            t_start = time.perf_counter()
+            interval = self._interval_sec
+            with self._eng_lock:
+                if not self._engines:
+                    if self._thread is threading.current_thread():
+                        self._thread = None
+                    return
+                snapshot = list(self._engines)
+
+            # 首拍先按节拍等待，避免刚启动立即跳变
+            if self._step == 0:
+                time.sleep(interval)
+                with self._eng_lock:
+                    if not self._engines:
+                        if self._thread is threading.current_thread():
+                            self._thread = None
+                        return
+                    snapshot = list(self._engines)
+                t_start = time.perf_counter()
+
+            self._step = (self._step + 1) % 100000
+            n = len(snapshot)
+            # 当活跃从机较多（>8台）时分 4 片错峰步进，避免单瞬间 CPU 尖峰卡顿 UI
+            chunks = 4 if n > 8 else 1
+            chunk_size = (n + chunks - 1) // chunks
+            slice_sleep = (interval * 0.6) / chunks if chunks > 1 else 0.0
+
+            for ci in range(chunks):
+                sub = snapshot[ci * chunk_size : (ci + 1) * chunk_size]
+                for eng in sub:
+                    if not eng._sim_running or eng._sim_stop_evt.is_set():
+                        continue
+                    try:
+                        eng._step_simulation(self._step)
+                    except Exception as ex:
+                        logger.warning(f"全局仿真调度单机异常（已捕获）: {ex}")
+                if chunks > 1 and ci < chunks - 1 and slice_sleep > 0.01:
+                    time.sleep(slice_sleep)
+
+            elapsed = time.perf_counter() - t_start
+            remain = self._interval_sec - elapsed
+            if remain > 0.02:
+                time.sleep(remain)
+            else:
+                # 即便极端超载也主动让出 GIL 20ms，确保网络协程与 UI 绝不卡死
+                time.sleep(0.02)
 
 
 # 初始化引擎模块级日志记录器，供网络异常、非法写拦截与探活重建输出诊断信息
@@ -554,12 +878,12 @@ class MultiStationServerContext(ModbusServerContext):
                 for i, val in enumerate(values):
                     idx = start_idx + i
                     if 0 <= idx < len(values_list):
-                        values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+                        values_list[idx] = (1 if val else 0) if is_bit else (int(val) & 0xFFFF)
         else:
             for i, val in enumerate(values):
                 idx = start_idx + i
                 if 0 <= idx < len(values_list):
-                    values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+                    values_list[idx] = (1 if val else 0) if is_bit else (int(val) & 0xFFFF)
 
         if hasattr(engine, "_notify_external_write"):
             try:
@@ -638,20 +962,25 @@ class ModbusTransportServer:
 
     def _on_trace_packet(self, sending: bool, data: bytes) -> bytes:
         """pymodbus 底层报文收发拦截回调钩子（`trace_packet`）。"""
-        # 参数：
-        # sending: `True` 表示 TX 发送响应，`False` 表示 RX 接收问询。
-        # data: 原始报文字节流。
-        # 返回：
-        # bytes: 必须原样返回 `data` 字节流，否则 pymodbus 底层将无法继续处理或发送该报文！
-        # 关键步骤：
-        # 1. 调用 `format_modbus_trace_packet` 提取报文所属的 `unit_id` 和结构化中文描述。
-        # 2. 根据 `unit_id` 查找对应的从机引擎并触发其 `on_packet_log` 回调，将报文推送到 UI 日志面板。
         if not data:
             return data
         try:
-            # 解析报文获取目标站地址与人类可读的日志文本
+            # 极速短路：先提取站号判断是否真的需要解析与投递报文；若 UI 显示与 CSV 落盘均关闭，直接返回零开销
+            unit_id_fast = data[0] if self.comm_type == "RTU" else (data[6] if len(data) >= 7 else 0)
+            slave = self._server_context.get_slave(unit_id_fast)
+            if slave is not None:
+                should_trace = getattr(slave, "should_trace_packet", None)
+                if should_trace is not None and not should_trace():
+                    return data
+                if not slave.on_packet_log and not self.on_packet_log:
+                    return data
+            elif not self.on_packet_log:
+                return data
+
+            # 仅在确实需要展示或落盘时，才解析报文与格式化十六进制字符串
             unit_id, msg = format_modbus_trace_packet(self.comm_type, sending, data)
-            slave = self._server_context.get_slave(unit_id)
+            if unit_id != unit_id_fast:
+                slave = self._server_context.get_slave(unit_id)
             direction = "TX" if sending else "RX"
             # 优先分发给目标从机实例的日志回调；若目标从机未挂载则回退到传输服务级回调
             if slave and slave.on_packet_log:
@@ -767,43 +1096,87 @@ class ModbusTransportServer:
         return reachable
 
     def start(self) -> None:
-        """启动底层物理端点监听线程，并使用事件驱动机制等待 `self._server` 就绪。"""
+        """在全局共享 asyncio 事件循环上启动当前物理端点监听，避免每端口独占线程与 EventLoop。"""
         if self.is_healthy():
             return
         with self._rebuild_lock:
             if self.is_healthy():
                 return
-            # 半死状态（_is_running=True 但底层僵死）→ 走标准 stop() 在事件循环线程内安全回收后再重建
+            # 半死状态（_is_running=True 但底层僵死）→ 先走标准 stop() 清理后再重建
             if self._is_running:
                 logger.warning(f"[SLAVE-RESTART] {self.endpoint_key} 检测到半死状态，强制重建 listener")
                 self.stop()
-            # 启动前先复位就绪信号量与错误状态
             self._ready.clear()
             self._start_error = None
             self._is_running = True
             self._start_ts = time.time()
-            self._thread = threading.Thread(target=self._run_server_loop, daemon=True)
-            self._thread.start()
-            # [SLAVE-SPEED-1] 事件驱动等待后台 listener 绑定就绪（正常 1~5ms 立即唤醒，2.0s 上限防重负载/GC 抖动误超时）
-            self._ready.wait(timeout=2.0)
-            if not self._server or self._start_error:
-                logger.warning(f"ModbusTransportServer {self.endpoint_key} 未就绪: {self._start_error or '2s 超时'}")
 
-    # [REVIEW-FIX-3] 完善 stop() 资源彻底回收：取消 task 并在事件循环中安全 await shutdown()，避免 socket 与 loop 句柄泄漏
-    # [SLAVE-SPEED-2] 将清理与线程 join 超时上限从 2.0s+3.0s 压缩至 1.0s+1.0s
+            loop, thread = _SharedAsyncioRuntime.get_instance().ensure_started()
+            self._loop = loop
+            self._thread = thread
+
+            async def _start_coro():
+                try:
+                    if self.comm_type == "RTU":
+                        _, s_port, baud, bsize, parity, stopb = self.endpoint_key
+                        srv = ModbusSerialServer(
+                            context=self._server_context,
+                            port=s_port,
+                            baudrate=baud,
+                            bytesize=bsize,
+                            parity=parity,
+                            stopbits=stopb,
+                            trace_packet=self._on_trace_packet,
+                        )
+                    else:
+                        _, host, port = self.endpoint_key
+                        srv = ModbusTcpServer(
+                            context=self._server_context,
+                            address=(host, port),
+                            trace_packet=self._on_trace_packet,
+                        )
+                    await srv.serve_forever(background=True)
+                    self._server = srv
+
+                    async def _wait_serving():
+                        try:
+                            await srv.serving
+                        except asyncio.CancelledError:
+                            pass
+
+                    self._server_task = asyncio.create_task(_wait_serving())
+                    self._serve_task = self._server_task
+                    self._ready.set()
+                except Exception as e:
+                    self._start_error = str(e)
+                    self._server = None
+                    self._is_running = False
+                    self._ready.set()
+                    logger.error(f"ModbusTransportServer 运行异常 ({self.endpoint_key}): {e}")
+                    self._emit_transport_log(f"[服务异常崩溃] 无法监听 {self.endpoint_key}: {e}", "ERROR")
+
+            fut = asyncio.run_coroutine_threadsafe(_start_coro(), loop)
+            try:
+                fut.result(timeout=2.5)
+            except Exception as e:
+                self._start_error = str(e)
+                self._server = None
+                self._is_running = False
+                self._ready.set()
+            if not self._server or self._start_error:
+                logger.warning(f"ModbusTransportServer {self.endpoint_key} 未就绪: {self._start_error or '2.5s 超时'}")
+
     def stop(self) -> None:
-        """优雅停止物理传输层监听服务，在单端点重建锁保护下安全释放底层 TCP socket 或串口句柄及事件循环。"""
+        """优雅停止当前物理端点监听服务，仅关闭本端点 socket/task，不影响共享事件循环上其他端口。"""
         with self._rebuild_lock:
             self._is_running = False
             loop = self._loop
             server = self._server
             server_task = self._server_task
             serve_task = self._serve_task
-            thread = self._thread
 
             if loop and loop.is_running():
                 async def _cleanup():
-                    """在后台事件循环线程内部执行的异步清理协程：先关闭底层 server 监听，再取消常驻任务。"""
                     if server:
                         try:
                             await server.shutdown()
@@ -837,83 +1210,12 @@ class ModbusTransportServer:
                         pass
                     logger.debug(f"stop() 通知 loop 清理超时或异常: {e}")
 
-            # 等待后台监听线程彻底退出
-            if thread and thread.is_alive():
-                thread.join(timeout=1.0)
-                if thread.is_alive():
-                    logger.warning(f"ModbusTransportServer 后台服务线程 join 超时 ({self.endpoint_key})")
-
-            # 确保全部引用彻底重置为 None，防止残留半清理状态
             self._thread = None
             self._loop = None
             self._server = None
             self._server_task = None
             self._serve_task = None
             self._ready.clear()
-
-    def _run_server_loop(self) -> None:
-        """后台守护线程主入口：创建独立局部 asyncio 事件循环并运行 pymodbus 服务端监听协程。"""
-        loop = asyncio.new_event_loop()
-        self._loop = loop
-        asyncio.set_event_loop(loop)
-
-        async def _serve():
-            """实例化 pymodbus 服务端并完成真实端口绑定后再唤醒 start()，避免紧接 stop() 触发启停竞态。"""
-            self._serve_task = asyncio.current_task()
-            try:
-                if self.comm_type == "RTU":
-                    _, s_port, baud, bsize, parity, stopb = self.endpoint_key
-                    srv = ModbusSerialServer(
-                        context=self._server_context,
-                        port=s_port,
-                        baudrate=baud,
-                        bytesize=bsize,
-                        parity=parity,
-                        stopbits=stopb,
-                        trace_packet=self._on_trace_packet,
-                    )
-                else:
-                    _, host, port = self.endpoint_key
-                    srv = ModbusTcpServer(
-                        context=self._server_context,
-                        address=(host, port),
-                        trace_packet=self._on_trace_packet,
-                    )
-                # 先完成底层 listen() 绑定再赋值 self._server 并置位 _ready，防止启动失败被误判为已就绪
-                await srv.serve_forever(background=True)
-                self._server = srv
-
-                async def _wait_serving():
-                    await srv.serving
-
-                self._server_task = asyncio.create_task(_wait_serving())
-                self._ready.set()
-                await self._server_task
-            except asyncio.CancelledError:
-                self._ready.set()
-            except Exception as e:
-                self._start_error = str(e)
-                self._server = None
-                self._ready.set()
-                logger.error(f"ModbusTransportServer 运行异常 ({self.endpoint_key}): {e}")
-                self._emit_transport_log(f"[服务异常崩溃] 无法监听 {self.endpoint_key}: {e}", "ERROR")
-
-        try:
-            loop.run_until_complete(_serve())
-        finally:
-            self._ready.set()
-            # 始终关闭本次线程创建的局部 loop，绝不因主线程置 self._loop=None 而泄漏句柄
-            try:
-                loop.close()
-            except Exception:
-                pass
-            # 仅当当前实例仍指向本次 loop 时更新状态，防止旧线程延迟退出误伤新重启的实例
-            if self._loop is loop:
-                self._is_running = False
-                if self._server:
-                    logger.warning(
-                        f"ModbusTransportServer listener 已退出 ({self.endpoint_key})，下次 start() 将自动重建"
-                    )
 
 
 # =====================================================================
@@ -1199,11 +1501,11 @@ class ModbusSlaveEngine:
         self._server_task: Optional[asyncio.Task] = None
         self._is_running = False
 
-        # 初始化 4 大存储区，每个存储区预分配 65536 个点位（完整覆盖 0~65535 全部 16 位协议地址，0-based/1-based 均不越界）
-        self._coils = ModbusSequentialDataBlock(1, [False] * 65536)
-        self._discrete_inputs = ModbusSequentialDataBlock(1, [False] * 65536)
-        self._input_registers = ModbusSequentialDataBlock(1, [0] * 65536)
-        self._holding_registers = ModbusSequentialDataBlock(1, [0] * 65536)
+        # 初始化 4 大紧凑存储区：bytearray(65536)×2 + array('H')*65536×2，单从机固定仅占 384 KB
+        self._coils = CompactModbusDataBlock(1, is_bit=True, size=65536)
+        self._discrete_inputs = CompactModbusDataBlock(1, is_bit=True, size=65536)
+        self._input_registers = CompactModbusDataBlock(1, is_bit=False, size=65536)
+        self._holding_registers = CompactModbusDataBlock(1, is_bit=False, size=65536)
 
         self._device_context = ModbusDeviceContext(
             di=self._discrete_inputs,
@@ -1211,20 +1513,35 @@ class ModbusSlaveEngine:
             hr=self._holding_registers,
             ir=self._input_registers,
         )
+        # 在 SimDevice 完成初始化校验后，将 4 个数据块底层缓冲切换为 384 KB 紧凑 C 数组
+        self._coils.bind_compact_buffer()
+        self._discrete_inputs.bind_compact_buffer()
+        self._input_registers.bind_compact_buffer()
+        self._holding_registers.bind_compact_buffer()
         # 保留单机上下文兼容已有属性
         self._server_context = ModbusServerContext(devices=self._device_context, single=True)
 
         # 模拟点位配置表: address -> {type, mode, sim_rule, ...}，由 _points_lock 保护跨线程读写与快照迭代
         self.points: Dict[Union[int, Tuple[str, int]], Dict[str, Any]] = {}
+        # 高性能预编译点位表（供 SlaveService 直接注册 ModbusPoint，零 dict 开销、零热循环解析）
+        self._compiled_points: Dict[Tuple[str, int], _CompiledSimPoint] = {}
+        self._compiled_sim_list: List[_CompiledSimPoint] = []
+        self._compiled_sim_dirty: bool = False
+        # 是否在每拍仿真时实时拼接 model_point.raw_hex 字符串（UI 模式下仅当前展示的 1 台从机开启）
+        self.sync_hex_enabled: bool = True
         self._points_lock = threading.RLock()
         self._sim_thread: Optional[threading.Thread] = None
         self._sim_running = False
         # [SLAVE-SPEED-3] 仿真线程可唤醒退出事件：取代固定 1s 睡眠盲等
         self._sim_stop_evt = threading.Event()
+        # 报文追踪前置短路开关: () -> bool（为 False 时直接跳过十六进制拼串）
+        self.should_trace_packet: Optional[Callable[[], bool]] = None
         # 外部通信问询与响应报文回调: (message, level) -> None
         self.on_packet_log: Optional[Callable[[str, str], None]] = None
         # 模拟点位数值实时变动通知回调: (area, address, new_val) -> None
         self.on_point_value_changed: Optional[Callable[[str, int, Any], None]] = None
+        # 线程局部缓存最近一次仿真写出生成的 Hex 预览串，供服务层复用且与网络线程 100% 隔离无竞态
+        self._hex_tls = threading.local()
 
     @property
     def is_running(self) -> bool:
@@ -1258,35 +1575,23 @@ class ModbusSlaveEngine:
 
         self._is_running = True
 
-        # 2. 启动模拟数据定时刷新线程（每次启动分配独立 stop_evt 防止快速停启出现双仿真线程）
+        # 2. 注册到全局单线程仿真调度器（多台从机共享 1 个仿真线程，大幅减少线程与 GIL 争用）
         stop_evt = threading.Event()
         self._sim_stop_evt = stop_evt
         self._sim_running = True
-        self._sim_thread = threading.Thread(
-            target=self._run_simulation_loop, args=(stop_evt,), daemon=True
-        )
-        self._sim_thread.start()
+        self._sim_thread = _GlobalSimScheduler.get_instance().register(self)
 
     def stop(self) -> None:
-        """停止从机服务：立即唤醒并终止波形仿真线程，随后从物理传输中枢安全卸载（若为该端口最后一台从机则关闭物理端口）。"""
-        # 关键步骤（为什么先 `self._sim_stop_evt.set()` 再注销 Hub）：
-        # - 旧实现中仿真线程使用 `time.sleep(1)`，每次调用 `stop()` 平均要卡顿 0.5~1.0 秒等待 sleep 结束。
-        # - 改用 `_sim_stop_evt.set()` 后，正在 `_sim_stop_evt.wait(1)` 中等待的仿真线程会在微秒级被立即唤醒并退出循环，
-        # 从而让单机停止与“全部停止”批量操作耗时从秒级降至毫秒级。
+        """停止从机服务：立即从全局仿真调度器摘除，随后从物理传输中枢安全卸载（若为该端口最后一台从机则关闭物理端口）。"""
         self._sim_running = False
-        # 立即触发停止事件，唤醒正在 wait(1) 的后台波形仿真线程
         self._sim_stop_evt.set()
         self._is_running = False
+        _GlobalSimScheduler.get_instance().unregister(self)
+        self._sim_thread = None
 
         # 从全局物理中枢卸载本从机实例
         hub = ModbusServerHub.get_instance()
         hub.unregister_and_stop_slave(self)
-
-        # 回收仿真线程句柄
-        if self._sim_thread:
-            self._sim_stop_evt.set()
-            self._sim_thread.join(timeout=0.3)
-            self._sim_thread = None
 
     def _on_trace_packet(self, sending: bool, data: bytes) -> bytes:
         """单机模式下的兼容性报文拦截回调：解析收发字节帧并转发给 `self.on_packet_log`。"""
@@ -1373,7 +1678,7 @@ class ModbusSlaveEngine:
                     for i, val in enumerate(values):
                         idx = start_idx + i
                         if 0 <= idx < len(values_list):
-                            values_list[idx] = bool(val) if is_bit else (int(val) & 0xFFFF)
+                            values_list[idx] = (1 if val else 0) if is_bit else (int(val) & 0xFFFF)
             except Exception as ex:
                 logger.warning(f"写入数据块异常 ({area}:{address}): {ex}")
 
@@ -1389,17 +1694,17 @@ class ModbusSlaveEngine:
         scale: float = 1.0,
         offset: float = 0.0,
     ) -> None:
-        """将业务工程数值按系数/偏移量反算并依数据类型和字节序编码后写入本地数据块。"""
+        """将业务工程数值按系数/偏移量反算并依数据类型和字节序编码后写入本地数据块，同时缓存 Hex 预览串。"""
         actual_mode = byte_order if byte_order is not None else mode
         if _classify_area(area) in ("COIL", "DISCRETE"):
-            from .modbus_codec import parse_bool_value
             b_val = parse_bool_value(value)
             self.write_raw_values(area, address, [1 if b_val else 0])
+            self._hex_tls.last_hex = "0x01" if b_val else "0x00"
         else:
-            from .modbus_codec import eng_to_raw
             raw_val = eng_to_raw(value, data_type, scale, offset)
             regs = encode_value(raw_val, data_type, actual_mode, string_length=string_length)
             self.write_raw_values(area, address, regs)
+            self._hex_tls.last_hex = " ".join(f"0x{r:04X}" for r in regs) if regs else "0x0000"
 
     def read_typed_value(
         self,
@@ -1427,16 +1732,182 @@ class ModbusSlaveEngine:
             return bool(raw[0])
         return decode_value(raw, data_type, mode, string_length=string_length)
 
+    def register_model_point(self, point: Any) -> None:
+        """将领域层 ModbusPoint 一次性预编译为轻量 _CompiledSimPoint 并写入底层紧凑 C 数组。"""
+        area_str = point.area.value if hasattr(point.area, "value") else str(point.area)
+        addr = int(point.address)
+        dt_str = (point.data_type.value if hasattr(point.data_type, "value") else str(point.data_type)).strip().upper()
+        if dt_str == "FLOAT64":
+            dt_str = "DOUBLE64"
+        try:
+            data_type = ModbusDataType(dt_str)
+        except Exception:
+            data_type = ModbusDataType.INT16
+
+        bo_str = (point.byte_order.value if hasattr(point.byte_order, "value") else str(point.byte_order)).strip().upper()
+        try:
+            mode = ByteOrderMode(bo_str)
+        except Exception:
+            mode = ByteOrderMode.ABCD
+
+        pt_scale, pt_offset = normalize_scale_offset(getattr(point, "scale", 1.0), getattr(point, "offset", 0.0))
+        str_len = int(getattr(point, "string_length", 16) or 16)
+
+        # 初值写入底层 DataBlock
+        self.write_typed_value(
+            area=area_str,
+            address=addr,
+            value=point.value,
+            data_type=data_type,
+            mode=mode,
+            string_length=str_len,
+            scale=pt_scale,
+            offset=pt_offset,
+        )
+
+        is_bit = _classify_area(area_str) in ("COIL", "DISCRETE") or data_type == ModbusDataType.BOOL
+        sim_rule = str(getattr(point, "sim_rule", "固定") or "固定")
+        sim_code = _SIM_MODE_TO_CODE.get(sim_rule, 0)
+        if not is_bit and data_type in (
+            ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING
+        ):
+            sim_code = 0
+
+        if is_bit:
+            raw_val: Union[int, float] = 1 if parse_bool_value(point.value) else 0
+            raw_lo: Union[int, float] = 0
+            raw_hi: Union[int, float] = 1
+            is_int = True
+            dt_code = 0
+        else:
+            dt_code = _DT_TO_CODE.get(data_type, 5)
+            limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
+            hw_min, hw_max, v_type = limits
+            is_int = (v_type is int)
+            try:
+                eng_min = float(getattr(point, "sim_min", -1000.0))
+                if not math.isfinite(eng_min):
+                    eng_min = -1000.0
+            except Exception:
+                eng_min = -1000.0
+            try:
+                eng_max = float(getattr(point, "sim_max", 1000.0))
+                if not math.isfinite(eng_max):
+                    eng_max = 1000.0
+            except Exception:
+                eng_max = 1000.0
+            if eng_min > eng_max:
+                eng_min, eng_max = eng_max, eng_min
+
+            r_a = (eng_min - pt_offset) / pt_scale
+            r_b = (eng_max - pt_offset) / pt_scale
+            raw_target_lo, raw_target_hi = (r_a, r_b) if r_a <= r_b else (r_b, r_a)
+            if is_int:
+                cand_lo = int(math.ceil(raw_target_lo)) if math.isfinite(raw_target_lo) else hw_min
+                cand_hi = int(math.floor(raw_target_hi)) if math.isfinite(raw_target_hi) else hw_max
+                raw_lo = max(hw_min, min(hw_max, cand_lo))
+                raw_hi = max(hw_min, min(hw_max, cand_hi))
+                if raw_lo > raw_hi:
+                    raw_lo = raw_hi = max(hw_min, min(hw_max, int(round((raw_target_lo + raw_target_hi) / 2.0))))
+            else:
+                cand_lo = raw_target_lo if math.isfinite(raw_target_lo) else hw_min
+                cand_hi = raw_target_hi if math.isfinite(raw_target_hi) else hw_max
+                raw_lo = max(hw_min, min(hw_max, cand_lo))
+                raw_hi = max(hw_min, min(hw_max, cand_hi))
+                if raw_lo > raw_hi:
+                    raw_lo = raw_hi = max(hw_min, min(hw_max, (raw_target_lo + raw_target_hi) / 2.0))
+            raw_val = eng_to_raw(point.value, data_type, pt_scale, pt_offset)
+
+        block = self._get_datablock(area_str)
+        buf = block.simdata[0].values if (block and getattr(block, "simdata", None)) else None
+        idx = addr - (1 if self.address_base == 1 else 0)
+
+        compiled = _CompiledSimPoint(
+            area=area_str,
+            addr=addr,
+            sim_code=sim_code,
+            is_bit=is_bit,
+            dt_code=dt_code,
+            data_type=data_type,
+            bo_code=_BO_TO_CODE.get(mode, 0),
+            mode=mode,
+            scale=pt_scale,
+            offset=pt_offset,
+            raw_lo=raw_lo,
+            raw_hi=raw_hi,
+            is_int=is_int,
+            raw_val=raw_val,
+            buf=buf,
+            idx=idx,
+            model_point=point,
+        )
+        with self._points_lock:
+            self._compiled_points[(area_str, addr)] = compiled
+            self.points[(area_str, addr)] = compiled
+            self.points[addr] = compiled
+            self._compiled_sim_dirty = True
+
+    def unregister_model_point(self, area_str: str, address: int) -> None:
+        """从预编译点位表中移除指定点位并触发仿真快照重建。"""
+        addr_i = int(address)
+        with self._points_lock:
+            self.points.pop((area_str, addr_i), None)
+            leg = self.points.get(addr_i)
+            if isinstance(leg, _CompiledSimPoint) and leg.area == area_str:
+                self.points.pop(addr_i, None)
+            if self._compiled_points.pop((area_str, addr_i), None) is not None:
+                self._compiled_sim_dirty = True
+
+    def clear_model_points(self) -> None:
+        """清空预编译点位表与动态仿真快照。"""
+        with self._points_lock:
+            self._compiled_points.clear()
+            self.points.clear()
+            self._compiled_sim_list = []
+            self._compiled_sim_dirty = False
+
     def _notify_external_write(self, area_str: str, start_addr: int, count: int) -> None:
         """外部主站执行 FC05/06/15/16 写入后，反解受影响的点位并同步更新仿真点表与领域模型回调。"""
         if count <= 0:
             return
         with self._points_lock:
-            if not self.points:
-                return
-            items_snapshot = list(self.points.items())
+            compiled_snapshot = list(self._compiled_points.values()) if self._compiled_points else []
+            items_snapshot = [(k, v) for k, v in self.points.items() if isinstance(v, dict)] if self.points else []
+        if not compiled_snapshot and not items_snapshot:
+            return
         write_kind = _classify_area(area_str)
         write_end = start_addr + count
+
+        # 1. 优先同步预编译点位表（SlaveService 注册的高性能路径）
+        for cp in compiled_snapshot:
+            if _classify_area(cp.area) != write_kind:
+                continue
+            mp = cp.model_point
+            str_len = int(getattr(mp, "string_length", 16) or 16) if mp is not None else 16
+            reg_cnt = max(1, (str_len + 1) // 2) if cp.data_type == ModbusDataType.STRING else TYPE_REGISTER_COUNT.get(cp.data_type, 1)
+            if cp.addr >= write_end or (cp.addr + reg_cnt) <= start_addr:
+                continue
+            if write_kind in ("COIL", "DISCRETE"):
+                raw_bits = self.read_raw_values(cp.area, cp.addr, 1)
+                new_val: Any = 1 if raw_bits and raw_bits[0] else 0
+                cp.raw_val = new_val
+            else:
+                raw_decoded = self.read_typed_value(cp.area, cp.addr, cp.data_type, cp.mode, string_length=str_len)
+                if cp.data_type == ModbusDataType.HEX16 and isinstance(raw_decoded, str):
+                    try:
+                        raw_decoded = int(raw_decoded, 16) & 0xFFFF
+                    except Exception:
+                        pass
+                cp.raw_val = raw_decoded
+                new_val = raw_to_eng(raw_decoded, cp.data_type, cp.scale, cp.offset)
+            if self.on_point_value_changed:
+                try:
+                    self.on_point_value_changed(cp.area, cp.addr, new_val)
+                except Exception:
+                    pass
+
+        if not items_snapshot:
+            return
         has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
 
         for key, pt in items_snapshot:
@@ -1480,7 +1951,6 @@ class ModbusSlaveEngine:
                 new_val: Any = 1 if raw_bits and raw_bits[0] else 0
                 pt["raw_val"] = new_val
             else:
-                from .modbus_codec import raw_to_eng
                 raw_decoded = self.read_typed_value(pt_area, pt_addr, data_type, mode, string_length=str_len)
                 if data_type == ModbusDataType.HEX16 and isinstance(raw_decoded, str):
                     try:
@@ -1500,227 +1970,379 @@ class ModbusSlaveEngine:
                     pass
 
     def _run_simulation_loop(self, stop_evt: Optional[threading.Event] = None) -> None:
-        """后台动态波形模拟循环（1s 周期）：在 _points_lock 与异常保护下遍历点位并同步写入底层寄存器。"""
+        """兼容单机独立仿真循环入口（正常运行由 _GlobalSimScheduler 统一调度 _step_simulation）。"""
         step = 0
-        import math
-        import random
-
         evt = stop_evt or self._sim_stop_evt
         while self._sim_running and not evt.is_set():
-            # 等待 1 秒或直到收到停止信号；若返回 True 表示被 stop() 唤醒，立即终止循环
             if evt.wait(1):
                 break
             if not self._sim_running or evt.is_set():
                 break
             step = (step + 1) % 100000
+            self._step_simulation(step, evt)
 
-            try:
-                # 在 _points_lock 下制作字典项安全快照，防止多线程迭代期间大小并发变动打死仿真线程
-                with self._points_lock:
-                    items_snapshot = list(self.points.items())
-                has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
+    def _step_compiled_simulation(self, step: int, evt: threading.Event) -> None:
+        """极速预编译仿真热路径：单拍单锁、纯位运算直写 C 数组、后台不可见从机跳过 Hex 字符串拼装。"""
+        if self._compiled_sim_dirty:
+            with self._points_lock:
+                self._compiled_sim_list = [p for p in self._compiled_points.values() if p.sim_code != 0]
+                self._compiled_sim_dirty = False
+        sim_list = self._compiled_sim_list
+        if not sim_list:
+            return
 
-                for key, point in items_snapshot:
-                    if evt.is_set() or not self._sim_running:
-                        break
-                    # 若存在复合键 (area, addr)，忽略历史单一整型 key 以避免重复模拟
-                    if has_composite and not isinstance(key, tuple):
-                        continue
+        sync_hex = self.sync_hex_enabled
+        _randint = random.randint
+        _uniform = random.uniform
+        _sin = math.sin
+        _encode = encode_value
+        _raw_to_eng = raw_to_eng
 
-                    if isinstance(key, tuple) and len(key) >= 2:
-                        k_area, addr = str(key[0]), int(key[1])
+        with self._data_lock:
+            for p in sim_list:
+                if evt.is_set() or not self._sim_running:
+                    break
+                buf = p.buf
+                idx = p.idx
+                if buf is None or idx < 0:
+                    continue
+
+                sim_code = p.sim_code
+                if p.is_bit:
+                    if sim_code == 3:  # 正弦波
+                        new_b = 1 if _sin((step * 0.35) + ((p.addr % 10) * 0.4)) >= 0 else 0
+                    elif sim_code == 4:  # 方波
+                        new_b = 1 if ((step + (p.addr % 5)) % 6) >= 3 else 0
+                    elif sim_code == 2:  # 随机波动
+                        new_b = _randint(0, 1)
+                    else:  # 步进/翻转
+                        new_b = 0 if p.raw_val else 1
+                    p.raw_val = new_b
+                    if idx < p.buf_len:
+                        buf[idx] = new_b
+                    mp = p.model_point
+                    if mp is not None:
+                        mp.value = new_b
+                        if sync_hex:
+                            mp.raw_hex = "0x01" if new_b else "0x00"
+                    continue
+
+                raw_lo = p.raw_lo
+                raw_hi = p.raw_hi
+                span = p.span
+                is_int = p.is_int
+                curr = p.raw_val
+
+                if span <= 0:
+                    new_raw = raw_lo
+                elif sim_code == 1:  # 步进递增
+                    if is_int:
+                        inc_step = int(round(span * 0.01))
+                        if inc_step < 1:
+                            inc_step = 1
+                        new_raw = raw_lo if (curr < raw_lo or curr >= raw_hi) else (raw_hi if curr + inc_step > raw_hi else curr + inc_step)
                     else:
-                        addr = int(key)
-                        k_area = point.get("area", AreaType.HOLDING_REGISTER)
-
-                    sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
-                    if sim_mode == "固定":
-                        continue
-
-                    dt_raw = point.get("data_type") or point.get("type") or ModbusDataType.INT16
-                    try:
-                        if isinstance(dt_raw, ModbusDataType):
-                            data_type = dt_raw
-                        else:
-                            dt_str = str(dt_raw.value if hasattr(dt_raw, "value") else dt_raw).strip().upper()
-                            if dt_str == "FLOAT64":
-                                dt_str = "DOUBLE64"
-                            data_type = ModbusDataType(dt_str)
-                    except Exception:
-                        data_type = ModbusDataType.INT16
-
-                    bo_raw = point.get("byte_order") or point.get("mode") or ByteOrderMode.ABCD
-                    try:
-                        if isinstance(bo_raw, ByteOrderMode):
-                            mode = bo_raw
-                        else:
-                            bo_str = str(bo_raw.value if hasattr(bo_raw, "value") else bo_raw).strip().upper()
-                            if "." in bo_str:
-                                bo_str = bo_str.split(".")[-1]
-                            mode = ByteOrderMode(bo_str)
-                    except Exception:
-                        mode = ByteOrderMode.ABCD
-
-                    area = k_area or point.get("area", AreaType.HOLDING_REGISTER)
-                    curr = point.get("current_val", point.get("value", 0))
-
-                    # 功能码 01(线圈) 与 02(离散输入)：统一复用 _classify_area，支持中英文区名
-                    is_fc01_02 = (
-                        _classify_area(area) in ("COIL", "DISCRETE")
-                        or point.get("fc") in (1, 2)
-                        or data_type == ModbusDataType.BOOL
-                    )
-                    if is_fc01_02:
-                        curr_bool_int = 1 if (curr is True or str(curr) in ("1", "True", "true")) else 0
-                        if sim_mode == "正弦波":
-                            phase = (step * 0.35) + ((addr % 10) * 0.4)
-                            new_val = 1 if math.sin(phase) >= 0 else 0
-                        elif sim_mode == "方波":
-                            phase = (step + (addr % 5)) % 6
-                            new_val = 1 if phase >= 3 else 0
-                        elif sim_mode == "随机波动":
-                            new_val = random.choice([0, 1])
-                        else:
-                            new_val = 0 if curr_bool_int == 1 else 1
-
-                        point["current_val"] = new_val
-                        self.write_typed_value(area, addr, new_val, data_type, mode)
-                        if self.on_point_value_changed:
-                            try:
-                                self.on_point_value_changed(area, addr, new_val)
-                            except Exception:
-                                pass
-                        continue
-
-                    if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
-                        continue
-
-                    from .modbus_codec import eng_to_raw, normalize_scale_offset, raw_to_eng
-                    pt_scale, pt_offset = normalize_scale_offset(point.get("scale", 1.0), point.get("offset", 0.0))
-                    # 将用户期望的工程波动区间 [sim_min, sim_max]（默认 [-1000, +1000]）折算到原始寄存器空间，
-                    # 并与当前数据类型的硬件上下限求交集（无符号类型自动截断负下限，防溢出与下溢）。
-                    try:
-                        eng_min = float(point.get("sim_min", -1000.0))
-                        if not math.isfinite(eng_min):
-                            eng_min = -1000.0
-                    except Exception:
-                        eng_min = -1000.0
-                    try:
-                        eng_max = float(point.get("sim_max", 1000.0))
-                        if not math.isfinite(eng_max):
-                            eng_max = 1000.0
-                    except Exception:
-                        eng_max = 1000.0
-                    if eng_min > eng_max:
-                        eng_min, eng_max = eng_max, eng_min
-
-                    limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
-                    hw_min, hw_max, v_type = limits
-
-                    r_a = (eng_min - pt_offset) / pt_scale
-                    r_b = (eng_max - pt_offset) / pt_scale
-                    raw_target_lo, raw_target_hi = (r_a, r_b) if r_a <= r_b else (r_b, r_a)
-                    if v_type is int:
-                        cand_lo = int(math.ceil(raw_target_lo)) if math.isfinite(raw_target_lo) else hw_min
-                        cand_hi = int(math.floor(raw_target_hi)) if math.isfinite(raw_target_hi) else hw_max
-                        raw_lo = max(hw_min, min(hw_max, cand_lo))
-                        raw_hi = max(hw_min, min(hw_max, cand_hi))
-                        if raw_lo > raw_hi:
-                            mid = max(hw_min, min(hw_max, int(round((raw_target_lo + raw_target_hi) / 2.0))))
-                            raw_lo = raw_hi = mid
+                        inc_step = round(span * 0.01, 2)
+                        if inc_step < 0.5:
+                            inc_step = 0.5
+                        new_raw = round(raw_lo, 2) if (curr < raw_lo or curr >= raw_hi) else round(raw_hi if curr + inc_step > raw_hi else curr + inc_step, 2)
+                elif sim_code == 2:  # 随机波动（平滑 5% 游走 + 边界反弹）
+                    base_curr = raw_lo if curr < raw_lo else (raw_hi if curr > raw_hi else curr)
+                    if is_int:
+                        max_step = int(round(span * 0.05))
+                        if max_step < 1:
+                            max_step = 1
+                        delta = _randint(-max_step, max_step)
+                        if delta == 0:
+                            delta = 1 if _randint(0, 1) else -1
+                        cand = base_curr + delta
+                        if cand > raw_hi:
+                            cand = raw_hi - (cand - raw_hi)
+                        elif cand < raw_lo:
+                            cand = raw_lo + (raw_lo - cand)
+                        new_raw = int(raw_lo if cand < raw_lo else (raw_hi if cand > raw_hi else cand))
                     else:
-                        cand_lo = raw_target_lo if math.isfinite(raw_target_lo) else hw_min
-                        cand_hi = raw_target_hi if math.isfinite(raw_target_hi) else hw_max
-                        raw_lo = max(hw_min, min(hw_max, cand_lo))
-                        raw_hi = max(hw_min, min(hw_max, cand_hi))
-                        if raw_lo > raw_hi:
-                            raw_lo = raw_hi = max(hw_min, min(hw_max, (raw_target_lo + raw_target_hi) / 2.0))
-
-                    # 在底层原始寄存器数值空间演算波动：
-                    # 1) 无论 scale 多大或多小（如 0.01/0.1/1/10），每拍步进/波动都有效且绝不卡死或越界；
-                    # 2) 写出寄存器 new_raw 后，用同一公式 new_eng = new_raw * scale + offset 回算给界面，
-                    #    保证 ModbusStudio 展示数据与外部/一体机程序解析后的工程数据逐拍 100% 一致。
-                    if "raw_val" in point and point["raw_val"] is not None:
-                        curr = clamp_value_to_type(point["raw_val"], data_type)
+                        max_step = span * 0.05
+                        if max_step < 0.01:
+                            max_step = 0.01
+                        cand = base_curr + _uniform(-max_step, max_step)
+                        if cand > raw_hi:
+                            cand = raw_hi - (cand - raw_hi)
+                        elif cand < raw_lo:
+                            cand = raw_lo + (raw_lo - cand)
+                        new_raw = round(raw_lo if cand < raw_lo else (raw_hi if cand > raw_hi else cand), 2)
+                elif sim_code == 3:  # 正弦波
+                    calc_val = ((raw_lo + raw_hi) * 0.5) + (span * 0.5) * _sin((step * 0.25) + ((p.addr % 100) * 0.15))
+                    if is_int:
+                        iv = int(round(calc_val))
+                        new_raw = raw_lo if iv < raw_lo else (raw_hi if iv > raw_hi else iv)
                     else:
-                        curr = eng_to_raw(curr, data_type, pt_scale, pt_offset)
-                    span = raw_hi - raw_lo
+                        fv = raw_lo if calc_val < raw_lo else (raw_hi if calc_val > raw_hi else calc_val)
+                        new_raw = round(fv, 2)
+                elif sim_code == 4:  # 方波
+                    val_out = raw_hi if ((step + (p.addr % 10)) % 10) >= 5 else raw_lo
+                    new_raw = int(val_out) if is_int else round(float(val_out), 2)
+                else:
+                    new_raw = curr
 
-                    if span <= 0:
-                        new_raw = raw_lo
-                    elif sim_mode in ("累加递增", "步进递增"):
-                        if v_type is int:
-                            inc_step = max(1, int(round(span * 0.01)))
-                            if curr < raw_lo or curr >= raw_hi:
-                                new_raw = raw_lo
-                            else:
-                                new_raw = min(raw_hi, curr + inc_step)
-                        else:
-                            inc_step = max(0.5, round(span * 0.01, 2))
-                            if curr < raw_lo or curr >= raw_hi:
-                                new_raw = round(raw_lo, 2)
-                            else:
-                                new_raw = round(min(raw_hi, curr + inc_step), 2)
+                p.raw_val = new_raw
+                dt_code = p.dt_code
+                if dt_code == 1 or dt_code == 2:  # INT16 / UINT16：纯位运算直写 1 寄存器（兼容 BADC/DCBA 字节交换）
+                    u16 = int(new_raw) & 0xFFFF
+                    if p.bo_code >= 2:
+                        u16 = ((u16 & 0xFF) << 8) | (u16 >> 8)
+                    if idx < p.buf_len:
+                        buf[idx] = u16
+                    mp = p.model_point
+                    if mp is not None:
+                        mp.value = new_raw if p.is_identity else round(new_raw * p.scale + p.offset, 6)
+                        if sync_hex:
+                            mp.raw_hex = f"0x{u16:04X}"
+                elif dt_code == 3 or dt_code == 4:  # INT32 / UINT32：纯位运算直写 2 寄存器（支持4种字节序）
+                    u32 = int(new_raw) & 0xFFFFFFFF
+                    hi = (u32 >> 16) & 0xFFFF
+                    lo = u32 & 0xFFFF
+                    bo = p.bo_code
+                    if bo == 0:  # ABCD
+                        r0, r1 = hi, lo
+                    elif bo == 1:  # CDAB
+                        r0, r1 = lo, hi
+                    elif bo == 2:  # BADC
+                        r0 = ((hi & 0xFF) << 8) | (hi >> 8)
+                        r1 = ((lo & 0xFF) << 8) | (lo >> 8)
+                    else:  # DCBA
+                        r0 = ((lo & 0xFF) << 8) | (lo >> 8)
+                        r1 = ((hi & 0xFF) << 8) | (hi >> 8)
+                    if idx + 1 < p.buf_len:
+                        buf[idx] = r0
+                        buf[idx + 1] = r1
+                    mp = p.model_point
+                    if mp is not None:
+                        mp.value = new_raw if p.is_identity else round(new_raw * p.scale + p.offset, 6)
+                        if sync_hex:
+                            mp.raw_hex = f"0x{r0:04X} 0x{r1:04X}"
+                else:  # FLOAT32 / DOUBLE64 / INT64 / UINT64
+                    regs = _encode(new_raw, p.data_type, p.mode)
+                    n_regs = len(regs)
+                    if idx + n_regs <= p.buf_len:
+                        for ri in range(n_regs):
+                            buf[idx + ri] = regs[ri] & 0xFFFF
+                    mp = p.model_point
+                    if mp is not None:
+                        mp.value = new_raw if p.is_identity else _raw_to_eng(new_raw, p.data_type, p.scale, p.offset)
+                        if sync_hex:
+                            mp.raw_hex = " ".join(f"0x{r:04X}" for r in regs) if regs else "0x0000"
 
-                    elif sim_mode == "随机波动":
-                        # 平滑大步幅随机游走：每拍在当前值附近按总跨度约 5% 波动，触及边界自动折返反弹
-                        base_curr = max(raw_lo, min(raw_hi, curr))
-                        if v_type is int:
-                            max_step = max(1, int(round(span * 0.05)))
-                            delta = random.randint(-max_step, max_step)
-                            if delta == 0:
-                                delta = random.choice([-1, 1])
-                            cand = base_curr + delta
-                            if cand > raw_hi:
-                                cand = raw_hi - (cand - raw_hi)
-                            elif cand < raw_lo:
-                                cand = raw_lo + (raw_lo - cand)
-                            new_raw = int(max(raw_lo, min(raw_hi, cand)))
-                        else:
-                            max_step = max(0.01, span * 0.05)
-                            delta = random.uniform(-max_step, max_step)
-                            cand = base_curr + delta
-                            if cand > raw_hi:
-                                cand = raw_hi - (cand - raw_hi)
-                            elif cand < raw_lo:
-                                cand = raw_lo + (raw_lo - cand)
-                            new_raw = round(max(raw_lo, min(raw_hi, cand)), 2)
+    def _step_simulation(self, step: int, stop_evt: Optional[threading.Event] = None) -> None:
+        """执行单拍动态波形模拟（由全局调度器调用）：优先走预编译零锁直写路径，兼容直接写 engine.points 的旧路径。"""
+        evt = stop_evt or self._sim_stop_evt
+        try:
+            if self._compiled_points or self._compiled_sim_list:
+                self._step_compiled_simulation(step, evt)
+            with self._points_lock:
+                if not self.points:
+                    return
+                items_snapshot = [(k, v) for k, v in self.points.items() if isinstance(v, dict)]
+            if not items_snapshot:
+                return
+            has_composite = any(isinstance(k, tuple) for k, _ in items_snapshot)
 
-                    elif sim_mode == "正弦波":
-                        # 以 [raw_lo, raw_hi] 中点为中心、半跨度为振幅周期振荡，彻底消除历史累积漂移
-                        phase = (step * 0.25) + ((addr % 100) * 0.15)
-                        center = (raw_lo + raw_hi) / 2.0
-                        amp = span / 2.0
-                        calc_val = center + amp * math.sin(phase)
-                        if v_type is int:
-                            new_raw = int(max(raw_lo, min(raw_hi, round(calc_val))))
-                        else:
-                            new_raw = round(max(raw_lo, min(raw_hi, calc_val)), 2)
+            for key, point in items_snapshot:
+                if evt.is_set() or not self._sim_running:
+                    break
+                # 若存在复合键 (area, addr)，忽略历史单一整型 key 以避免重复模拟
+                if has_composite and not isinstance(key, tuple):
+                    continue
 
+                if isinstance(key, tuple) and len(key) >= 2:
+                    k_area, addr = str(key[0]), int(key[1])
+                else:
+                    addr = int(key)
+                    k_area = point.get("area", AreaType.HOLDING_REGISTER)
+
+                sim_mode = point.get("sim_mode") or point.get("sim_rule") or "固定"
+                if sim_mode == "固定":
+                    continue
+
+                dt_raw = point.get("data_type") or point.get("type") or ModbusDataType.INT16
+                try:
+                    if isinstance(dt_raw, ModbusDataType):
+                        data_type = dt_raw
+                    else:
+                        dt_str = str(dt_raw.value if hasattr(dt_raw, "value") else dt_raw).strip().upper()
+                        if dt_str == "FLOAT64":
+                            dt_str = "DOUBLE64"
+                        data_type = ModbusDataType(dt_str)
+                except Exception:
+                    data_type = ModbusDataType.INT16
+
+                bo_raw = point.get("byte_order") or point.get("mode") or ByteOrderMode.ABCD
+                try:
+                    if isinstance(bo_raw, ByteOrderMode):
+                        mode = bo_raw
+                    else:
+                        bo_str = str(bo_raw.value if hasattr(bo_raw, "value") else bo_raw).strip().upper()
+                        if "." in bo_str:
+                            bo_str = bo_str.split(".")[-1]
+                        mode = ByteOrderMode(bo_str)
+                except Exception:
+                    mode = ByteOrderMode.ABCD
+
+                area = k_area or point.get("area", AreaType.HOLDING_REGISTER)
+                curr = point.get("current_val", point.get("value", 0))
+
+                # 功能码 01(线圈) 与 02(离散输入)：统一复用 _classify_area，支持中英文区名
+                is_fc01_02 = (
+                    _classify_area(area) in ("COIL", "DISCRETE")
+                    or point.get("fc") in (1, 2)
+                    or data_type == ModbusDataType.BOOL
+                )
+                if is_fc01_02:
+                    curr_bool_int = 1 if (curr is True or str(curr) in ("1", "True", "true")) else 0
+                    if sim_mode == "正弦波":
+                        phase = (step * 0.35) + ((addr % 10) * 0.4)
+                        new_val = 1 if math.sin(phase) >= 0 else 0
                     elif sim_mode == "方波":
-                        phase = (step + (addr % 10)) % 10
-                        val_out = raw_hi if phase >= 5 else raw_lo
-                        if v_type is int:
-                            new_raw = int(max(raw_lo, min(raw_hi, val_out)))
-                        else:
-                            new_raw = round(float(max(raw_lo, min(raw_hi, val_out))), 2)
-
+                        phase = (step + (addr % 5)) % 6
+                        new_val = 1 if phase >= 3 else 0
+                    elif sim_mode == "随机波动":
+                        new_val = random.choice([0, 1])
                     else:
-                        new_raw = curr
+                        new_val = 0 if curr_bool_int == 1 else 1
 
-                    # 将原始寄存器值直接写入底层 DataBlock，再正向换算为工程源数据回推模型与 UI
-                    self.write_typed_value(area, addr, new_raw, data_type, mode, scale=1.0, offset=0.0)
-                    new_eng = raw_to_eng(new_raw, data_type, pt_scale, pt_offset)
-                    point["raw_val"] = new_raw
-                    point["current_val"] = new_eng
-
+                    point["current_val"] = new_val
+                    self.write_typed_value(area, addr, new_val, data_type, mode)
                     if self.on_point_value_changed:
                         try:
-                            self.on_point_value_changed(area, addr, new_eng)
+                            self.on_point_value_changed(area, addr, new_val)
                         except Exception:
                             pass
-            except Exception as ex:
-                logger.warning(f"ModbusSlaveEngine 仿真单拍异常（已捕获防线程终止）: {ex}")
+                        finally:
+                            self._hex_tls.last_hex = None
+                    continue
+
+                if data_type in (ModbusDataType.HEX16, ModbusDataType.HEX32, ModbusDataType.BINARY16, ModbusDataType.STRING):
+                    continue
+
+                pt_scale, pt_offset = normalize_scale_offset(point.get("scale", 1.0), point.get("offset", 0.0))
+                try:
+                    eng_min = float(point.get("sim_min", -1000.0))
+                    if not math.isfinite(eng_min):
+                        eng_min = -1000.0
+                except Exception:
+                    eng_min = -1000.0
+                try:
+                    eng_max = float(point.get("sim_max", 1000.0))
+                    if not math.isfinite(eng_max):
+                        eng_max = 1000.0
+                except Exception:
+                    eng_max = 1000.0
+                if eng_min > eng_max:
+                    eng_min, eng_max = eng_max, eng_min
+
+                limits = TYPE_RANGES.get(data_type, (-32768, 32767, int))
+                hw_min, hw_max, v_type = limits
+
+                r_a = (eng_min - pt_offset) / pt_scale
+                r_b = (eng_max - pt_offset) / pt_scale
+                raw_target_lo, raw_target_hi = (r_a, r_b) if r_a <= r_b else (r_b, r_a)
+                if v_type is int:
+                    cand_lo = int(math.ceil(raw_target_lo)) if math.isfinite(raw_target_lo) else hw_min
+                    cand_hi = int(math.floor(raw_target_hi)) if math.isfinite(raw_target_hi) else hw_max
+                    raw_lo = max(hw_min, min(hw_max, cand_lo))
+                    raw_hi = max(hw_min, min(hw_max, cand_hi))
+                    if raw_lo > raw_hi:
+                        mid = max(hw_min, min(hw_max, int(round((raw_target_lo + raw_target_hi) / 2.0))))
+                        raw_lo = raw_hi = mid
+                else:
+                    cand_lo = raw_target_lo if math.isfinite(raw_target_lo) else hw_min
+                    cand_hi = raw_target_hi if math.isfinite(raw_target_hi) else hw_max
+                    raw_lo = max(hw_min, min(hw_max, cand_lo))
+                    raw_hi = max(hw_min, min(hw_max, cand_hi))
+                    if raw_lo > raw_hi:
+                        raw_lo = raw_hi = max(hw_min, min(hw_max, (raw_target_lo + raw_target_hi) / 2.0))
+
+                if "raw_val" in point and point["raw_val"] is not None:
+                    curr = clamp_value_to_type(point["raw_val"], data_type)
+                else:
+                    curr = eng_to_raw(curr, data_type, pt_scale, pt_offset)
+                span = raw_hi - raw_lo
+
+                if span <= 0:
+                    new_raw = raw_lo
+                elif sim_mode in ("累加递增", "步进递增"):
+                    if v_type is int:
+                        inc_step = max(1, int(round(span * 0.01)))
+                        if curr < raw_lo or curr >= raw_hi:
+                            new_raw = raw_lo
+                        else:
+                            new_raw = min(raw_hi, curr + inc_step)
+                    else:
+                        inc_step = max(0.5, round(span * 0.01, 2))
+                        if curr < raw_lo or curr >= raw_hi:
+                            new_raw = round(raw_lo, 2)
+                        else:
+                            new_raw = round(min(raw_hi, curr + inc_step), 2)
+
+                elif sim_mode == "随机波动":
+                    base_curr = max(raw_lo, min(raw_hi, curr))
+                    if v_type is int:
+                        max_step = max(1, int(round(span * 0.05)))
+                        delta = random.randint(-max_step, max_step)
+                        if delta == 0:
+                            delta = random.choice([-1, 1])
+                        cand = base_curr + delta
+                        if cand > raw_hi:
+                            cand = raw_hi - (cand - raw_hi)
+                        elif cand < raw_lo:
+                            cand = raw_lo + (raw_lo - cand)
+                        new_raw = int(max(raw_lo, min(raw_hi, cand)))
+                    else:
+                        max_step = max(0.01, span * 0.05)
+                        delta = random.uniform(-max_step, max_step)
+                        cand = base_curr + delta
+                        if cand > raw_hi:
+                            cand = raw_hi - (cand - raw_hi)
+                        elif cand < raw_lo:
+                            cand = raw_lo + (raw_lo - cand)
+                        new_raw = round(max(raw_lo, min(raw_hi, cand)), 2)
+
+                elif sim_mode == "正弦波":
+                    phase = (step * 0.25) + ((addr % 100) * 0.15)
+                    center = (raw_lo + raw_hi) / 2.0
+                    amp = span / 2.0
+                    calc_val = center + amp * math.sin(phase)
+                    if v_type is int:
+                        new_raw = int(max(raw_lo, min(raw_hi, round(calc_val))))
+                    else:
+                        new_raw = round(max(raw_lo, min(raw_hi, calc_val)), 2)
+
+                elif sim_mode == "方波":
+                    phase = (step + (addr % 10)) % 10
+                    val_out = raw_hi if phase >= 5 else raw_lo
+                    if v_type is int:
+                        new_raw = int(max(raw_lo, min(raw_hi, val_out)))
+                    else:
+                        new_raw = round(float(max(raw_lo, min(raw_hi, val_out))), 2)
+
+                else:
+                    new_raw = curr
+
+                # 将原始寄存器值直接写入底层 DataBlock（同时缓存 _last_written_hex），再正向换算为工程值回推模型与 UI
+                self.write_typed_value(area, addr, new_raw, data_type, mode, scale=1.0, offset=0.0)
+                new_eng = raw_to_eng(new_raw, data_type, pt_scale, pt_offset)
+                point["raw_val"] = new_raw
+                point["current_val"] = new_eng
+
+                if self.on_point_value_changed:
+                    try:
+                        self.on_point_value_changed(area, addr, new_eng)
+                    except Exception:
+                        pass
+                    finally:
+                        self._hex_tls.last_hex = None
+        except Exception as ex:
+            logger.warning(f"ModbusSlaveEngine 仿真单拍异常（已捕获防线程终止）: {ex}")
 
 
 # =====================================================================

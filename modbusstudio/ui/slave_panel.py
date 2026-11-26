@@ -105,6 +105,10 @@ class SlavePanel(ttk.Frame):
         super().__init__(parent)
         self.app = app
         self._current_device_id: Optional[str] = None
+        # 当前数据库筛选键："__ALL__" 表示全部数据库，"__NONE__" 表示未关联库，其余为规范化后的绝对路径
+        self._selected_db_filter: str = "__ALL__"
+        self._db_filter_keys: List[str] = ["__ALL__"]
+        self._db_filter_paths: Dict[str, Optional[str]] = {"__ALL__": None}
         # [SLAVE-SPEED-4] 防止全部启动/全部停止/自动重连重复点击并发重入的守卫标志
         self._busy: Dict[str, bool] = {"start": False, "stop": False, "reconnect": False}
         self._destroyed: bool = False
@@ -163,7 +167,25 @@ class SlavePanel(ttk.Frame):
         top_box = ttk.LabelFrame(self, text="从机服务实例与通信配置 (支持多实例独立监听不同 IP:Port 或 COM 串口)")
         top_box.pack(fill="x", padx=2, pady=2)
 
-        # --- 第 0 行：从机服务实例切换与新建/删除（独占一行） ---
+        # --- 第 0 行：当前数据库切换方框 + 改标签 + 关联新数据库 ---
+        row_db = ttk.Frame(top_box)
+        row_db.pack(fill="x", padx=4, pady=2)
+
+        ttk.Label(row_db, text="当前数据库:").pack(side="left", padx=(2, 4))
+        self.combo_db_filter = ttk.Combobox(row_db, state="readonly", width=30)
+        self.combo_db_filter.pack(side="left", padx=2)
+        self.combo_db_filter.bind("<<ComboboxSelected>>", self._on_switch_db_filter)
+
+        btn_rename_db = ttk.Button(row_db, text="改标签", style="Small.TButton", command=self._rename_current_db_label)
+        btn_rename_db.pack(side="left", padx=2)
+
+        btn_select_db = ttk.Button(row_db, text="关联/添加数据库...", style="secondary.Outline.TButton", command=self._select_database_file)
+        btn_select_db.pack(side="left", padx=2)
+
+        btn_remove_db = ttk.Button(row_db, text="移除当前库", style="danger.Outline.TButton", command=self._remove_current_db)
+        btn_remove_db.pack(side="left", padx=2)
+
+        # --- 第 0a 行：从机服务实例切换与新建/删除（独占一行） ---
         row0 = ttk.Frame(top_box)
         row0.pack(fill="x", padx=4, pady=2)
 
@@ -171,7 +193,7 @@ class SlavePanel(ttk.Frame):
         left0.pack(side="left", fill="x", expand=True)
 
         ttk.Label(left0, text="从机服务实例:").pack(side="left", padx=(2, 4))
-        self.combo_instances = ttk.Combobox(left0, state="readonly", width=22)
+        self.combo_instances = ttk.Combobox(left0, state="readonly", width=34)
         self.combo_instances.pack(side="left", padx=2)
         self.combo_instances.bind("<<ComboboxSelected>>", self._on_switch_slave_instance)
 
@@ -180,6 +202,12 @@ class SlavePanel(ttk.Frame):
 
         btn_del_inst = ttk.Button(left0, text="删除服务", style="danger.Outline.TButton", command=self._delete_current_slave_instance)
         btn_del_inst.pack(side="left", padx=2)
+
+        btn_import_db = ttk.Button(left0, text="导入设备点表...", style="info.TButton", command=self._open_import_db_dialog)
+        btn_import_db.pack(side="left", padx=(8, 2))
+
+        btn_pair_center = ttk.Button(left0, text="业务配对中心 (基于 More)...", style="primary.Outline.TButton", command=self._open_pairing_dialog)
+        btn_pair_center.pack(side="left", padx=2)
 
         # --- 第 0b 行：服务控制按钮组（启动/重启服务 + 状态标签 + 全部启停 + 自动重连，拆出独占一行） ---
         row0b = ttk.Frame(top_box)
@@ -203,6 +231,17 @@ class SlavePanel(ttk.Frame):
         # [SLAVE-RECONNECT] 追加"自动重连"按钮，用于触发底层僵死 listener 探活自愈重建
         btn_reconnect = ttk.Button(right0, text="自动重连", style="secondary.Outline.TButton", command=self._on_auto_reconnect)
         btn_reconnect.pack(side="left", padx=2)
+
+        ttk.Label(right0, text="仿真周期:").pack(side="left", padx=(8, 2))
+        self.combo_sim_interval = ttk.Combobox(
+            right0,
+            state="readonly",
+            width=4,
+            values=["1s", "2s", "3s", "5s"],
+        )
+        self.combo_sim_interval.set("1s")
+        self.combo_sim_interval.pack(side="left", padx=2)
+        self.combo_sim_interval.bind("<<ComboboxSelected>>", self._on_sim_interval_change)
 
         # --- 第 1 行：通讯方式与连接参数（独占一行） ---
         row1 = ttk.Frame(top_box)
@@ -261,23 +300,6 @@ class SlavePanel(ttk.Frame):
         ttk.Label(left1, text="从机 ID:").pack(side="left", padx=(4, 1))
         self.entry_slave_id = ttk.Entry(left1, width=4)
         self.entry_slave_id.pack(side="left", padx=1)
-
-        # --- 第 1b 行：关联数据库操作行（拆出独占一行） ---
-        row1b = ttk.Frame(top_box)
-        row1b.pack(fill="x", padx=4, pady=2)
-
-        btn_select_db = ttk.Button(row1b, text="关联/切换数据库...", style="secondary.Outline.TButton", command=self._select_database_file)
-        btn_select_db.pack(side="left", padx=2)
-
-        # --- 第 1c 行：导入设备点表与业务配对操作行（依次换行独占一行） ---
-        row1c = ttk.Frame(top_box)
-        row1c.pack(fill="x", padx=4, pady=2)
-
-        btn_import_db = ttk.Button(row1c, text="导入设备点表...", style="info.TButton", command=self._open_import_db_dialog)
-        btn_import_db.pack(side="left", padx=2)
-
-        btn_pair_center = ttk.Button(row1c, text="业务配对中心 (基于 More)...", style="primary.Outline.TButton", command=self._open_pairing_dialog)
-        btn_pair_center.pack(side="left", padx=2)
 
         # 2. 单点配置与快速生成栏
         pt_box = ttk.LabelFrame(self, text="点位规则生成 & 快捷操作")
@@ -529,15 +551,199 @@ class SlavePanel(ttk.Frame):
         if not self.combo_slave_com.get() and ports:
             self.combo_slave_com.set(ports[0])
 
+    @staticmethod
+    def _norm_db_key(db_path: Optional[str]) -> str:
+        """将数据库路径归一化为筛选键；空路径归入 '__NONE__'。"""
+        if not db_path:
+            return "__NONE__"
+        return os.path.normcase(os.path.abspath(str(db_path)))
+
+    def _get_scoped_devices(self) -> List[SlaveDevice]:
+        """按顶部「当前数据库」下拉框返回作用域内的从机列表。"""
+        all_devices = self.app.slave_service.get_devices()
+        if self._selected_db_filter == "__ALL__":
+            return all_devices
+        if self._selected_db_filter == "__NONE__":
+            return [d for d in all_devices if not getattr(d, "db_file", None)]
+        return [
+            d for d in all_devices
+            if getattr(d, "db_file", None) and self._norm_db_key(d.db_file) == self._selected_db_filter
+        ]
+
+    def _refresh_db_filter_combobox(self) -> None:
+        """刷新顶部「当前数据库」下拉框选项，汇总所有已关联与已导入的数据库及其从机数量。"""
+        if not hasattr(self, "combo_db_filter"):
+            return
+        all_devices = self.app.slave_service.get_devices()
+        get_label = getattr(self.app, "get_db_label", None)
+
+        counts: Dict[str, int] = {}
+        raw_paths: Dict[str, Optional[str]] = {"__ALL__": None}
+        ordered_keys: List[str] = []
+
+        # 先收集已有从机绑定的数据库
+        unassigned_cnt = 0
+        for dev in all_devices:
+            db_f = getattr(dev, "db_file", None)
+            if db_f:
+                k = self._norm_db_key(db_f)
+                if k not in counts:
+                    ordered_keys.append(k)
+                    raw_paths[k] = os.path.abspath(db_f)
+                counts[k] = counts.get(k, 0) + 1
+            else:
+                unassigned_cnt += 1
+
+        # 再确保当前 app.db_path 即使尚未导入从机也出现在下拉框中，方便直接切换并导入
+        if getattr(self.app, "db_path", None) and os.path.exists(self.app.db_path):
+            cur_k = self._norm_db_key(self.app.db_path)
+            if cur_k not in counts:
+                ordered_keys.append(cur_k)
+                raw_paths[cur_k] = os.path.abspath(self.app.db_path)
+                counts[cur_k] = 0
+
+        keys: List[str] = ["__ALL__"]
+        labels: List[str] = [f"全部数据库 (共 {len(all_devices)} 台)"]
+        for k in ordered_keys:
+            p = raw_paths[k]
+            tag = get_label(p) if callable(get_label) else (os.path.basename(p) if p else "")
+            keys.append(k)
+            labels.append(f"{tag} ({counts.get(k, 0)} 台)")
+        if unassigned_cnt > 0:
+            keys.append("__NONE__")
+            raw_paths["__NONE__"] = None
+            labels.append(f"手动新建/未关联库 ({unassigned_cnt} 台)")
+
+        self._db_filter_keys = keys
+        self._db_filter_paths = raw_paths
+        self.combo_db_filter["values"] = labels
+
+        if self._selected_db_filter not in keys:
+            # 首次启动或原筛选项失效时：若存在具体数据库则默认聚焦第一个库，否则显示全部
+            if len(ordered_keys) == 1 and unassigned_cnt == 0:
+                self._selected_db_filter = ordered_keys[0]
+            else:
+                self._selected_db_filter = "__ALL__"
+        idx = keys.index(self._selected_db_filter)
+        self.combo_db_filter.current(idx)
+
+    def _on_switch_db_filter(self, event=None) -> None:
+        """响应顶部「当前数据库」下拉框切换：同步当前导入源数据库并过滤下方从机下拉列表。"""
+        idx = self.combo_db_filter.current()
+        if 0 <= idx < len(self._db_filter_keys):
+            key = self._db_filter_keys[idx]
+            self._selected_db_filter = key
+            target_path = self._db_filter_paths.get(key)
+            if target_path and os.path.exists(target_path):
+                self.app.db_path = target_path
+            self._update_instance_combobox()
+
+    def _rename_current_db_label(self) -> None:
+        """为当前选中的数据库修改自定义标签，并持久化至 session_state.json。"""
+        target_path = self._db_filter_paths.get(self._selected_db_filter)
+        if not target_path:
+            target_path = getattr(self.app, "db_path", None)
+        if not target_path:
+            messagebox.showinfo("提示", "请先在「当前数据库」中选择一个具体数据库，或点击【关联/添加数据库...】")
+            return
+        cur_label = self.app.get_db_label(target_path) if hasattr(self.app, "get_db_label") else os.path.basename(target_path)
+        new_label = simpledialog.askstring(
+            "修改数据库标签",
+            f"请输入该数据库的新标签名称（留空则恢复默认文件名）：\n{target_path}",
+            initialvalue=cur_label,
+            parent=self,
+        )
+        if new_label is None:
+            return
+        if hasattr(self.app, "set_db_label"):
+            self.app.set_db_label(target_path, new_label)
+        self._update_instance_combobox()
+        save_session_state(self.app)
+
+    def _remove_current_db(self) -> None:
+        """一键停止并移除当前选中的数据库及其名下全部从机（选中“全部数据库”时清空全部）。"""
+        key = self._selected_db_filter
+        if key == "__ALL__":
+            all_devs = self.app.slave_service.get_devices()
+            if not all_devs and not getattr(self.app, "db_path", None):
+                messagebox.showinfo("提示", "当前已为空，无需清空。")
+                return
+            if not messagebox.askyesno(
+                "确认清空全部",
+                f"确定要停止并清空所有数据库及全部 {len(all_devs)} 台从机实例吗？",
+                parent=self,
+            ):
+                return
+            self.app.db_path = None
+            if hasattr(self.app, "db_labels"):
+                self.app.db_labels.clear()
+            self._clear_all_slaves_and_reset_ui()
+            save_session_state(self.app)
+            self.app.logging_service.post("SYS", 0, f"已清空全部数据库与 {len(all_devs)} 台从机实例")
+            return
+
+        target_path = self._db_filter_paths.get(key)
+        scoped_devs = self._get_scoped_devices()
+        if key == "__NONE__":
+            disp_name = "手动新建/未关联库"
+        else:
+            disp_name = (
+                self.app.get_db_label(target_path)
+                if (target_path and hasattr(self.app, "get_db_label"))
+                else os.path.basename(target_path or "")
+            )
+
+        if not messagebox.askyesno(
+            "确认移除当前库",
+            f"确定要移除 [{disp_name}] 并停止删除其名下全部 {len(scoped_devs)} 台从机实例吗？\n（仅从软件中移除，不会删除磁盘上的数据库文件）",
+            parent=self,
+        ):
+            return
+
+        for dev in scoped_devs:
+            self.app.slave_service.remove_device(dev.id)
+
+        if target_path:
+            if hasattr(self.app, "set_db_label"):
+                self.app.set_db_label(target_path, "")
+            if getattr(self.app, "db_path", None) and self._norm_db_key(self.app.db_path) == key:
+                # 若当前导入源正是被删库，则切到剩余的第一个库，否则置空
+                remain_db = None
+                for d in self.app.slave_service.get_devices():
+                    if getattr(d, "db_file", None):
+                        remain_db = d.db_file
+                        break
+                self.app.db_path = remain_db
+
+        self._selected_db_filter = "__ALL__"
+        self._current_device_id = None
+        self._update_instance_combobox()
+        save_session_state(self.app)
+        self.app.logging_service.post("SYS", 0, f"已移除数据库 [{disp_name}] 及名下 {len(scoped_devs)} 台从机实例")
+
     def _update_instance_combobox(self) -> None:
         """
-        从 `SlaveService` 获取最新注册的从机列表，刷新顶部实例选择下拉框并加载当前选中从机的配置与点表。
+        先刷新顶部「当前数据库」筛选框，再按所选数据库刷新「从机服务实例」下拉框并加载当前从机。
+        选定具体数据库时，从机名称不再拼数据库前缀，完整展示设备名称。
         """
-        devices = self.app.slave_service.get_devices()
-        device_names = [
-            dev.name if str(dev.name).startswith(f"从机{dev.conn_config.unit_id}") else f"从机{dev.conn_config.unit_id} [{dev.name}]"
-            for dev in devices
-        ]
+        self._refresh_db_filter_combobox()
+        devices = self._get_scoped_devices()
+        get_label = getattr(self.app, "get_db_label", None)
+        show_db_suffix = (self._selected_db_filter == "__ALL__") and (
+            len({self._norm_db_key(getattr(d, "db_file", None)) for d in devices if getattr(d, "db_file", None)}) > 1
+        )
+        device_names = []
+        for dev in devices:
+            base_label = (
+                dev.name
+                if str(dev.name).startswith(f"从机{dev.conn_config.unit_id}")
+                else f"从机{dev.conn_config.unit_id} [{dev.name}]"
+            )
+            if show_db_suffix and getattr(dev, "db_file", None):
+                tag = get_label(dev.db_file) if callable(get_label) else os.path.basename(dev.db_file)
+                if tag:
+                    base_label = f"{base_label} · {tag}"
+            device_names.append(base_label)
         self.combo_instances["values"] = device_names
         if devices:
             if not self._current_device_id or self._current_device_id not in [d.id for d in devices]:
@@ -549,7 +755,7 @@ class SlavePanel(ttk.Frame):
             self._load_device_to_ui(self._current_device_id)
         else:
             self._current_device_id = None
-            self.combo_instances.set("（暂无从机实例，请点击【导入设备点表】或【新建服务】）")
+            self.combo_instances.set("（当前数据库暂无从机，请点击【导入设备点表】或【新建服务】）")
             for item in self.tree.get_children():
                 self.tree.delete(item)
             self.lbl_slave_status.config(text="● 未就绪 (无活动从机)", foreground="#6c757d")
@@ -568,6 +774,12 @@ class SlavePanel(ttk.Frame):
         device = self.app.slave_service.get_device(device_id)
         if not device:
             return
+        # 通知服务层仅对当前展示从机实时拼装 raw_hex，其余后台从机零字符串开销；切换时对齐一次当前表 Hex
+        if hasattr(self.app.slave_service, "set_ui_active_device"):
+            self.app.slave_service.set_ui_active_device(device_id)
+        for pt in device.points.values():
+            if pt.sim_rule != "固定":
+                PointService.re_encode_point(pt)
         cfg = device.conn_config
         self.slave_comm_type_var.set(cfg.comm_type.value)
         self._on_slave_comm_type_change()
@@ -599,6 +811,17 @@ class SlavePanel(ttk.Frame):
             self.lbl_slave_status.config(text="● 已停止", foreground="#dc3545")
             self.btn_toggle_slave.config(text="启动服务", style="success.TButton")
 
+    def _on_sim_interval_change(self, event=None) -> None:
+        """响应顶部「仿真周期」下拉框切换，实时调整全局波形仿真步进间隔。"""
+        raw = self.combo_sim_interval.get().strip().lower().rstrip("s")
+        try:
+            sec = float(raw)
+            if hasattr(self.app.slave_service, "set_simulation_interval"):
+                self.app.slave_service.set_simulation_interval(sec)
+                self.app.logging_service.post("SYS", 0, f"已调整全局动态仿真周期为 {sec:g} 秒/拍")
+        except Exception:
+            pass
+
     def _on_slave_comm_type_change(self) -> None:
         """当用户切换 TCP / RTU 单选框时，动态隐藏或显示对应的 IP:Port 输入框与串口五要素控件组。"""
         mode = self.slave_comm_type_var.get()
@@ -610,9 +833,9 @@ class SlavePanel(ttk.Frame):
             self.tcp_frame.pack(side="left")
 
     def _on_switch_slave_instance(self, event=None) -> None:
-        """当用户在下拉框切换从机服务实例时，更新 `_current_device_id` 并重新渲染该从机的配置与点表。"""
+        """当用户在下拉框切换从机服务实例时，按当前数据库筛选范围更新 `_current_device_id` 并重新渲染。"""
         idx = self.combo_instances.current()
-        devices = self.app.slave_service.get_devices()
+        devices = self._get_scoped_devices()
         if 0 <= idx < len(devices):
             self._current_device_id = devices[idx].id
             self._load_device_to_ui(self._current_device_id)
@@ -806,11 +1029,11 @@ class SlavePanel(ttk.Frame):
         save_session_state(self.app)
 
     def _start_all_slaves(self) -> None:
-        """响应“全部启动”按钮：在后台守护线程依次启动所有未运行的从机，主线程轮询完成态刷新 UI（零跨线程 Tk 调用）。"""
+        """响应“全部启动”按钮：仅对当前选中数据库范围内的未运行从机执行后台批量启动。"""
         if self._busy.get("start"):
             return
         self._busy["start"] = True
-        devices = list(self.app.slave_service.get_devices())
+        devices = list(self._get_scoped_devices())
         state: Dict[str, Any] = {"done": False, "fail_msgs": []}
 
         def _worker() -> None:
@@ -844,11 +1067,11 @@ class SlavePanel(ttk.Frame):
         self._schedule_after(30, _poll_done)
 
     def _stop_all_slaves(self) -> None:
-        """响应“全部停止”按钮：在后台守护线程依次停止所有运行中的从机，主线程轮询完成态刷新 UI（零跨线程 Tk 调用）。"""
+        """响应“全部停止”按钮：仅对当前选中数据库范围内的运行中从机执行后台批量停止。"""
         if self._busy.get("stop"):
             return
         self._busy["stop"] = True
-        devices = list(self.app.slave_service.get_devices())
+        devices = list(self._get_scoped_devices())
         state: Dict[str, Any] = {"done": False}
 
         def _worker() -> None:
@@ -949,6 +1172,8 @@ class SlavePanel(ttk.Frame):
             messagebox.showerror("注册失败", msg)
             return
         self._current_device_id = new_id
+        if self._selected_db_filter not in ("__ALL__", "__NONE__"):
+            self._selected_db_filter = "__ALL__"
         self._update_instance_combobox()
         save_session_state(self.app)
 
@@ -1064,7 +1289,7 @@ class SlavePanel(ttk.Frame):
         # prop_val: 目标属性设定值。
         scope = self.batch_scope_var.get()
         target_devices = (
-            self.app.slave_service.get_devices()
+            self._get_scoped_devices()
             if scope == "all"
             else ([self.app.slave_service.get_device(self._current_device_id)] if self._current_device_id else [])
         )
@@ -1465,9 +1690,8 @@ class SlavePanel(ttk.Frame):
         ttk.Button(btn_box, text="立即生成", command=do_generate).pack(side="right", padx=4)
         ttk.Button(btn_box, text="取消", command=dlg.destroy).pack(side="right", padx=4)
 
-    def _select_database_file(self) -> None:
-        """关联或切换业务数据库文件，并自动停止清空所有历史从机实例"""
-        # 若 self.app.db_path 有值且物理存在，以其所在目录作为 initialdir，否则回退 extra/ 默认目录
+    def _select_database_file(self, auto_open_import: bool = True) -> None:
+        """关联或切换业务数据库文件：支持保留现有从机叠加多库，也支持清空现有从机全新切换。"""
         if self.app.db_path and os.path.exists(self.app.db_path):
             init_dir = os.path.dirname(self.app.db_path)
         else:
@@ -1475,38 +1699,96 @@ class SlavePanel(ttk.Frame):
             init_dir = resolve_runtime_path("extra")
 
         db_path = filedialog.askopenfilename(
-            title="选择业务数据库文件 (切换将自动清空当前从机实例)",
+            title="选择业务数据库文件 (支持多库叠加或清空切换)",
             filetypes=[("HEMS 数据库", "*.cdb;*.sqlite;*.db"), ("所有文件", "*.*")],
             initialdir=init_dir,
         )
-        if db_path and os.path.exists(db_path):
-            old_count = len(self.app.slave_service.get_devices())
-            self.app.db_path = db_path
+        if not (db_path and os.path.exists(db_path)):
+            return
 
-            # 切换数据库时：停止并清空当前已添加的所有从机实例与点表
+        # 引导用户为该数据库设置自定义标签（如“1号站-储能”），多库共存且文件名均为 hems.cdb 时一目了然
+        parent_name = os.path.basename(os.path.dirname(os.path.abspath(db_path)))
+        base_name = os.path.basename(db_path)
+        default_tag = (
+            self.app.get_db_label(db_path)
+            if hasattr(self.app, "has_custom_db_label") and self.app.has_custom_db_label(db_path)
+            else (f"{parent_name}/{base_name}" if parent_name else base_name)
+        )
+        custom_tag = simpledialog.askstring(
+            "设置数据库标签",
+            f"请为该数据库设置便于识别的标签名称（留空则使用文件名）：\n{db_path}",
+            initialvalue=default_tag,
+            parent=self,
+        )
+        pending_tag = custom_tag.strip() if custom_tag is not None else ""
+        display_tag = (
+            pending_tag
+            if (custom_tag is not None and pending_tag)
+            else (self.app.get_db_label(db_path) if hasattr(self.app, "get_db_label") else base_name)
+        )
+
+        old_count = len(self.app.slave_service.get_devices())
+        keep_existing = True
+        if old_count > 0:
+            choice = messagebox.askyesnocancel(
+                "切换数据库方式",
+                f"已选择数据库 [{display_tag}]：\n{db_path}\n\n"
+                f"当前已有 {old_count} 个从机实例，请选择处理方式：\n"
+                "• 【是(推荐)】：保留现有从机，直接叠加导入新数据库（无需多开软件）\n"
+                "• 【否】：停止并清空现有从机后，全新切换到该数据库\n"
+                "• 【取消】：放弃本次切换",
+                parent=self,
+            )
+            if choice is None:
+                return
+            keep_existing = bool(choice)
+
+        # 确认不取消后再写入自定义标签，避免取消切库时脏写 db_labels
+        if custom_tag is not None and hasattr(self.app, "set_db_label"):
+            self.app.set_db_label(db_path, custom_tag)
+        display_tag = self.app.get_db_label(db_path) if hasattr(self.app, "get_db_label") else base_name
+
+        self.app.db_path = db_path
+        self._selected_db_filter = self._norm_db_key(db_path)
+        if not keep_existing and old_count > 0:
             self._clear_all_slaves_and_reset_ui()
             save_session_state(self.app)
             self.app.logging_service.post(
                 "SYS",
                 0,
-                f"已成功切换业务数据库: {db_path}，已自动停止并清空原有的 {old_count} 个从机服务实例",
+                f"已切换业务数据库 [{display_tag}]: {db_path}，并已停止清空原有的 {old_count} 个从机服务实例",
             )
-            messagebox.showinfo(
-                "数据库切换成功",
-                f"当前数据库已更新为：\n{db_path}\n\n已成功停止并清空原有的 {old_count} 个从机服务实例与点表！\n请点击【导入设备点表】载入新数据库中的设备与点位。",
+        else:
+            self._update_instance_combobox()
+            save_session_state(self.app)
+            self.app.logging_service.post(
+                "SYS",
+                0,
+                f"已切换当前导入源数据库 [{display_tag}]: {db_path}（已保留现有 {old_count} 个从机实例，准备导入点表）",
             )
+
+        # 仅当用户主动点击“关联/添加数据库”时自动弹出“导入设备点表”弹窗，避免被其他弹窗兜底调用时重复弹窗
+        if auto_open_import:
+            self._open_import_db_dialog()
 
     def _open_import_db_dialog(self) -> None:
         """打开从业务数据库导入设备模型与点表弹窗 (支持多选批量与容量配额限制)"""
         from .dialogs import DbImportDialog
 
+        # 若顶部数据库下拉框选中了具体库，优先以该库为导入源
+        selected_db_path = self._db_filter_paths.get(self._selected_db_filter)
+        if selected_db_path and os.path.exists(selected_db_path):
+            self.app.db_path = selected_db_path
+
         if not self.app.db_path or not os.path.exists(self.app.db_path):
-            self._select_database_file()
+            self._select_database_file(auto_open_import=False)
             if not self.app.db_path or not os.path.exists(self.app.db_path):
                 return
 
         def on_imported(target_dev: SlaveDevice) -> None:
-            """当数据库导入对话框完成设备与点表导入后，自动切换到新导入的从机实例并刷新界面。"""
+            """当数据库导入对话框完成设备与点表导入后，自动聚焦至该设备所属数据库并刷新界面。"""
+            if getattr(target_dev, "db_file", None):
+                self._selected_db_filter = self._norm_db_key(target_dev.db_file)
             self._current_device_id = target_dev.id
             self._update_instance_combobox()
             self._load_device_to_ui(target_dev.id)
@@ -1521,13 +1803,22 @@ class SlavePanel(ttk.Frame):
         )
 
     def _open_pairing_dialog(self) -> None:
-        """打开业务配对关系中心对话框"""
+        """打开业务配对关系中心对话框（优先使用当前选中从机的来源数据库，实现多库共存独立查询）"""
         from .dialogs import PairingDialog
 
-        if not self.app.db_path or not os.path.exists(self.app.db_path):
-            self._select_database_file()
-            if not self.app.db_path or not os.path.exists(self.app.db_path):
+        target_db = None
+        if self._current_device_id:
+            dev = self.app.slave_service.get_device(self._current_device_id)
+            if dev and getattr(dev, "db_file", None) and os.path.exists(dev.db_file):
+                target_db = dev.db_file
+        if not target_db:
+            target_db = self.app.db_path
+
+        if not target_db or not os.path.exists(target_db):
+            self._select_database_file(auto_open_import=False)
+            target_db = self.app.db_path
+            if not target_db or not os.path.exists(target_db):
                 return
 
-        PairingDialog(parent=self, app=self.app)
+        PairingDialog(parent=self, app=self.app, db_path=target_db)
 

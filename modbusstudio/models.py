@@ -476,7 +476,7 @@ class ConnectionConfig:
 # =============================================================================
 # 7. 单个 Modbus 点位实体模型（ModbusPoint）
 # =============================================================================
-@dataclass
+@dataclass(slots=True)
 class ModbusPoint:
     """单个 Modbus 寄存器/线圈点位实体模型，承载地址、数据类型、字节序、实时值与业务元数据。
     成员变量：address（起始地址）、description（中文描述）、area（存储区）、data_type（数据类型）、byte_order（字节序）、value（当前值）、sim_rule（仿真规则）、raw_hex（十六进制串）、string_length（字符长度）、field_name（业务变量名）、scale（缩放系数）、unit（单位）。
@@ -744,7 +744,7 @@ class PollResult:
     elapsed_ms: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class LogEntry:
     """通信报文与系统审计日志条目实体，用于双缓冲日志节流池投递。
     成员变量：timestamp（格式化时间字符串）、direction（方向：SYS/RX/TX/ERROR）、slave_id（从机站点号）、message（日志正文）、raw_frame_hex（可选原始十六进制帧）。

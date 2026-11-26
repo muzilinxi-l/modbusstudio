@@ -88,9 +88,11 @@ def save_session_state(app: ModbusStudioAppCore, path: Optional[str] = None) -> 
 
         last_db = os.path.abspath(app.db_path) if app.db_path else None
         slaves = [d.to_dict() for d in app.slave_service.get_devices()]
+        db_labels = dict(getattr(app, "db_labels", {}) or {})
         payload = {
             "schema_version": SCHEMA_VERSION,
             "last_db_path": last_db,
+            "db_labels": db_labels,
             "slaves": slaves,
             "saved_at": datetime.now().astimezone().isoformat(),
         }
@@ -184,6 +186,8 @@ class ModbusStudioAppCore:
         self.poll_service = PollService(self.logging_service)
         # 记住启动时指定的会话存档路径，便于 save_session_state() 默认写回同一路径
         self._session_path: Optional[str] = session_path
+        # 数据库路径 -> 用户自定义标签映射（多库共存时用于区分同名的 hems.cdb 等文件）
+        self.db_labels: Dict[str, str] = {}
 
         # 2. 尝试从会话状态存档恢复（记住上次库路径、从机配置与点表变位模拟规则）
         restored = False
@@ -206,7 +210,16 @@ class ModbusStudioAppCore:
         if not data:
             return False
 
-        # 1. 恢复业务数据库路径（库文件存在则直接采用并跳过 _probe_default_db，失效则回落）
+        # 1. 恢复数据库自定义标签映射
+        saved_labels = data.get("db_labels")
+        if isinstance(saved_labels, dict):
+            self.db_labels = {
+                os.path.normcase(os.path.abspath(str(k))): str(v).strip()
+                for k, v in saved_labels.items()
+                if k and str(v).strip()
+            }
+
+        # 2. 恢复业务数据库路径（库文件存在则直接采用并跳过 _probe_default_db，失效则回落）
         saved_db = data.get("last_db_path")
         if saved_db and os.path.exists(saved_db):
             self.db_path = os.path.abspath(saved_db)
@@ -230,6 +243,34 @@ class ModbusStudioAppCore:
             self._init_default_slaves()
 
         return True
+
+    def get_db_label(self, db_path: Optional[str]) -> str:
+        """获取指定数据库路径的展示标签：优先返回用户自定义标签，未设置时回退为文件名。"""
+        if not db_path:
+            return ""
+        norm_key = os.path.normcase(os.path.abspath(db_path))
+        custom = self.db_labels.get(norm_key)
+        if custom:
+            return custom
+        return os.path.basename(db_path)
+
+    def has_custom_db_label(self, db_path: Optional[str]) -> bool:
+        """判断指定数据库路径是否已配置用户自定义标签。"""
+        if not db_path:
+            return False
+        norm_key = os.path.normcase(os.path.abspath(db_path))
+        return bool(self.db_labels.get(norm_key))
+
+    def set_db_label(self, db_path: str, label: Optional[str]) -> None:
+        """为指定数据库路径设置或清除用户自定义标签。"""
+        if not db_path:
+            return
+        norm_key = os.path.normcase(os.path.abspath(db_path))
+        cleaned = str(label).strip() if label is not None else ""
+        if cleaned:
+            self.db_labels[norm_key] = cleaned
+        else:
+            self.db_labels.pop(norm_key, None)
 
     def save_session_state(self, path: Optional[str] = None) -> bool:
         """将当前应用会话状态保存至磁盘。

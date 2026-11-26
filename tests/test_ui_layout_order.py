@@ -42,8 +42,8 @@ def test_databit_order_and_top_box_multiline_rows_in_slave_panel():
     src = inspect.getsource(SlavePanel._build_ui)
     assert 'values=["7", "8"]' in src
     assert 'values=["8", "7"]' not in src
-    # 验证顶部控制栏拆分为 row0 / row0b / row1 / row1b / row1c 独立行
-    for row_var in ("row0", "row0b", "row1", "row1b", "row1c"):
+    # 验证顶部控制栏拆分为 row_db / row0 / row0b / row1 独立多行
+    for row_var in ("row_db", "row0", "row0b", "row1"):
         assert f"{row_var} = ttk.Frame(top_box)" in src
 
 

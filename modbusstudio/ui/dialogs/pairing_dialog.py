@@ -25,22 +25,28 @@ from ...hems_pairing import HemsPairingEngine, PairingRule
 class PairingDialog:
     """业务配对关系中心模态对话框控制器。"""
 
-    def __init__(self, parent: tk.Widget, app: Any) -> None:
+    def __init__(self, parent: tk.Widget, app: Any, db_path: Optional[str] = None) -> None:
         """初始化业务配对关系对话框，校验数据库路径后构建 UI 并加载规则。"""
-        # 保存父级组件引用与全局应用上下文（用于读取 app.db_path）
+        # 保存父级组件引用、全局应用上下文及当前查询目标数据库路径
         self.parent = parent
         self.app = app
+        self.db_path = db_path or getattr(app, "db_path", None)
 
         # 为什么在创建 Toplevel 窗口前先检查 db_path：
         # 1. 若用户尚未导入或关联任何 `.db`/`.cdb` 数据库文件，弹窗无数据可展示；
         # 2. 提前拦截并弹出明确警告，可避免在屏幕上闪现空白 Toplevel 窗口再销毁的割裂体验。
-        if not self.app.db_path or not os.path.exists(self.app.db_path):
+        if not self.db_path or not os.path.exists(self.db_path):
             messagebox.showwarning("提示", "尚未关联有效的数据库文件，请先关联数据库！", parent=parent)
             return
 
         # 创建模态子窗口并设置默认尺寸 (900x540) 与最小缩放尺寸 (740x420)，保证 7 列宽表格的完整可读性
         self.dlg = tk.Toplevel(parent)
-        self.dlg.title("业务配对关系中心 (基于 app 表 More 字段配置)")
+        db_tag = (
+            self.app.get_db_label(self.db_path)
+            if hasattr(self.app, "get_db_label")
+            else os.path.basename(self.db_path)
+        )
+        self.dlg.title(f"业务配对关系中心 - [{db_tag}] (基于 app 表 More 字段配置)")
         self.dlg.geometry("900x540")
         self.dlg.minsize(740, 420)
         # 为什么同时调用 transient 与 grab_set：
@@ -153,7 +159,7 @@ class PairingDialog:
         self.rules: List[PairingRule] = []
         self._load_error: Optional[str] = None
         try:
-            engine = HemsPairingEngine(self.app.db_path)
+            engine = HemsPairingEngine(self.db_path)
             self.rules = engine.load_rules()
         except Exception as e:
             self._load_error = str(e)

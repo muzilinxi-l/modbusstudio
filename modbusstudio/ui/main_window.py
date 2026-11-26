@@ -368,6 +368,9 @@ class MainWindow(ttk.Frame):
         btn_export = ttk.Button(tool_frame, text="导出CSV", style="Small.TButton", command=self._export_log_to_csv)
         btn_export.pack(side="left", padx=2)
 
+        btn_history = ttk.Button(tool_frame, text="历史查询", style="Small.TButton", command=self._open_log_query_dialog)
+        btn_history.pack(side="left", padx=2)
+
         btn_dir = ttk.Button(tool_frame, text="日志目录", style="Small.TButton", command=self._open_log_dir)
         btn_dir.pack(side="left", padx=2)
 
@@ -375,10 +378,25 @@ class MainWindow(ttk.Frame):
         chk_scroll = ttk.Checkbutton(tool_frame, text="自动滚屏", variable=self.auto_scroll_var)
         chk_scroll.pack(side="left", padx=6)
 
-        # 允许用户在排查系统事件时临时关闭高频 RX/TX 问询报文刷屏
+        # 允许用户在排查系统事件或压测时临时关闭高频 RX/TX 问询报文刷屏与 SQLite 落盘
         self.show_traffic_var = tk.BooleanVar(value=True)
-        chk_traffic = ttk.Checkbutton(tool_frame, text="显示问询与响应报文", variable=self.show_traffic_var)
+        chk_traffic = ttk.Checkbutton(
+            tool_frame,
+            text="显示问询与响应报文",
+            variable=self.show_traffic_var,
+            command=self._sync_traffic_log_options,
+        )
         chk_traffic.pack(side="left", padx=4)
+
+        self.db_traffic_var = tk.BooleanVar(value=True)
+        chk_db_traffic = ttk.Checkbutton(
+            tool_frame,
+            text="报文落盘DB",
+            variable=self.db_traffic_var,
+            command=self._sync_traffic_log_options,
+        )
+        chk_db_traffic.pack(side="left", padx=4)
+        self._sync_traffic_log_options()
 
         # 文本框与垂直滚动条容器
         text_frame = ttk.Frame(parent)
@@ -414,14 +432,24 @@ class MainWindow(ttk.Frame):
         # 完整历史报文已由 LoggingService 实时刷盘到 logs/ 目录下的 CSV 文件中，UI 仅需保留最近 1500 行滑动窗口。
         self._max_log_lines = 1500  # 最大内存保留行数，超限自动修剪，防止内存泄漏和卡顿
 
+    def _sync_traffic_log_options(self) -> None:
+        """将界面上的报文显示与 SQLite 落盘开关同步到底层 LoggingService，两项均关时引擎层直接短路。"""
+        if hasattr(self.app, "logging_service") and hasattr(self.app.logging_service, "set_traffic_options"):
+            self.app.logging_service.set_traffic_options(
+                ui_enabled=bool(self.show_traffic_var.get()),
+                db_enabled=bool(self.db_traffic_var.get()),
+            )
+
     def _flush_log_loop(self) -> None:
-        """主线程定时（每 80ms）从日志队列批量拉取最多 200 条记录合并写入文本框并执行超限裁剪。"""
+        """主线程定时从日志队列批量拉取最多 200 条记录写入文本框（有日志 80ms，空闲自适应降频至 250ms）。"""
         self._log_after_id = None
         if self._destroyed:
             return
+        next_delay_ms = 250
         try:
             entries: List[LogEntry] = self.app.logging_service.drain_batch(max_count=200)
             if entries:
+                next_delay_ms = 80
                 show_traffic = self.show_traffic_var.get()
                 self.log_text.config(state="normal")
                 try:
@@ -452,11 +480,11 @@ class MainWindow(ttk.Frame):
         except Exception:
             pass
         finally:
-            # 仅在窗口与组件仍然存活时续挂 80ms 定时循环，防止窗口销毁后抛 TclError
+            # 仅在窗口与组件仍然存活时续挂定时循环，防止窗口销毁后抛 TclError
             if not self._destroyed:
                 try:
                     if hasattr(self, "winfo_exists") and self.winfo_exists() and self.root.winfo_exists():
-                        self._log_after_id = self.root.after(80, self._flush_log_loop)
+                        self._log_after_id = self.root.after(next_delay_ms, self._flush_log_loop)
                 except Exception:
                     self._log_after_id = None
 
@@ -486,6 +514,11 @@ class MainWindow(ttk.Frame):
         self.log_text.config(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.config(state="disabled")
+
+    def _open_log_query_dialog(self) -> None:
+        """打开按日 SQLite 历史日志条件查询与筛选导出弹窗。"""
+        from .dialogs import LogQueryDialog
+        LogQueryDialog(parent=self, app=self.app)
 
     def _open_log_dir(self) -> None:
         """调用操作系统文件资源管理器打开磁盘通信日志归档目录 (`logs/`)。"""

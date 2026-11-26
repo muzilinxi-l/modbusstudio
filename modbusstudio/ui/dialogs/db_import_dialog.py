@@ -77,7 +77,13 @@ class DbImportDialog:
 
         # 创建模态 Toplevel 窗口，设置默认尺寸 (1060x700) 与最小尺寸 (960x580)，允许用户自由拉伸
         self.dlg = tk.Toplevel(parent)
-        self.dlg.title("从业务数据库导入设备模型与点表 (支持多选批量导入)")
+        db_tag = (
+            self.app.get_db_label(self.app.db_path)
+            if hasattr(self.app, "get_db_label") and getattr(self.app, "db_path", None)
+            else os.path.basename(self.app.db_path or "")
+        )
+        title_suffix = f" - [{db_tag}]" if db_tag else ""
+        self.dlg.title(f"从业务数据库导入设备模型与点表{title_suffix} (支持多选批量导入)")
         self.dlg.geometry("1060x700")
         self.dlg.minsize(960, 580)
         self.dlg.resizable(True, True)
@@ -670,12 +676,67 @@ class DbImportDialog:
         failed_devices: List[str] = []
         total_points_imported = 0
         existing_devices = slave_svc.get_devices()
-        # [H2] 维护已占用的 TCP 端口集合（含已有从机与活跃 Hub 监听），从 502 起步探测避免撞车
-        used_tcp_ports = set(slave_svc.get_occupied_tcp_ports())
+        # 收集已有从机的 TCP 端口占用信息（端口 -> 已有设备列表），用于精确检测跨库/同IP端口冲突
+        existing_tcp_by_port: Dict[int, List[SlaveDevice]] = {}
+        for dev in existing_devices:
+            if dev.conn_config and dev.conn_config.comm_type == CommType.TCP:
+                existing_tcp_by_port.setdefault(int(dev.conn_config.port), []).append(dev)
 
-        # 为什么维护 used_endpoint_units `Set[Tuple[str, int]]`：
-        # 同一 RS-485 总线（如 RS-485(A1/B1)）或同一 TCP 端口下可能挂载多台设备；
-        # 若数据库中未配站号或两台设备站号意外重号，自动顺延寻找当前端点下最小未占用的站号 `cand`，确保后续“全部启动”零冲突。
+        used_tcp_ports = set(slave_svc.get_occupied_tcp_ports())
+        get_db_label = getattr(self.app, "get_db_label", None)
+        cur_db_norm = os.path.normcase(os.path.abspath(self.app.db_path)) if getattr(self.app, "db_path", None) else ""
+
+        # 预检拟导入 TCP 设备与已有从机的端口号冲突：保留同库同端口多站，对跨库/同端点冲突显式弹窗提示
+        port_conflicts: List[str] = []
+        for sel_app, _, _, _, _, _ in apps_data_list:
+            if str(sel_app.comm_type).upper() == "RTU":
+                continue
+            app_port = getattr(sel_app, "port", None)
+            try:
+                p_val = int(app_port) if app_port is not None else None
+            except Exception:
+                p_val = None
+            if p_val is None or not (1 <= p_val <= 65535):
+                continue
+            holders = existing_tcp_by_port.get(p_val, [])
+            if not holders:
+                continue
+            ip_addr = str(getattr(sel_app, "ip", "127.0.0.1") or "127.0.0.1").strip()
+            db_uid_raw = getattr(sel_app, "slave_id", None)
+            try:
+                db_uid = int(str(db_uid_raw).strip()) if db_uid_raw not in (None, "") else 1
+            except Exception:
+                db_uid = 1
+            for h in holders:
+                h_db_norm = os.path.normcase(os.path.abspath(h.db_file)) if getattr(h, "db_file", None) else ""
+                same_ip = (
+                    h.conn_config.host == ip_addr
+                    or ip_addr in ("0.0.0.0", "", "*")
+                    or h.conn_config.host in ("0.0.0.0", "", "*")
+                )
+                # 跨库同端口，或同IP同端口同站号 -> 视为冲突并明确向用户告警
+                if (cur_db_norm and h_db_norm and cur_db_norm != h_db_norm) or (same_ip and h.conn_config.unit_id == db_uid):
+                    h_db_tag = get_db_label(h.db_file) if (callable(get_db_label) and h.db_file) else "已有从机"
+                    disp = sel_app.chinese_name or sel_app.english_name
+                    port_conflicts.append(
+                        f"• 新设备 [{disp}] ({ip_addr}:{p_val}, ID:{db_uid}) 与 [{h_db_tag}] 的 [{h.name}] ({h.conn_config.host}:{h.conn_config.port}, ID:{h.conn_config.unit_id}) 端口冲突"
+                    )
+                    break
+
+        if port_conflicts:
+            preview = "\n".join(port_conflicts[:8])
+            if len(port_conflicts) > 8:
+                preview += f"\n... 等共 {len(port_conflicts)} 处冲突"
+            proceed = messagebox.askyesno(
+                "检测到数据库端口号冲突",
+                f"拟导入的数据库与现有从机存在以下 TCP 端口号冲突：\n\n{preview}\n\n"
+                "• 点击【是】：继续导入（冲突设备将自动分配新的空闲端口，不会覆盖已有从机）\n"
+                "• 点击【否】：取消本次导入，便于你检查数据库端口配置",
+                parent=self.dlg,
+            )
+            if not proceed:
+                return
+
         used_endpoint_units = set()
         for dev in existing_devices:
             cfg_e = dev.conn_config
@@ -751,7 +812,7 @@ class DbImportDialog:
                 com_name = str(s_info.get("port_name", ui_com or "COM1") or ui_com or "COM1")
 
             ip_addr = getattr(sel_app, "ip", "127.0.0.1") or "127.0.0.1"
-            # [H2] 端口计算：对于 TCP 从机，自动探测未被占用的端口，避免与已有从机/Hub或同批导入设备冲突
+            # 端口分配：保留同库同端口多站复用；仅在跨库冲突或未配置合法端口时自动顺延空闲端口
             if comm_mode == CommType.TCP:
                 app_port = getattr(sel_app, "port", None)
                 parsed_app_port = None
@@ -763,8 +824,26 @@ class DbImportDialog:
                 except Exception:
                     pass
 
-                # 若数据库显式配置了端口且当前未被占用，则优先使用该端口；否则自动寻找下一个未占用的端口
-                if parsed_app_port is not None and parsed_app_port not in used_tcp_ports:
+                db_unit_preview = getattr(sel_app, "slave_id", None)
+                try:
+                    uid_pre = int(str(db_unit_preview).strip()) if db_unit_preview not in (None, "") else 1
+                except Exception:
+                    uid_pre = 1
+
+                port_has_conflict = False
+                if parsed_app_port is not None:
+                    for h in existing_tcp_by_port.get(parsed_app_port, []):
+                        h_db_norm = os.path.normcase(os.path.abspath(h.db_file)) if getattr(h, "db_file", None) else ""
+                        same_ip = (
+                            h.conn_config.host == ip_addr
+                            or ip_addr in ("0.0.0.0", "", "*")
+                            or h.conn_config.host in ("0.0.0.0", "", "*")
+                        )
+                        if (cur_db_norm and h_db_norm and cur_db_norm != h_db_norm) or (same_ip and h.conn_config.unit_id == uid_pre):
+                            port_has_conflict = True
+                            break
+
+                if parsed_app_port is not None and not port_has_conflict:
                     port_num = parsed_app_port
                 else:
                     cand_port = 502
@@ -884,12 +963,25 @@ class DbImportDialog:
             messagebox.showerror("错误", f"未找到当前从机实例: {self.current_device_id}", parent=self.dlg)
             return
 
-        # 若为覆盖替换模式，先校验所选设备至少包含 1 个待导入点位，避免空点表误清空现有点表
+        # 若为覆盖替换模式，先校验所选设备至少包含 1 个待导入点位，并对跨数据库覆写进行二次确认
         if is_replace:
             total_incoming = sum(len(points_data) for (_, points_data, _, _, _, _) in apps_data_list)
             if total_incoming == 0:
                 messagebox.showwarning("提示", "所选设备无任何可导入点位，已取消覆盖替换以保护现有点表！", parent=self.dlg)
                 return
+            cur_db_norm = os.path.normcase(os.path.abspath(self.app.db_path)) if getattr(self.app, "db_path", None) else ""
+            tgt_db_norm = os.path.normcase(os.path.abspath(target_dev.db_file)) if getattr(target_dev, "db_file", None) else ""
+            if cur_db_norm and tgt_db_norm and cur_db_norm != tgt_db_norm:
+                get_lbl = getattr(self.app, "get_db_label", None)
+                tgt_lbl = get_lbl(target_dev.db_file) if callable(get_lbl) else os.path.basename(target_dev.db_file)
+                if not messagebox.askyesno(
+                    "跨数据库覆盖确认",
+                    f"当前选中的从机 [{target_dev.name}] 来自另一个数据库 [{tgt_lbl}]！\n"
+                    "【覆盖替换】会清空该从机的原有点表。若希望保留原从机，请取消后改选【新建为独立从机实例】。\n\n"
+                    "确定要覆盖替换吗？",
+                    parent=self.dlg,
+                ):
+                    return
             target_dev.points.clear()
             slave_svc.clear_runtime_points(target_dev.id)
             names = [sel_app.chinese_name or sel_app.english_name for (sel_app, _, _, _, _, _) in apps_data_list]
